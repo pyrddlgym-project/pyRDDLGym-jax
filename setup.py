@@ -25,8 +25,6 @@ setup(
       url="https://github.com/pyrddlgym-project/pyRDDLGym-jax",
       packages=find_packages(),
       install_requires=[
-          'numpy>=1.24.3',
-          'matplotlib>=3.8.2',
           'pyRDDLGym>=2.0.0',
           'tqdm>=4.66',
           'bayesian-optimization>=1.4.3',
