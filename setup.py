@@ -25,7 +25,7 @@ setup(
       url="https://github.com/pyrddlgym-project/pyRDDLGym-jax",
       packages=find_packages(),
       install_requires=[
-          'pyRDDLGym>=2.0.0',
+          'pyRDDLGym>=2.0',
           'tqdm>=4.66',
           'bayesian-optimization>=1.4.3',
           'jax>=0.4.12',
