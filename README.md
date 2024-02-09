@@ -92,7 +92,7 @@ After several minutes of optimization, you should get a visualization as follows
 ## Writing a Configuration File for a Custom Domain
 
 The simplest way to interface with the Planner for solving a custom problem is to write a configuration file with all the necessary hyper-parameters.
-The basic structure of a configuration file is provided below:
+The basic structure of a configuration file is provided below for a straight line planning/MPC style planner:
 
 ```ini
 [Model]
@@ -120,6 +120,18 @@ The configuration file contains three sections:
 and ``tnorm`` specifies the type of [fuzzy logic](https://en.wikipedia.org/wiki/T-norm_fuzzy_logics) for relacing logical operations in RDDL (e.g. ``ProductTNorm``, ``GodelTNorm``, ``LukasiewiczTNorm``)
 - ``[Optimizer]`` generally specify the optimizer and plan settings, the ``method`` specifies the plan/policy representation (e.g. ``JaxStraightLinePlan``, ``JaxDeepReactivePolicy``), the SGD optimizer to use from optax, learning rate, batch size, etc.
 - ``[Training]`` specifies how long training should proceed, the ``epochs`` limits the total number of iterations, while ``train_seconds`` limits total training time
+
+For a policy network approach, simply change the configuration file like so:
+
+```ini
+...
+[Optimizer]
+method='JaxDeepReactivePolicy'
+method_kwargs={'topology': [128, 64]}
+...
+```
+
+which would create a policy network with two hidden layers and ReLU activations.
 
 The configuration file can then be passed to the planner during initialization. For example, the following is a complete worked example for running any domain and user provided config file:
 
