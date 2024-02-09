@@ -3,8 +3,8 @@
 Author: [Mike Gimelfarb](https://mike-gimelfarb.github.io)
 
 This directory provides:
-1. automated translation and compilation of RDDL description files into the JAX auto-diff library, which allows any RDDL domain to be converted to a differentiable simulator!
-2. a powerful gradient-based planning algorithm, with extendible and flexible policy class representations, automatic discrete model relaxations, and much more!
+1. automated translation and compilation of RDDL description files into the [JAX](https://github.com/google/jax) auto-diff library, which allows any RDDL domain to be converted to a differentiable simulator!
+2. powerful, fast, and very scalable gradient-based planning algorithms, with extendible and flexible policy class representations, automatic model relaxations for working in discrete and hybrid domains, and much more!
 
 ## Installation
 
@@ -58,6 +58,11 @@ where:
 - ``method`` is the planning method to use (i.e. drp, slp, replan)
 - ``episodes`` is the number of episodes to evaluate the learned policy
 
+The ``method`` parameter warrants further explanation. Currently we support three possible modes:
+- ``slp`` is the basic straight line planner described [in this paper](https://proceedings.neurips.cc/paper_files/paper/2017/file/98b17f068d5d9b7668e19fb8ae470841-Paper.pdf)
+- ``drp`` is the deep reactive policy network described [in this paper](https://ojs.aaai.org/index.php/AAAI/article/view/4744)
+- ``replan`` is the same as ``slp`` except the plan is recalculated at every decision time step.
+   
 A basic run script is also provided to run the automatic hyper-parameter tuning. The structure of this stript is similar to the one above
 
 ```shell
@@ -84,9 +89,9 @@ After several minutes of optimization, you should get a visualization as follows
 <img src="Images/quadcopter.gif" width="400" height="400" margin=1/>
 </p>
 
-## Writing a Configuration File
+## Writing a Configuration File for a Custom Domain
 
-The simplest way to interface with the Planner is to write a configuration file with all the necessary hyper-parameters.
+The simplest way to interface with the Planner for solving a custom problem is to write a configuration file with all the necessary hyper-parameters.
 The basic structure of a configuration file is provided below:
 
 ```ini
@@ -158,3 +163,39 @@ agent.evaluate(env, verbose=True, render=True)
 For some domains, the JAX backend could perform better than the numpy-based one, due to various compiler optimizations. 
 In any event, the simulation results using the JAX backend should match exactly those of the numpy-based backend.
 
+## Using the Jax Compiler Backend to Compute Gradients
+
+For custom applications, it is desirable to compute gradients of the model that can be optimized downstream. Fortunately, we provide a very convenient function for compiling the transition/step function ``P(s, a, s')`` of the environment into JAX.
+
+```python
+import pyRDDLGym
+from pyRDDLGym_jax.core.planner import load_config, JaxRDDLCompilerWithGrad
+
+# set up the environment
+env = pyRDDLGym.make(domain, instance, vectorized=True)
+
+# create the step function
+compiled = JaxRDDLCompilerWithGrad(rddl=env.model)
+compiled.compile()
+step_fn = compiled.compile_transition()
+```
+
+This will return a JAX compiled (pure) function that requires 4 arguments:
+- ``key`` is the ``jax.random.PRNGKey`` key for reproducible randomness
+- ``actions`` is the dictionary of action fluent JAX tensors
+- ``subs`` is the dictionary of state-fluent and non-fluent JAX tensors
+- ``model_params`` are the parameters of the differentiable relaxations, such as ``weight``
+- 
+The function returns a dictionary containing a variety of variables, such as updated pvariables including next-state fluents (``pvar``), reward obtained (``reward``), error codes (``error``).
+It is thus possible to apply any JAX transformation to the output of the function, such as computing gradient of the reward for instance:
+
+```python
+import jax
+
+# gradient of the reward with respect to actions
+def rewards(*args):
+    return step_fn(*args)["reward"]
+grad_fn = jax.grad(rewards, argnums=1)
+
+print(grad_fn(...))
+```
