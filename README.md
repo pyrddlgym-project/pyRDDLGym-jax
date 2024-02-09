@@ -6,6 +6,15 @@ This directory provides:
 1. automated translation and compilation of RDDL description files into the [JAX](https://github.com/google/jax) auto-diff library, which allows any RDDL domain to be converted to a differentiable simulator!
 2. powerful, fast, and very scalable gradient-based planning algorithms, with extendible and flexible policy class representations, automatic model relaxations for working in discrete and hybrid domains, and much more!
 
+## Contents
+
+- [Installation](#installation)
+- [Running the Basic Examples](#running-the-basic-examples)
+- [Writing a Configuration File for a Custom Domain](#writing-a-configuration-file-for-a-custom-domain)
+- [Changing the pyRDDLGym Simulation Backend to JAX](#changing-the-pyrddlgym-simulation-backend-to-jax)
+- [Computing the Model Gradients Manually](#computing-the-model-gradients-manually)
+- [Citing pyRDDLGym-jax](#citing-pyrddlgym-jax)
+  
 ## Installation
 
 To use the compiler or planner without the automated hyper-parameter tuning, you will need the following packages installed: 
@@ -214,7 +223,7 @@ print(grad_fn(...))
 
 It is also straightforward to perform batched simulation from the model by using ``jax.vmap(...)``.
 
-## Citation
+## Citing pyRDDLGym-jax
 
 The main ideas of this approach are discussed in the following preprint:
 
