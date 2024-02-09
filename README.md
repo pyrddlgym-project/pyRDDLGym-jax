@@ -21,7 +21,7 @@ Additionally, if you wish to run the automated tuning optimization, you will als
 
 You can install this package, together with all of its requirements as follows
 
-```console
+```shell
 # Create a new conda environment
 conda create -n jaxplan
 conda activate jaxplan
@@ -48,7 +48,7 @@ A pip installer will be coming soon.
 A basic run script is provided to run the Jax Planner on any domain in ``rddlrepository``, provided a config file is available (currently, only a limited subset of configs are provided as examples).
 The example can be run as follows in a standard shell:
 
-```console
+```shell
 python -m pyRDDLGym_jax.examples.run_plan <domain> <instance> <method> [<episodes>]
 ```
 
@@ -60,7 +60,7 @@ where:
 
 A basic run script is also provided to run the automatic hyper-parameter tuning. The structure of this stript is similar to the one above
 
-```console
+```shell
 python -m pyRDDLGym_jax.examples.run_tune <domain> <instance> <method> [<trials>] [<iters>] [<workers>]
 ```
 
@@ -74,7 +74,7 @@ where:
 
 For example, copy and pasting the following will train the Jax Planner on the Quadcopter domain with 4 drones:
 
-```console
+```shell
 python -m pyRDDLGym_jax.examples.run_plan Quadcopter 1 slp
 ```
 
