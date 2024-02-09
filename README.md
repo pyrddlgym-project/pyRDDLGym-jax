@@ -142,7 +142,7 @@ controller = JaxOfflineController(planner, **train_args)
 controller.evaluate(env, verbose=True, render=True)
 ```
 
-## Using the JAX Compiler as a Simulator
+## Changing the pyRDDLGym environment simulator backend to JAX
 
 The JAX compiler can be used as a backend for simulating and evaluating RDDL environments, instead of the usual pyRDDLGym one:
 
@@ -163,7 +163,7 @@ agent.evaluate(env, verbose=True, render=True)
 For some domains, the JAX backend could perform better than the numpy-based one, due to various compiler optimizations. 
 In any event, the simulation results using the JAX backend should match exactly those of the numpy-based backend.
 
-## Using the Jax Compiler Backend to Compute Gradients
+## Computing the Model Gradients Manually
 
 For custom applications, it is desirable to compute gradients of the model that can be optimized downstream. Fortunately, we provide a very convenient function for compiling the transition/step function ``P(s, a, s')`` of the environment into JAX.
 
