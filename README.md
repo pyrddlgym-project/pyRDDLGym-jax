@@ -142,7 +142,7 @@ controller = JaxOfflineController(planner, **train_args)
 controller.evaluate(env, verbose=True, render=True)
 ```
 
-## Changing the pyRDDLGym environment simulator backend to JAX
+## Changing the pyRDDLGym Simulation Backend to JAX
 
 The JAX compiler can be used as a backend for simulating and evaluating RDDL environments, instead of the usual pyRDDLGym one:
 
