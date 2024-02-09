@@ -89,7 +89,7 @@ After several minutes of optimization, you should get a visualization as follows
 The simplest way to interface with the Planner is to write a configuration file with all the necessary hyper-parameters.
 The basic structure of a configuration file is provided below:
 
-```
+```ini
 [Model]
 logic='FuzzyLogic'
 logic_kwargs={'weight': 20}
