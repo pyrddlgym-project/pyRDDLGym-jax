@@ -213,3 +213,22 @@ print(grad_fn(...))
 ```
 
 It is also straightforward to perform batched simulation from the model by using ``jax.vmap(...)``.
+
+## Citation
+
+The main ideas of this approach are discussed in the following preprint:
+
+```
+@article{taitler2022pyrddlgym,
+      title={pyRDDLGym: From RDDL to Gym Environments},
+      author={Taitler, Ayal and Gimelfarb, Michael and Gopalakrishnan, Sriram and Mladenov, Martin and Liu, Xiaotian and Sanner, Scott},
+      journal={arXiv preprint arXiv:2211.05939},
+      year={2022}
+}
+```
+
+Many of the implementation details discussed come from the following literature, which you may wish to cite in your research papers:
+- [A Distributional Framework for Risk-Sensitive End-to-End Planning in Continuous MDP, AAAI 2022](https://ojs.aaai.org/index.php/AAAI/article/view/21226)
+- [Deep reactive policies for planning in stochastic nonlinear domains, AAAI 2019](https://ojs.aaai.org/index.php/AAAI/article/view/4744)
+- [Scalable planning with tensorflow for hybrid nonlinear domains, NeurIPS 2017](https://proceedings.neurips.cc/paper/2017/file/98b17f068d5d9b7668e19fb8ae470841-Paper.pdf)
+
