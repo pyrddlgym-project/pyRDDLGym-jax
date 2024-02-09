@@ -199,3 +199,5 @@ grad_fn = jax.grad(rewards, argnums=1)
 
 print(grad_fn(...))
 ```
+
+It is also straightforward to perform batched simulation from the model by using ``jax.vmap(...)``.
