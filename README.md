@@ -222,6 +222,7 @@ print(grad_fn(...))
 ```
 
 It is also straightforward to perform batched simulation from the model by using ``jax.vmap(...)``.
+Compilation of entire rollouts is possible by calling the ``compile_rollouts`` function, providing a policy implementation on which the rollouts will depend on. This allows the calculation of gradients of the policy parameters with respect to rewards, which is the workhorse of the JAX planner.
 
 ## Citing pyRDDLGym-jax
 
