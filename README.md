@@ -168,7 +168,6 @@ The configuration file can then be passed to the planner during initialization. 
 from pyRDDLGym_jax.core.planner import load_config
 
 # load the config file with planner settings
-abs_path = os.path.dirname(os.path.abspath(__file__))
 planner_args, _, train_args = load_config("/path/to/config.cfg")
     
 # create the planning algorithm
