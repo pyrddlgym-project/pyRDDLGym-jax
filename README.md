@@ -207,7 +207,7 @@ For custom applications, it is desirable to compute gradients of the model that 
 
 ```python
 import pyRDDLGym
-from pyRDDLGym_jax.core.planner import load_config, JaxRDDLCompilerWithGrad
+from pyRDDLGym_jax.core.planner import JaxRDDLCompilerWithGrad
 
 # set up the environment
 env = pyRDDLGym.make("domain", "instance", vectorized=True)
