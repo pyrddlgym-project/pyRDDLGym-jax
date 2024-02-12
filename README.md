@@ -102,7 +102,7 @@ import pyRDDLGym
 from pyRDDLGym_jax.core.planner import JaxBackpropPlanner, JaxOfflineController
 
 # set up the environment (note the vectorized option must be True)
-env = pyRDDLGym.make(domain, instance, vectorized=True)
+env = pyRDDLGym.make("domain", "instance", vectorized=True)
 
 # create the planning algorithm
 planner = JaxBackpropPlanner(rddl=env.model, **planner_args)
@@ -207,7 +207,7 @@ import pyRDDLGym
 from pyRDDLGym_jax.core.planner import load_config, JaxRDDLCompilerWithGrad
 
 # set up the environment
-env = pyRDDLGym.make(domain, instance, vectorized=True)
+env = pyRDDLGym.make("domain", "instance", vectorized=True)
 
 # create the step function
 compiled = JaxRDDLCompilerWithGrad(rddl=env.model)
