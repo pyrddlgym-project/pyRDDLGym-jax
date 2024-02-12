@@ -52,14 +52,14 @@ A basic run script is provided to run the Jax Planner on any domain in ``rddlrep
 The example can be run as follows in a standard shell, from the install directory of pyRDDLGym-jax:
 
 ```shell
-python -m pyRDDLGym_jax.examples.run_plan <domain> <instance> <method> [<episodes>]
+python -m pyRDDLGym_jax.examples.run_plan <domain> <instance> <method> <episodes>
 ```
 
 where:
 - ``domain`` is the domain identifier as specified in rddlrepository (i.e. Wildfire_MDP_ippc2014)
 - ``instance`` is the instance identifier (i.e. 1, 2, ... 10)
 - ``method`` is the planning method to use (i.e. drp, slp, replan)
-- ``episodes`` is the number of episodes to evaluate the learned policy
+- ``episodes`` is the (optional) number of episodes to evaluate the learned policy
 
 The ``method`` parameter warrants further explanation. Currently we support three possible modes:
 - ``slp`` is the basic straight line planner described [in this paper](https://proceedings.neurips.cc/paper_files/paper/2017/file/98b17f068d5d9b7668e19fb8ae470841-Paper.pdf)
@@ -69,16 +69,16 @@ The ``method`` parameter warrants further explanation. Currently we support thre
 A basic run script is also provided to run the automatic hyper-parameter tuning. The structure of this stript is similar to the one above
 
 ```shell
-python -m pyRDDLGym_jax.examples.run_tune <domain> <instance> <method> [<trials>] [<iters>] [<workers>]
+python -m pyRDDLGym_jax.examples.run_tune <domain> <instance> <method> <trials> <iters> <workers>
 ```
 
 where:
 - ``domain`` is the domain identifier as specified in rddlrepository (i.e. Wildfire_MDP_ippc2014)
 - ``instance`` is the instance identifier (i.e. 1, 2, ... 10)
 - ``method`` is the planning method to use (i.e. drp, slp, replan)
-- ``trials`` is the number of trials/episodes to average in evaluating each hyper-parameter setting
-- ``iters`` is the maximum number of iterations/evaluations of Bayesian optimization to perform
-- ``workers`` is the number of parallel evaluations to be done at each iteration, e.g. the total evaluations = ``iters * workers``
+- ``trials`` is the (optional) number of trials/episodes to average in evaluating each hyper-parameter setting
+- ``iters`` is the (optional) maximum number of iterations/evaluations of Bayesian optimization to perform
+- ``workers`` is the (optional) number of parallel evaluations to be done at each iteration, e.g. the total evaluations = ``iters * workers``
 
 For example, copy and pasting the following will train the Jax Planner on the Quadcopter domain with 4 drones:
 
