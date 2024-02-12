@@ -56,8 +56,8 @@ python -m pyRDDLGym_jax.examples.run_plan <domain> <instance> <method> <episodes
 ```
 
 where:
-- ``domain`` is the domain identifier as specified in rddlrepository (i.e. Wildfire_MDP_ippc2014)
-- ``instance`` is the instance identifier (i.e. 1, 2, ... 10)
+- ``domain`` is the domain identifier as specified in rddlrepository (i.e. Wildfire_MDP_ippc2014), or a path pointing to a valid ``domain.rddl`` file
+- ``instance`` is the instance identifier (i.e. 1, 2, ... 10), or a path pointing to a valid ``instance.rddl`` file
 - ``method`` is the planning method to use (i.e. drp, slp, replan)
 - ``episodes`` is the (optional) number of episodes to evaluate the learned policy
 
