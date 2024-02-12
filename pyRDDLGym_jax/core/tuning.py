@@ -10,6 +10,9 @@ import os
 import time
 from typing import Callable, Dict, Tuple
 
+import warnings
+warnings.filterwarnings("ignore")
+
 from pyRDDLGym.core.debug.exception import raise_warning
 from pyRDDLGym.core.env import RDDLEnv
 
