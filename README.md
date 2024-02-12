@@ -18,7 +18,7 @@ This directory provides:
 ## Installation
 
 To use the compiler or planner without the automated hyper-parameter tuning, you will need the following packages installed: 
-- ``pyRDDLGym>=2.0.1``
+- ``pyRDDLGym>=2.0``
 - ``tqdm>=4.66``
 - ``jax>=0.4.12``
 - ``optax>=0.1.9``
@@ -26,28 +26,21 @@ To use the compiler or planner without the automated hyper-parameter tuning, you
 - ``tensorflow>=2.13.0``
 - ``tensorflow-probability>=0.21.0``
 
-Additionally, if you wish to run the automated tuning optimization, you will also need the ``bayesian-optimization>=1.4.3`` package.
+Additionally, if you wish to run the examples, you need ``rddlrepository>=2``, and run the automated tuning optimization, you will also need ``bayesian-optimization>=1.4.3``.
 
 You can install this package, together with all of its requirements as follows
 
 ```shell
 # Create a new conda environment
-conda create -n jaxplan
+conda create -n jaxplan python=3.11
 conda activate jaxplan
 
-# Manually install pyRDDLGym >= 2.0.1
-cd ~/path/to/pyRDDLGym
-git checkout pyRDDLGym-v2-branch
-pip install -e .
-
-# Manually install rddlrepository >= 2
-cd ~/path/to/rddlrepository
-git checkout rddlrepository-v2-branch
-pip install -e .
+# Manually install pyRDDLGym and rddlrepository
+pip install git+https://github.com/pyrddlgym-project/pyRDDLGym
+pip install git+https://github.com/pyrddlgym-project/rddlrepository
 
 # Install pyRDDLGym-jax
-cd ~/path/to/pyRDDLGym-jax
-pip install -e .
+pip install git+https://github.com/pyrddlgym-project/pyRDDLGym-jax
 ```
 
 A pip installer will be coming soon.
@@ -55,7 +48,7 @@ A pip installer will be coming soon.
 ## Running the Basic Examples
 
 A basic run script is provided to run the Jax Planner on any domain in ``rddlrepository``, provided a config file is available (currently, only a limited subset of configs are provided as examples).
-The example can be run as follows in a standard shell:
+The example can be run as follows in a standard shell, from the install directory of pyRDDLGym-jax:
 
 ```shell
 python -m pyRDDLGym_jax.examples.run_plan <domain> <instance> <method> [<episodes>]
