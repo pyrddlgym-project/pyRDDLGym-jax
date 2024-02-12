@@ -10,6 +10,7 @@ This directory provides:
 
 - [Installation](#installation)
 - [Running the Basic Examples](#running-the-basic-examples)
+- [Running from the Python API](#running-from-the-python-api)
 - [Writing a Configuration File for a Custom Domain](#writing-a-configuration-file-for-a-custom-domain)
 - [Changing the pyRDDLGym Simulation Backend to JAX](#changing-the-pyrddlgym-simulation-backend-to-jax)
 - [Computing the Model Gradients Manually](#computing-the-model-gradients-manually)
@@ -92,6 +93,31 @@ After several minutes of optimization, you should get a visualization as follows
 <img src="Images/quadcopter.gif" width="400" height="400" margin=1/>
 </p>
 
+## Running from the Python API
+
+You can write a simple script to instantiate and run the planner yourself, if you wish:
+
+```python
+import pyRDDLGym
+from pyRDDLGym_jax.core.planner import JaxBackpropPlanner, JaxOfflineController
+
+# set up the environment (note the vectorized option must be True)
+env = pyRDDLGym.make(domain, instance, vectorized=True)
+
+# create the planning algorithm
+planner = JaxBackpropPlanner(rddl=env.model, **planner_args)
+controller = JaxOfflineController(planner, **train_args)
+
+# evaluate the planner
+controller.evaluate(env, episodes=1, verbose=True, render=True)
+
+env.close()
+```
+
+Here, we have used the straight-line (offline) controller, although you can configure the combination of planner and policy representation. 
+All controllers are instances of pyRDDLGym's ``BaseAgent`` class, so they support the ``evaluate()`` function to streamline interaction with the environment.
+The ``**planner_args`` and ``**train_args`` are keyword argument parameters to pass during initialization, but we strongly recommend creating and loading a config file as discussed in the next section.
+
 ## Writing a Configuration File for a Custom Domain
 
 The simplest way to interface with the Planner for solving a custom problem is to write a configuration file with all the necessary hyper-parameters.
@@ -136,25 +162,19 @@ method_kwargs={'topology': [128, 64]}
 
 which would create a policy network with two hidden layers and ReLU activations.
 
-The configuration file can then be passed to the planner during initialization. For example, the following is a complete worked example for running any domain and user provided config file:
+The configuration file can then be passed to the planner during initialization. For example, the [previous script here](#running-from-the-python-api) can be modified to set parameters from a config file as follows:
 
 ```python
-import pyRDDLGym
-from pyRDDLGym_jax.core.planner import load_config, JaxBackpropPlanner, JaxOfflineController
+from pyRDDLGym_jax.core.planner import load_config
 
-# set up the environment (NOTE: vectorized must be True for jax planner)
-env = pyRDDLGym.make("domain", "instance", vectorized=True)
-    
 # load the config file with planner settings
 abs_path = os.path.dirname(os.path.abspath(__file__))
-planner_args, _, train_args = load_config("/path/to/config")
+planner_args, _, train_args = load_config("/path/to/config.cfg")
     
 # create the planning algorithm
 planner = JaxBackpropPlanner(rddl=env.model, **planner_args)
-    
-# create the controller   
 controller = JaxOfflineController(planner, **train_args)
-controller.evaluate(env, verbose=True, render=True)
+...
 ```
 
 ## Changing the pyRDDLGym Simulation Backend to JAX
