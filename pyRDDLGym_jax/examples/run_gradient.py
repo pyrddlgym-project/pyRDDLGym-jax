@@ -19,6 +19,9 @@ Setting:
         
     The example given uses p = 2, so it should be:
         return = 18, gradient = 8
+    
+    For p = 3, it should be:
+        return = 27, gradient = 10
 '''
 
 import os
