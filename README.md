@@ -225,21 +225,10 @@ This will return a JAX compiled (pure) function that requires 4 arguments:
 - ``model_params`` are the parameters of the differentiable relaxations, such as ``weight``
 - 
 The function returns a dictionary containing a variety of variables, such as updated pvariables including next-state fluents (``pvar``), reward obtained (``reward``), error codes (``error``).
-It is thus possible to apply any JAX transformation to the output of the function, such as computing gradient of the reward for instance:
+It is thus possible to apply any JAX transformation to the output of the function, such as computing gradient using ``jax.grad()`` or batched simulation using ``jax.vmap()``.
 
-```python
-import jax
-
-# gradient of the reward with respect to actions
-def rewards(*args):
-    return step_fn(*args)["reward"]
-grad_fn = jax.grad(rewards, argnums=1)
-
-print(grad_fn(...))
-```
-
-It is also straightforward to perform batched simulation from the model by using ``jax.vmap(...)``.
-Compilation of entire rollouts is possible by calling the ``compile_rollouts`` function, providing a policy implementation on which the rollouts will depend on. This allows the calculation of gradients of the policy parameters with respect to rewards, which is the workhorse of the JAX planner.
+Compilation of entire rollouts is possible by calling the ``compile_rollouts`` function, and providing a policy implementation that maps states (jax tensors) and tunable policy parameters to actions.
+An [example is provided to illustrate how you can define your own policy class and compute the return gradient manually](https://github.com/pyrddlgym-project/pyRDDLGym-jax/blob/main/pyRDDLGym_jax/examples/run_gradient.py).
 
 ## Citing pyRDDLGym-jax
 
