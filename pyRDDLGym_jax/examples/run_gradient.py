@@ -1,13 +1,26 @@
-'''In this example, the gradient of the step function is computed.
+'''In this simple example, gradient of the return for a simple MDP is computed.
 
-The syntax for running this example is:
-
-    python run_gradient.py <domain> <instance>
+Setting:
+    The policy is linear in the state:
+        action = p * state
+        
+    The state evolves as state' = state + action + 1, so for 3-step problem:
+        s0 = 0
+        s1 = s0 + p * s0 + 1 = 1
+        s2 = s1 + p * s1 + 1 = 2 + p
+        s3 = s2 + p * s2 + 1 = (1 + p) * (2 + p) + 1 = 3 + 3 * p + p ^ 2
     
-where:
-    <domain> is the name of a domain located in the /Examples directory
-    <instance> is the instance number
+    The total return is:
+        return = 1 + 2 + p + 3 + 3 * p + p ^ 2 
+                = 6 + 4 * p + p ^ 2
+    
+    The gradient of the return is:
+        gradient = 4 + 2 * p
+        
+    The example given uses p = 2, so it should be:
+        return = 18, gradient = 8
 '''
+
 import os
 import sys
 import jax
@@ -16,30 +29,71 @@ import pyRDDLGym
 
 from pyRDDLGym_jax.core.planner import JaxRDDLCompilerWithGrad
 
+# a simple domain with state' = state + action
+DOMAIN = """
+domain test {
+    pvariables {
+        nf : { non-fluent, real, default = 1.0 };
+        state : { state-fluent, real, default = 0.0 };
+        action : { action-fluent, real, default = 0.0 };
+    };
+    cpfs {
+        state' = state + action + nf;
+    };
+    reward = state';
+}
+"""
+
+INSTANCE = """
+non-fluents test_nf {
+    domain = test;
+}
+instance inst_test {
+    domain = test;
+    non-fluents = test_nf;
+    max-nondef-actions = pos-inf;
+    horizon  = 5;
+    discount = 1.0;
+}
+"""
+
+
+def main():
     
-def main(domain, instance):
+    # create the environment
+    abs_path = os.path.dirname(os.path.abspath(__file__))
+    with open(os.path.join(abs_path, 'domain.rddl'), 'w') as dom_file:
+        dom_file.write(DOMAIN)
+    with open(os.path.join(abs_path, 'instance.rddl'), 'w') as inst_file:
+        inst_file.write(INSTANCE)
     
-    # set up the environment
-    env = pyRDDLGym.make(domain, instance, vectorized=True)
+    env = pyRDDLGym.make(os.path.join(abs_path, 'domain.rddl'),
+                         os.path.join(abs_path, 'instance.rddl'))
     
-    # create the step function
-    compiled = JaxRDDLCompilerWithGrad(rddl=env.model)
-    compiled.compile()
-    step_fn = compiled.compile_transition()
+    # policy is slope * state
+    def policy(key, policy_params, hyperparams, step, states):
+        return {'action': policy_params['slope'] * states['state']}
     
-    # gradient of the reward with respect to actions
-    def rewards(*args):
-        return step_fn(*args)['reward']
+    # compile the return objective
+    compiler = JaxRDDLCompilerWithGrad(env.model)
+    compiler.compile()
+    step_fn = compiler.compile_rollouts(policy, 3, 1)
     
-    grad_fn = jax.grad(rewards, argnums=1)
-    print(grad_fn(jax.random.PRNGKey(42), compiled.init_values,
-                  compiled.init_values, compiled.model_params))
-        
-        
+    def sum_of_rewards(*args):
+        return jax.numpy.sum(step_fn(*args)['reward'])
+    
+    # prepare the arguments (note that batching requires new axis at index 0)
+    subs = {k: v[None, ...] for (k, v) in compiler.init_values.items()}
+    params = {'slope': 2.0}
+    my_args = [jax.random.PRNGKey(42), params, None, subs, compiler.model_params]
+    
+    # print the fluents over the trajectory, return and gradient
+    print(step_fn(*my_args)['pvar'])
+    print(sum_of_rewards(*my_args))
+    print(jax.grad(sum_of_rewards, argnums=1)(*my_args))
+    
+    env.close()
+
+
 if __name__ == "__main__":
-    args = sys.argv[1:]
-    if len(args) < 2:
-        print('python run_gradient.py <domain> <instance>')
-        exit(1)
-    main(args[0], args[1])
-    
+    main()
