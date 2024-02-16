@@ -33,23 +33,13 @@ To use the compiler or planner without the automated hyper-parameter tuning, you
 
 Additionally, if you wish to run the examples, you need ``rddlrepository>=2``, and run the automated tuning optimization, you will also need ``bayesian-optimization>=1.4.3``.
 
-You can install this package, together with all of its requirements as follows (assuming Anaconda):
+You can install this package, together with all of its requirements via pip:
 
 ```shell
-# Create a new conda environment
 conda create -n jaxplan python=3.11
 conda activate jaxplan
-conda install pip git
-
-# Manually install pyRDDLGym and rddlrepository
-pip install git+https://github.com/pyrddlgym-project/pyRDDLGym
-pip install git+https://github.com/pyrddlgym-project/rddlrepository
-
-# Install pyRDDLGym-jax
-pip install git+https://github.com/pyrddlgym-project/pyRDDLGym-jax
+pip install rddlrepository pyRDDLGym-jax
 ```
-
-A pip installer will be coming soon.
 
 ## Running the Basic Examples
 

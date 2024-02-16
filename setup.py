@@ -20,7 +20,7 @@ setup(
       version='0.1',
       author="Michael Gimelfarb, Ayal Taitler, Scott Sanner",
       author_email="mike.gimelfarb@mail.utoronto.ca, ataitler@gmail.com, ssanner@mie.utoronto.ca",
-      description="pyRDDLGym-jax: JAX compilation of RDDL description files, and a differentiable planner in JAX",
+      description="pyRDDLGym-jax: JAX compilation of RDDL description files, and a differentiable planner in JAX.",
       license="MIT License",
       url="https://github.com/pyrddlgym-project/pyRDDLGym-jax",
       packages=find_packages(),
