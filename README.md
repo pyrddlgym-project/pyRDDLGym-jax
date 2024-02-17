@@ -36,8 +36,6 @@ Additionally, if you wish to run the examples, you need ``rddlrepository>=2``, a
 You can install this package, together with all of its requirements via pip:
 
 ```shell
-conda create -n jaxplan python=3.11
-conda activate jaxplan
 pip install rddlrepository pyRDDLGym-jax
 ```
 
