@@ -1561,7 +1561,7 @@ class JaxRDDLCompiler:
     
     def _jax_discrete_pvar(self, expr, info, unnorm):
         ERR = JaxRDDLCompiler.ERROR_CODES['INVALID_PARAM_DISCRETE']
-        JaxRDDLCompiler._check_num_args(expr, 1)
+        JaxRDDLCompiler._check_num_args(expr, 2)
         jax_discrete, jax_param = self._unwrap(
             self._jax_discrete_helper(), expr.id, info)
         
