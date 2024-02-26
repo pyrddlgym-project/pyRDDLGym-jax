@@ -1205,6 +1205,21 @@ class JaxBackpropPlanner:
         start_time = time.time()
         elapsed_outside_loop = 0
         
+        # if policy_hyperparams is not provided
+        if policy_hyperparams is None:
+            raise_warning('policy_hyperparams is not set, setting 1.0 for '
+                          'all action-fluents (could be suboptimal).', 'red')
+            policy_hyperparams = {action: 1.0 
+                                  for action in self.rddl.action_fluents}
+        
+        # if policy_hyperparams is a scalar
+        elif isinstance(policy_hyperparams, (int, float, np.number)):
+            raise_warning(f'policy_hyperparams is {policy_hyperparams}, '
+                          'setting this value for all action-fluents.', 'red')
+            hyperparam_value = float(policy_hyperparams)
+            policy_hyperparams = {action: hyperparam_value
+                                  for action in self.rddl.action_fluents}
+            
         # print summary of parameters:
         if verbose >= 1:
             print('==============================================\n'
@@ -1324,6 +1339,9 @@ class JaxBackpropPlanner:
             
             # numerical error
             if not np.isfinite(train_loss):
+                raise_warning(
+                    f'Aborting optimization due to invalid train loss {train_loss}.',
+                    'red')
                 break
         
         if verbose >= 2:
@@ -1584,7 +1602,14 @@ class JaxArmijoLineSearchPlanner(JaxBackpropPlanner):
             
         return _jax_wrapped_plan_update
 
-        
+
+# ***********************************************************************
+# ALL VERSIONS OF CONTROLLERS
+# 
+# - offline controller is the straight-line planner
+# - online controller is the replanning mode
+#
+# ***********************************************************************
 class JaxOfflineController(BaseAgent):
     '''A container class for a Jax policy trained offline.'''
     use_tensor_obs = True
