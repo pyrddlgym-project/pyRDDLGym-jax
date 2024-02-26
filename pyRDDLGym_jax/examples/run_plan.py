@@ -18,6 +18,8 @@ import os
 import sys
 
 import pyRDDLGym
+from pyRDDLGym.core.debug.exception import raise_warning
+
 from pyRDDLGym_jax.core.planner import (
     load_config, JaxBackpropPlanner, JaxOfflineController, JaxOnlineController
 )
@@ -31,6 +33,11 @@ def main(domain, instance, method, episodes=1):
     # load the config file with planner settings
     abs_path = os.path.dirname(os.path.abspath(__file__))
     config_path = os.path.join(abs_path, 'configs', f'{domain}_{method}.cfg') 
+    if not os.path.isfile(config_path):
+        raise_warning(f'Config file {domain}_{method}.cfg was not found, '
+                      f'using default config (parameters could be suboptimal).', 
+                      'red')
+        config_path = os.path.join(abs_path, 'configs', f'default_{method}.cfg') 
     planner_args, _, train_args = load_config(config_path)
     
     # create the planning algorithm
