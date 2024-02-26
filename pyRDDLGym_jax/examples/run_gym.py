@@ -25,7 +25,6 @@ def main(domain, instance, episodes=1, seed=42):
     # create the environment
     env = pyRDDLGym.make(domain, instance, enforce_action_constraints=True, 
                          backend=JaxRDDLSimulator)
-    env.seed(seed)
 
     # set up a random policy
     agent = RandomAgent(action_space=env.action_space,
