@@ -67,12 +67,14 @@ def _load_config(config, args):
     train_args['key'] = jax.random.PRNGKey(train_args['key'])
     
     # read the model settings
-    tnorm_name = model_args['tnorm']
-    tnorm_kwargs = model_args['tnorm_kwargs']
-    logic_name = model_args['logic']
-    logic_kwargs = model_args['logic_kwargs']
+    logic_name = model_args.get('logic', 'FuzzyLogic')
+    logic_kwargs = model_args.get('logic_kwargs', {})
+    tnorm_name = model_args.get('tnorm', 'ProductTNorm')
+    tnorm_kwargs = model_args.get('tnorm_kwargs', {})
+    comp_name = model_args.get('complement', 'StandardComplement')
+    comp_kwargs = model_args.get('complement_kwargs', {})
     logic_kwargs['tnorm'] = getattr(logic, tnorm_name)(**tnorm_kwargs)
-    planner_args['logic'] = getattr(logic, logic_name)(**logic_kwargs)
+    logic_kwargs['complement'] = getattr(logic, comp_name)(**comp_kwargs)
     
     # read the optimizer settings
     plan_method = planner_args.pop('method')
@@ -91,8 +93,10 @@ def _load_config(config, args):
     if 'activation' in plan_kwargs:  # activation function
         plan_kwargs['activation'] = getattr(jax.nn, plan_kwargs['activation'])
     
+    planner_args['logic'] = getattr(logic, logic_name)(**logic_kwargs)
     planner_args['plan'] = getattr(sys.modules[__name__], plan_method)(**plan_kwargs)
-    planner_args['optimizer'] = getattr(optax, planner_args['optimizer'])
+    planner_args['optimizer'] = getattr(optax, planner_args.get('optimizer', 'rmsprop'))
+    planner_args['batch_size_train'] = planner_args.get('batch_size_train', 32)
     
     return planner_args, plan_kwargs, train_args
 
