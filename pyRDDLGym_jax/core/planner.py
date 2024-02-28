@@ -1372,8 +1372,7 @@ class JaxBackpropPlanner:
             grad_norm = jax.tree_map(
                 lambda x: np.array(jnp.linalg.norm(x)).item(), best_grad)
             diagnosis = self._perform_diagnosis(
-                last_iter_improve, it, 
-                -train_loss, -test_loss, -best_loss, grad_norm)
+                last_iter_improve, -train_loss, -test_loss, -best_loss, grad_norm)
             print(f'summary of optimization:\n'
                   f'    time_elapsed  ={elapsed}\n'
                   f'    iterations    ={it}\n'
@@ -1381,7 +1380,7 @@ class JaxBackpropPlanner:
                   f'    grad_norm     ={grad_norm}\n'
                   f'diagnosis: {diagnosis}\n')
     
-    def _perform_diagnosis(self, last_iter_improve, total_it, 
+    def _perform_diagnosis(self, last_iter_improve, 
                            train_return, test_return, best_return, grad_norm):
         max_grad_norm = max(jax.tree_util.tree_leaves(grad_norm))
         grad_is_zero = np.allclose(max_grad_norm, 0)
