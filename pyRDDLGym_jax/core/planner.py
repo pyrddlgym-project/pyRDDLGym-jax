@@ -95,7 +95,8 @@ def _load_config(config, args):
     
     planner_args['logic'] = getattr(logic, logic_name)(**logic_kwargs)
     planner_args['plan'] = getattr(sys.modules[__name__], plan_method)(**plan_kwargs)
-    planner_args['optimizer'] = getattr(optax, planner_args.get('optimizer', 'rmsprop'))
+    if 'optimizer' in planner_args:
+        planner_args['optimizer'] = getattr(optax, planner_args['optimizer'])
     
     return planner_args, plan_kwargs, train_args
 
