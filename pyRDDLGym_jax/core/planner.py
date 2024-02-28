@@ -1211,14 +1211,14 @@ class JaxBackpropPlanner:
         # if policy_hyperparams is not provided
         if policy_hyperparams is None:
             raise_warning('policy_hyperparams is not set, setting 1.0 for '
-                          'all action-fluents (could be suboptimal).', 'red')
+                          'all action-fluents which could be suboptimal.', 'red')
             policy_hyperparams = {action: 1.0 
                                   for action in self.rddl.action_fluents}
         
         # if policy_hyperparams is a scalar
         elif isinstance(policy_hyperparams, (int, float, np.number)):
             raise_warning(f'policy_hyperparams is {policy_hyperparams}, '
-                          'setting this value for all action-fluents.', 'red')
+                          'setting this value for all action-fluents.')
             hyperparam_value = float(policy_hyperparams)
             policy_hyperparams = {action: hyperparam_value
                                   for action in self.rddl.action_fluents}
