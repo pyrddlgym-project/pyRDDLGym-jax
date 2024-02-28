@@ -830,12 +830,17 @@ class JaxDeepReactivePolicy(JaxPlan):
                     actions[name] = action
                     start += size
             return actions
-                
+        
+        if rddl.observ_fluents:
+            observed_vars = rddl.observ_fluents
+        else:
+            observed_vars = rddl.state_fluents
+             
         # state is concatenated into single tensor
         def _jax_wrapped_subs_to_state(subs):
             subs = {var: value
                     for (var, value) in subs.items()
-                    if var in rddl.state_fluents}
+                    if var in observed_vars}
             flat_subs = jax.tree_map(jnp.ravel, subs)
             states = list(flat_subs.values())
             state = jnp.concatenate(states)
@@ -890,7 +895,7 @@ class JaxDeepReactivePolicy(JaxPlan):
         def _jax_wrapped_drp_init(key, hyperparams, subs):
             subs = {var: value[0, ...] 
                     for (var, value) in subs.items()
-                    if var in rddl.state_fluents}
+                    if var in observed_vars}
             state = _jax_wrapped_subs_to_state(subs)
             params = predict_fn.init(key, state)
             return params

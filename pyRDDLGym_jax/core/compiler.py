@@ -428,12 +428,18 @@ class JaxRDDLCompiler:
         rddl = self.rddl
         jax_step_fn = self.compile_transition(check_constraints, constraint_func)
         
+        # for POMDP only observ-fluents are assumed visible to the policy
+        if rddl.observ_fluents:
+            observed_vars = rddl.observ_fluents
+        else:
+            observed_vars = rddl.state_fluents
+            
         # evaluate the step from the policy
         def _jax_wrapped_single_step_policy(key, policy_params, hyperparams, 
                                             step, subs, model_params):
             states = {var: values 
                       for (var, values) in subs.items()
-                      if rddl.variable_types[var] == 'state-fluent'}
+                      if var in observed_vars}
             actions = policy(key, policy_params, hyperparams, step, states)
             key, subkey = random.split(key)
             log = jax_step_fn(subkey, actions, subs, model_params)
