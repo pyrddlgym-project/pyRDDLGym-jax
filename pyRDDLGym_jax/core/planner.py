@@ -1446,14 +1446,26 @@ class JaxBackpropPlanner:
         '''
         
         # check compatibility of the subs dictionary
-        for var in subs.keys():
+        for (var, values) in subs.items():
+            
+            # must not be grounded
             if RDDLPlanningModel.FLUENT_SEP in var \
             or RDDLPlanningModel.OBJECT_SEP in var:
-                raise Exception(f'State dictionary passed to the JAX policy is '
-                                f'grounded, since it contains the key <{var}>, '
-                                f'but a vectorized environment is required: '
-                                f'please make sure vectorized=True in the RDDLEnv.')
-        
+                raise ValueError(f'State dictionary passed to the JAX policy is '
+                                 f'grounded, since it contains the key <{var}>, '
+                                 f'but a vectorized environment is required: '
+                                 f'please make sure vectorized=True in the RDDLEnv.')
+            
+            # must be numeric array
+            # exception is for POMDPs at 1st epoch when observ-fluents are None
+            if not jnp.issubdtype(values.dtype, jnp.number) \
+            and not jnp.issubdtype(values.dtype, jnp.bool_):
+                if step == 0 and var in self.rddl.observ_fluents:
+                    subs[var] = self.test_compiled.init_values[var]
+                else:
+                    raise ValueError(f'Values assigned to pvariable {var} are '
+                                     f'non-numeric of type {values.dtype}: {values}.')
+            
         # cast device arrays to numpy
         actions = self.test_policy(key, params, policy_hyperparams, step, subs)
         actions = jax.tree_map(np.asarray, actions)
