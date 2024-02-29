@@ -8,7 +8,7 @@ from multiprocessing import get_context
 import numpy as np
 import os
 import time
-from typing import Callable, Dict, Tuple
+from typing import Callable, Dict, Optional, Tuple
 
 import warnings
 warnings.filterwarnings("ignore")
@@ -45,15 +45,15 @@ class JaxParameterTuning:
                  timeout_tuning: float=np.inf,
                  eval_trials: int=5,
                  verbose: bool=True,
-                 planner_kwargs: Dict={},
-                 plan_kwargs: Dict={},
+                 planner_kwargs: Optional[Dict]=None,
+                 plan_kwargs: Optional[Dict]=None,
                  pool_context: str='spawn',
                  num_workers: int=1,
                  poll_frequency: float=0.2,
                  gp_iters: int=25,
                  acquisition=None,
-                 gp_init_kwargs: Dict={},
-                 gp_params: Dict={'n_restarts_optimizer': 10}) -> None:
+                 gp_init_kwargs: Optional[Dict]=None,
+                 gp_params: Optional[Dict]=None) -> None:
         '''Creates a new instance for tuning hyper-parameters for Jax planners
         on the given RDDL domain and instance.
         
@@ -93,13 +93,21 @@ class JaxParameterTuning:
         self.timeout_tuning = timeout_tuning
         self.eval_trials = eval_trials
         self.verbose = verbose
+        if planner_kwargs is None:
+            planner_kwargs = {}
         self.planner_kwargs = planner_kwargs
+        if plan_kwargs is None:
+            plan_kwargs = {}
         self.plan_kwargs = plan_kwargs
         self.pool_context = pool_context
         self.num_workers = num_workers
         self.poll_frequency = poll_frequency
         self.gp_iters = gp_iters
+        if gp_init_kwargs is None:
+            gp_init_kwargs = {}
         self.gp_init_kwargs = gp_init_kwargs
+        if gp_params is None:
+            gp_params = {'n_restarts_optimizer': 10}
         self.gp_params = gp_params
         
         # create acquisition function

@@ -1,7 +1,7 @@
 import jax
 import jax.numpy as jnp
 import jax.random as random
-from typing import Set
+from typing import Optional, Set
 
 from pyRDDLGym.core.debug.exception import raise_warning
 
@@ -72,7 +72,7 @@ class FuzzyLogic:
     def __init__(self, tnorm: TNorm=ProductTNorm(),
                  complement: Complement=StandardComplement(),
                  weight: float=10.0,
-                 debias: Set[str]={},
+                 debias: Optional[Set[str]]=None,
                  eps: float=1e-10,
                  verbose: bool=False):
         '''Creates a new fuzzy logic in Jax.
@@ -88,6 +88,8 @@ class FuzzyLogic:
         self.tnorm = tnorm
         self.complement = complement
         self.weight = float(weight)
+        if debias is None:
+            debias = {}
         self.debias = debias
         self.eps = eps
         self.verbose = verbose
@@ -369,7 +371,7 @@ class FuzzyLogic:
     def argmax(self):
         if self.verbose:
             raise_warning('Using the replacement rule: '
-                          f'argmax(x) --> sum(i * softmax(x[i]))')
+                          'argmax(x) --> sum(i * softmax(x[i]))')
             
         debias = 'argmax' in self.debias
         

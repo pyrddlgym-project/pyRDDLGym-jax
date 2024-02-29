@@ -13,7 +13,7 @@ import sys
 import termcolor
 import time
 from tqdm import tqdm
-from typing import Callable, Dict, Generator, Set, Sequence, Tuple
+from typing import Callable, Dict, Generator, Optional, Set, Sequence, Tuple
 
 from pyRDDLGym.core.compiler.model import RDDLPlanningModel, RDDLLiftedModel
 from pyRDDLGym.core.debug.exception import (
@@ -128,7 +128,7 @@ class JaxRDDLCompilerWithGrad(JaxRDDLCompiler):
     
     def __init__(self, *args,
                  logic: FuzzyLogic=FuzzyLogic(),
-                 cpfs_without_grad: Set=set(),
+                 cpfs_without_grad: Optional[set]=None,
                  **kwargs) -> None:
         '''Creates a new RDDL to Jax compiler, where operations that are not
         differentiable are converted to approximate forms that have defined 
@@ -144,10 +144,12 @@ class JaxRDDLCompilerWithGrad(JaxRDDLCompiler):
         '''
         super(JaxRDDLCompilerWithGrad, self).__init__(*args, **kwargs)
         self.logic = logic
+        if cpfs_without_grad is None:
+            cpfs_without_grad = set()
         self.cpfs_without_grad = cpfs_without_grad
         
         # actions and CPFs must be continuous
-        raise_warning(f'Initial values of pvariables will be cast to real.')   
+        raise_warning('Initial values of pvariables will be cast to real.')   
         for (var, values) in self.init_values.items():
             self.init_values[var] = np.asarray(values, dtype=self.REAL) 
         
@@ -936,14 +938,14 @@ class JaxBackpropPlanner:
                  batch_size_test: int=None,
                  rollout_horizon: int=None,
                  use64bit: bool=False,
-                 action_bounds: Dict[str, Tuple[np.ndarray, np.ndarray]]={},
+                 action_bounds: Optional[Dict[str, Tuple[np.ndarray, np.ndarray]]]=None,
                  optimizer: Callable[..., optax.GradientTransformation]=optax.rmsprop,
-                 optimizer_kwargs: Dict[str, object]={'learning_rate': 0.1},
+                 optimizer_kwargs: Optional[Dict[str, object]]=None,
                  clip_grad: float=None,
                  logic: FuzzyLogic=FuzzyLogic(),
                  use_symlog_reward: bool=False,
                  utility=jnp.mean,
-                 cpfs_without_grad: Set=set()) -> None:
+                 cpfs_without_grad: Optional[Set]=None) -> None:
         '''Creates a new gradient-based algorithm for optimizing action sequences
         (plan) in the given RDDL. Some operations will be converted to their
         differentiable counterparts; the specific operations can be customized
@@ -981,9 +983,13 @@ class JaxBackpropPlanner:
         if rollout_horizon is None:
             rollout_horizon = rddl.horizon
         self.horizon = rollout_horizon
+        if action_bounds is None:
+            action_bounds = {}
         self._action_bounds = action_bounds
         self.use64bit = use64bit
         self._optimizer_name = optimizer
+        if optimizer_kwargs is None:
+            optimizer_kwargs = {'learning_rate': 0.1}
         self._optimizer_kwargs = optimizer_kwargs
         self.clip_grad = clip_grad
         
@@ -1009,6 +1015,8 @@ class JaxBackpropPlanner:
         self.logic = logic
         self.use_symlog_reward = use_symlog_reward
         self.utility = utility
+        if cpfs_without_grad is None:
+            cpfs_without_grad = set()
         self.cpfs_without_grad = cpfs_without_grad
         
         self._jax_compile_rddl()        
