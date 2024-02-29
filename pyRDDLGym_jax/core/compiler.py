@@ -4,7 +4,7 @@ import jax.numpy as jnp
 import jax.random as random
 import jax.scipy as scipy 
 import traceback
-from typing import Callable, Dict, List
+from typing import Callable, Dict, List, Optional
 
 from pyRDDLGym.core.debug.exception import raise_warning
 
@@ -41,7 +41,7 @@ class JaxRDDLCompiler:
     
     def __init__(self, rddl: RDDLLiftedModel,
                  allow_synchronous_state: bool=True,
-                 logger: Logger=None,
+                 logger: Optional[Logger]=None,
                  use64bit: bool=False) -> None:
         '''Creates a new RDDL to Jax compiler.
         
@@ -281,7 +281,7 @@ class JaxRDDLCompiler:
         return jax_inequalities, jax_equalities
     
     def compile_transition(self, check_constraints: bool=False,
-                           constraint_func: bool=False):
+                           constraint_func: bool=False) -> Callable:
         '''Compiles the current RDDL model into a JAX transition function that 
         samples the next state.
         
@@ -403,7 +403,7 @@ class JaxRDDLCompiler:
                          n_steps: int,
                          n_batch: int,
                          check_constraints: bool=False,
-                         constraint_func: bool=False):
+                         constraint_func: bool=False) -> Callable:
         '''Compiles the current RDDL model into a JAX transition function that 
         samples trajectories with a fixed horizon from a policy.
         

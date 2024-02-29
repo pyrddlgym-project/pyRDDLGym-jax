@@ -1,6 +1,6 @@
 import jax
 import time
-from typing import Dict
+from typing import Dict, Optional
 
 from pyRDDLGym.core.compiler.model import RDDLLiftedModel
 from pyRDDLGym.core.debug.exception import (
@@ -20,9 +20,9 @@ Args = Dict[str, Value]
 class JaxRDDLSimulator(RDDLSimulator):
         
     def __init__(self, rddl: RDDLLiftedModel,
-                 key: jax.random.PRNGKey=None,
+                 key: Optional[jax.random.PRNGKey]=None,
                  raise_error: bool=True,
-                 logger: Logger=None,
+                 logger: Optional[Logger]=None,
                  keep_tensors: bool=False,
                  **compiler_args) -> None:
         '''Creates a new simulator for the given RDDL model with Jax as a backend.
