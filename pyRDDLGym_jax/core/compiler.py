@@ -604,7 +604,7 @@ class JaxRDDLCompiler:
                     name = str(tags)
                 name = f'{name}{sep}{expr_id}'
                 if name in info:
-                    raise Exception(f'Model parameter {name} is already defined.')
+                    raise RuntimeError(f'Model parameter {name} is already defined.')
                 info[name] = values
         return jax_op, name
     
