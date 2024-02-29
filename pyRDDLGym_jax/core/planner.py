@@ -1286,7 +1286,8 @@ class JaxBackpropPlanner:
                   f'    model_params       ={model_params}\n'
                   f'    policy_hyper_params={policy_hyperparams}\n'
                   f'    override_subs_dict ={subs is not None}\n'
-                  f'    provide_param_guess={guess is not None}\n' 
+                  f'    provide_param_guess={guess is not None}\n'
+                  f'    test_rolling_window={test_rolling_window}\n' 
                   f'    plot_frequency     ={plot_step}\n')
             
         # compute a batched version of the initial values
