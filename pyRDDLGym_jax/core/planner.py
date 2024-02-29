@@ -1526,11 +1526,10 @@ class JaxBackpropPlanner:
         return actions      
             
     def _plot_actions(self, key, params, hyperparams, subs, it):
-        rddl = self.rddl
         try:
             import matplotlib.pyplot as plt
         except Exception:
-            print('matplotlib is not installed, aborting plot...')
+            raise_warning('matplotlib is not installed, aborting plot.', 'red')
             return
             
         # predict actions from the trained policy or plan
@@ -1538,6 +1537,10 @@ class JaxBackpropPlanner:
             
         # plot the action sequences as color maps
         fig, axs = plt.subplots(nrows=len(actions), constrained_layout=True)
+        if len(actions) == 1:
+            axs = [axs]
+        
+        rddl = self.rddl
         for (ax, name) in zip(axs, actions):
             action = np.mean(actions[name], axis=0, dtype=float)
             action = np.reshape(action, newshape=(action.shape[0], -1)).T
