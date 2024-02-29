@@ -703,7 +703,8 @@ class JaxDeepReactivePolicy(JaxPlan):
     def __init__(self, topology: Sequence[int],
                  activation: Callable=jax.nn.relu,
                  initializer: hk.initializers.Initializer=hk.initializers.VarianceScaling(scale=2.0),
-                 normalize: bool=True) -> None:
+                 normalize: bool=True,
+                 wrap_non_bool: bool=False) -> None:
         '''Creates a new deep reactive policy in JAX.
         
         :param neurons: sequence consisting of the number of neurons in each
@@ -711,6 +712,8 @@ class JaxDeepReactivePolicy(JaxPlan):
         :param activation: function to apply after each layer of the policy
         :param initializer: weight initialization
         :param normalize: whether to apply layer norm to the inputs
+        :param wrap_non_bool: whether to wrap real or int action fluent parameters
+        with non-linearity (e.g. sigmoid or ELU) to satisfy box constraints
         '''
         super(JaxDeepReactivePolicy, self).__init__()
         self._topology = topology
@@ -718,13 +721,15 @@ class JaxDeepReactivePolicy(JaxPlan):
         self._initializer_base = initializer
         self._initializer = initializer
         self._normalize = normalize
+        self._wrap_non_bool = wrap_non_bool
             
     def summarize_hyperparameters(self):
         print(f'policy hyper-parameters:\n'
               f'    topology        ={self._topology}\n'
               f'    activation_fn   ={self._activations[0].__name__}\n'
               f'    initializer     ={type(self._initializer_base).__name__}\n'
-              f'    apply_layer_norm={self._normalize}')
+              f'    apply_layer_norm={self._normalize}\n'
+              f'    wrap_non_bool   ={self._wrap_non_bool}')
     
     def compile(self, compiled: JaxRDDLCompilerWithGrad,
                 _bounds: Dict, horizon: int) -> None:
@@ -755,6 +760,7 @@ class JaxDeepReactivePolicy(JaxPlan):
                    
         ranges = rddl.variable_ranges
         normalize = self._normalize
+        wrap_non_bool = self._wrap_non_bool
         init = self._initializer
         layers = list(enumerate(zip(self._topology, self._activations)))
         layer_sizes = {var: np.prod(shape, dtype=int) 
@@ -793,16 +799,19 @@ class JaxDeepReactivePolicy(JaxPlan):
                     if not use_constraint_satisfaction:
                         actions[var] = jax.nn.sigmoid(output)
                 else:
-                    lower, upper = bounds_safe[var]
-                    action = jnp.select(
-                        condlist=cond_lists[var],
-                        choicelist=[
-                            lower + (upper - lower) * jax.nn.sigmoid(output),
-                            lower + (jax.nn.elu(output) + 1.0),
-                            upper - (jax.nn.elu(-output) + 1.0),
-                            output
-                        ]
-                    )
+                    if wrap_non_bool:
+                        lower, upper = bounds_safe[var]
+                        action = jnp.select(
+                            condlist=cond_lists[var],
+                            choicelist=[
+                                lower + (upper - lower) * jax.nn.sigmoid(output),
+                                lower + (jax.nn.elu(output) + 1.0),
+                                upper - (jax.nn.elu(-output) + 1.0),
+                                output
+                            ]
+                        )
+                    else:
+                        action = output
                     actions[var] = action
             
             # for constraint satisfaction wrap bool actions with softmax
@@ -850,6 +859,10 @@ class JaxDeepReactivePolicy(JaxPlan):
         def _jax_wrapped_drp_predict_train(key, params, hyperparams, step, subs):
             state = _jax_wrapped_subs_to_state(subs)
             actions = predict_fn.apply(params, state)
+            if not wrap_non_bool:
+                for (var, action) in actions.items():
+                    if ranges[var] != 'bool':
+                        actions[var] = jnp.clip(action, *bounds[var])
             if use_constraint_satisfaction:
                 bool_actions = _jax_unstack_bool_from_softmax(actions[bool_key])
                 actions.update(bool_actions)
