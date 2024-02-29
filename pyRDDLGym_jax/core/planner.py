@@ -863,7 +863,7 @@ class JaxDeepReactivePolicy(JaxPlan):
             actions = predict_fn.apply(params, state)
             if not wrap_non_bool:
                 for (var, action) in actions.items():
-                    if ranges[var] != 'bool':
+                    if var != bool_key and ranges[var] != 'bool':
                         actions[var] = jnp.clip(action, *bounds[var])
             if use_constraint_satisfaction:
                 bool_actions = _jax_unstack_bool_from_softmax(actions[bool_key])
@@ -928,6 +928,22 @@ class JaxDeepReactivePolicy(JaxPlan):
 # - more stable but slower line search based planner
 #
 # ***********************************************************************
+class RollingMean:
+    
+    def __init__(self, window_size: int) -> None:
+        self._window_size = window_size
+        self._memory = deque(maxlen=window_size)
+        self._total = 0
+    
+    def update(self, x: float) -> float:
+        memory = self._memory
+        self._total += x
+        if len(memory) == self._window_size:
+            self._total -= memory.popleft()
+        memory.append(x)
+        return self._total / len(memory)
+
+
 class JaxBackpropPlanner:
     '''A class for optimizing an action sequence in the given RDDL MDP using 
     gradient descent.'''
@@ -1179,6 +1195,8 @@ class JaxBackpropPlanner:
         ''' Compute an optimal straight-line plan. Returns the parameters
         for the optimized policy.
         
+        :param return_callback: whether to return the callback from training
+        instead of the parameters
         :param key: JAX PRNG key   
         :param epochs: the maximum number of steps of gradient descent
         :param the maximum number of steps of gradient descent     
@@ -1192,8 +1210,10 @@ class JaxBackpropPlanner:
         :param guess: initial policy parameters: if None will use the initializer
         specified in this instance
         :param verbose: not print (0), print summary (1), print progress (2)
-        :param return_callback: whether to return the callback from training
-        instead of the parameters
+        :param test_rolling_window: the test return is averaged on a rolling 
+        window of the past test_rolling_window returns when updating the best
+        parameters found so far
+        :param tqdm_position: position of tqdm progress bar (for multiprocessing)
         '''
         it = self.optimize_generator(*args, **kwargs)
         callback = deque(it, maxlen=1).pop()
@@ -1211,6 +1231,7 @@ class JaxBackpropPlanner:
                            subs: Optional[Dict[str, object]]=None,
                            guess: Optional[Dict[str, object]]=None,
                            verbose: int=2,
+                           test_rolling_window: int=10,
                            tqdm_position: Optional[int]=None) -> Generator[Dict[str, object], None, None]:
         '''Returns a generator for computing an optimal straight-line plan. 
         Generator can be iterated over to lazily optimize the plan, yielding
@@ -1229,6 +1250,9 @@ class JaxBackpropPlanner:
         :param guess: initial policy parameters: if None will use the initializer
         specified in this instance
         :param verbose: not print (0), print summary (1), print progress (2)
+        :param test_rolling_window: the test return is averaged on a rolling 
+        window of the past test_rolling_window returns when updating the best
+        parameters found so far
         :param tqdm_position: position of tqdm progress bar (for multiprocessing)
         '''
         verbose = int(verbose)
@@ -1295,8 +1319,11 @@ class JaxBackpropPlanner:
         else:
             policy_params = guess
             opt_state = self.optimizer.init(policy_params)
+        
+        # initialize running statistics
         best_params, best_loss, best_grad = policy_params, jnp.inf, jnp.inf
         last_iter_improve = 0
+        rolling_test_loss = RollingMean(test_rolling_window)
         log = {}
         
         # training loop
@@ -1324,6 +1351,7 @@ class JaxBackpropPlanner:
             test_loss, log = self.test_loss(
                 subkey3, policy_params, policy_hyperparams,
                 test_subs, model_params_test)
+            test_loss = rolling_test_loss.update(test_loss)
             
             # record the best plan so far
             if test_loss < best_loss:
