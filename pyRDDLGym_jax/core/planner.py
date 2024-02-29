@@ -935,13 +935,13 @@ class JaxBackpropPlanner:
     def __init__(self, rddl: RDDLLiftedModel,
                  plan: JaxPlan,
                  batch_size_train: int=32,
-                 batch_size_test: int=None,
-                 rollout_horizon: int=None,
+                 batch_size_test: Optional[int]=None,
+                 rollout_horizon: Optional[int]=None,
                  use64bit: bool=False,
                  action_bounds: Optional[Dict[str, Tuple[np.ndarray, np.ndarray]]]=None,
                  optimizer: Callable[..., optax.GradientTransformation]=optax.rmsprop,
                  optimizer_kwargs: Optional[Dict[str, object]]=None,
-                 clip_grad: float=None,
+                 clip_grad: Optional[float]=None,
                  logic: FuzzyLogic=FuzzyLogic(),
                  use_symlog_reward: bool=False,
                  utility=jnp.mean,
@@ -1175,7 +1175,7 @@ class JaxBackpropPlanner:
         
         return init_train, init_test
     
-    def optimize(self, *args, return_callback: bool=False, **kwargs) -> object:
+    def optimize(self, *args, return_callback: bool=False, **kwargs) -> Dict[str, object]:
         ''' Compute an optimal straight-line plan. Returns the parameters
         for the optimized policy.
         
@@ -1205,13 +1205,13 @@ class JaxBackpropPlanner:
     def optimize_generator(self, key: random.PRNGKey,
                            epochs: int=999999,
                            train_seconds: float=120.,
-                           plot_step: int=None,
-                           model_params: Dict[str, object]=None,
-                           policy_hyperparams: Dict[str, object]=None,
-                           subs: Dict[str, object]=None,
-                           guess: Dict[str, object]=None,
+                           plot_step: Optional[int]=None,
+                           model_params: Optional[Dict[str, object]]=None,
+                           policy_hyperparams: Optional[Dict[str, object]]=None,
+                           subs: Optional[Dict[str, object]]=None,
+                           guess: Optional[Dict[str, object]]=None,
                            verbose: int=2,
-                           tqdm_position: int=None) -> Generator[Dict[str, object], None, None]:
+                           tqdm_position: Optional[int]=None) -> Generator[Dict[str, object], None, None]:
         '''Returns a generator for computing an optimal straight-line plan. 
         Generator can be iterated over to lazily optimize the plan, yielding
         a dictionary of intermediate computations.
@@ -1458,7 +1458,7 @@ class JaxBackpropPlanner:
                    params: Dict,
                    step: int,
                    subs: Dict,
-                   policy_hyperparams: Dict[str, object]=None) -> Dict[str, object]:
+                   policy_hyperparams: Optional[Dict[str, object]]=None) -> Dict[str, object]:
         '''Returns an action dictionary from the policy or plan with the given
         parameters.
         
@@ -1655,9 +1655,10 @@ class JaxOfflineController(BaseAgent):
     '''A container class for a Jax policy trained offline.'''
     use_tensor_obs = True
     
-    def __init__(self, planner: JaxBackpropPlanner, key: random.PRNGKey,
-                 eval_hyperparams: Dict[str, object]=None,
-                 params: Dict[str, object]=None,
+    def __init__(self, planner: JaxBackpropPlanner, 
+                 key: random.PRNGKey,
+                 eval_hyperparams: Optional[Dict[str, object]]=None,
+                 params: Optional[Dict[str, object]]=None,
                  train_on_reset: bool=False,
                  **train_kwargs) -> None:
         '''Creates a new JAX offline control policy that is trained once, then
@@ -1703,8 +1704,10 @@ class JaxOnlineController(BaseAgent):
     feedback.'''
     use_tensor_obs = True
     
-    def __init__(self, planner: JaxBackpropPlanner, key: random.PRNGKey,
-                 eval_hyperparams: Dict=None, warm_start: bool=True,
+    def __init__(self, planner: JaxBackpropPlanner, 
+                 key: random.PRNGKey,
+                 eval_hyperparams: Optional[Dict[str, object]]=None,
+                 warm_start: bool=True,
                  **train_kwargs) -> None:
         '''Creates a new JAX control policy that is trained online in a closed-
         loop fashion.
