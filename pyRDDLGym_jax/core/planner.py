@@ -16,6 +16,7 @@ from tqdm import tqdm
 from typing import Callable, Dict, Generator, Optional, Set, Sequence, Tuple
 
 from pyRDDLGym.core.compiler.model import RDDLPlanningModel, RDDLLiftedModel
+from pyRDDLGym.core.debug.logger import Logger
 from pyRDDLGym.core.debug.exception import (
     raise_warning,
     RDDLNotImplementedError,
@@ -961,7 +962,8 @@ class JaxBackpropPlanner:
                  logic: FuzzyLogic=FuzzyLogic(),
                  use_symlog_reward: bool=False,
                  utility=jnp.mean,
-                 cpfs_without_grad: Optional[Set]=None) -> None:
+                 cpfs_without_grad: Optional[Set]=None,
+                 logger: Optional[Logger]=None) -> None:
         '''Creates a new gradient-based algorithm for optimizing action sequences
         (plan) in the given RDDL. Some operations will be converted to their
         differentiable counterparts; the specific operations can be customized
@@ -989,6 +991,7 @@ class JaxBackpropPlanner:
         of a policy or plan
         :param cpfs_without_grad: which CPFs do not have gradients (use straight
         through gradient trick)
+        :param logger: to log information about compilation to file
         '''
         self.rddl = rddl
         self.plan = plan
@@ -1034,6 +1037,7 @@ class JaxBackpropPlanner:
         if cpfs_without_grad is None:
             cpfs_without_grad = set()
         self.cpfs_without_grad = cpfs_without_grad
+        self.logger = logger
         
         self._jax_compile_rddl()        
         self._jax_compile_optimizer()
@@ -1063,13 +1067,17 @@ class JaxBackpropPlanner:
         self.compiled = JaxRDDLCompilerWithGrad(
             rddl=rddl,
             logic=self.logic,
+            logger=self.logger,
             use64bit=self.use64bit,
             cpfs_without_grad=self.cpfs_without_grad)
-        self.compiled.compile()
+        self.compiled.compile(log_jax_expr=True, heading='RELAXED MODEL')
         
         # Jax compilation of the exact RDDL for testing
-        self.test_compiled = JaxRDDLCompiler(rddl=rddl, use64bit=self.use64bit)
-        self.test_compiled.compile()
+        self.test_compiled = JaxRDDLCompiler(
+            rddl=rddl, 
+            logger=self.logger,
+            use64bit=self.use64bit)
+        self.test_compiled.compile(log_jax_expr=True, heading='EXACT MODEL')
         
     def _jax_compile_optimizer(self):
         
