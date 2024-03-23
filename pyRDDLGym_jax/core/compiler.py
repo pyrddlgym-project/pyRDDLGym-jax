@@ -70,17 +70,15 @@ class JaxRDDLCompiler:
         }
         
         # compile initial values
-        if self.logger is not None:
-            self.logger.clear()
-        initializer = RDDLValueInitializer(rddl, logger=self.logger)
+        initializer = RDDLValueInitializer(rddl)
         self.init_values = initializer.initialize()
         
         # compute dependency graph for CPFs and sort them by evaluation order
-        sorter = RDDLLevelAnalysis(rddl, allow_synchronous_state, logger=self.logger)
+        sorter = RDDLLevelAnalysis(rddl, allow_synchronous_state)
         self.levels = sorter.compute_levels()        
         
         # trace expressions to cache information to be used later
-        tracer = RDDLObjectsTracer(rddl, logger=self.logger, cpf_levels=self.levels)
+        tracer = RDDLObjectsTracer(rddl, cpf_levels=self.levels)
         self.traced = tracer.trace()
         
         # extract the box constraints on actions
@@ -165,11 +163,12 @@ class JaxRDDLCompiler:
     # main compilation subroutines
     # ===========================================================================
      
-    def compile(self, log_jax_expr: bool=False) -> None: 
+    def compile(self, log_jax_expr: bool=False, heading: str='') -> None: 
         '''Compiles the current RDDL into Jax expressions.
         
         :param log_jax_expr: whether to pretty-print the compiled Jax functions
         to the log file
+        :param heading: the heading to print before compilation information
         '''
         info = {}
         self.invariants = self._compile_constraints(self.rddl.invariants, info)
@@ -189,6 +188,7 @@ class JaxRDDLCompiler:
             printed_terminals = '\n\n'.join(v for v in printed['terminations'])
             printed_params = '\n'.join(f'{k}: {v}' for (k, v) in info.items())
             message = (
+                f'[info] {heading}\n'
                 f'[info] compiled JAX CPFs:\n\n'
                 f'{printed_cpfs}\n\n'
                 f'[info] compiled JAX reward:\n\n'
