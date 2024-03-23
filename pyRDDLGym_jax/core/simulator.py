@@ -57,7 +57,7 @@ class JaxRDDLSimulator(RDDLSimulator):
         
         # compilation
         compiled = JaxRDDLCompiler(rddl, logger=self.logger, **self.compiler_args)
-        compiled.compile(log_jax_expr=True, header='SIMULATION MODEL')
+        compiled.compile(log_jax_expr=True, heading='SIMULATION MODEL')
         
         self.init_values = compiled.init_values
         self.levels = compiled.levels
