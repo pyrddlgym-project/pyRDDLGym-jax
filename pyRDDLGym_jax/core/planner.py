@@ -921,7 +921,105 @@ class JaxDeepReactivePolicy(JaxPlan):
     def guess_next_epoch(self, params: Dict) -> Dict:
         return params
 
+
+class JaxQValueFunction:
     
+    def __init__(self, topology_state: Sequence[int],
+                 topology_action: Sequence[int],
+                 topology_common: Sequence[int],
+                 activation: Callable=jax.nn.relu,
+                 initializer: hk.initializers.Initializer=hk.initializers.VarianceScaling(scale=2.0)):
+        self._topology_state = topology_state
+        self._topology_action = topology_action
+        self._topology_common = topology_common
+        self._activation = activation
+        self._initializer_base = initializer
+        self._initializer = initializer
+    
+    def summarize_hyperparameters(self):
+        print(f'Q-function hyper-parameters:\n'
+              f'    topology_state  ={self._topology_state}\n'
+              f'    topology_action ={self._topology_action}\n'
+              f'    topology_common ={self._topology_common}\n'
+              f'    activation_fn   ={self._activation.__name__}\n'
+              f'    initializer     ={type(self._initializer_base).__name__}')
+    
+    def compile(self, compiled: JaxRDDLCompilerWithGrad) -> None:
+        rddl = compiled.rddl
+        
+        # ***********************************************************************
+        # Q-VALUE NETWORK PREDICTION
+        #
+        # ***********************************************************************
+                   
+        init = self._initializer
+        
+        # predict actions from the policy network for current state-action pair
+        def _jax_wrapped_q_network_predict(state, action):
+            
+            # feed state through hidden layers
+            hidden_state = state
+            for (i, num_neuron) in enumerate(self._topology_state):
+                linear = hk.Linear(num_neuron, name=f'hidden_state_{i}', w_init=init)
+                hidden_state = self._activation(linear(hidden_state))
+            
+            # feed action through hidden layers
+            hidden_action = action
+            for (i, num_neuron) in enumerate(self._topology_action):
+                linear = hk.Linear(num_neuron, name=f'hidden_action_{i}', w_init=init)
+                hidden_action = self._activation(linear(hidden_action))
+            
+            # continue feeding through shared hidden layers
+            hidden = jnp.concatenate([hidden_state, hidden_action], axis=-1)
+            for (i, num_neuron) in enumerate(self._topology_common):
+                linear = hk.Linear(num_neuron, name=f'hidden_shared_{i}', w_init=init)
+                hidden = self._activation(linear(hidden))            
+            linear = hk.Linear(1, name='output', w_init=init)
+            value = linear(hidden)            
+            return value
+        
+        predict_fn = hk.transform(_jax_wrapped_q_network_predict)
+        predict_fn = hk.without_apply_rng(predict_fn)       
+        
+        # extract only the observed variables from the subs dictionary
+        if rddl.observ_fluents:
+            observed_vars = rddl.observ_fluents
+        else:
+            observed_vars = rddl.state_fluents
+             
+        def _jax_wrapped_flatten_subs(subs):
+            flat_subs = jax.tree_map(jnp.ravel, subs)
+            values = list(flat_subs.values())
+            return jnp.concatenate(values, axis=None)
+        
+        def _jax_wrapped_q_predict(params, state, action):
+            state = {var: value
+                     for (var, value) in state.items()
+                     if var in observed_vars}
+            state = _jax_wrapped_flatten_subs(state)
+            action = _jax_wrapped_flatten_subs(action)
+            q_values = predict_fn.apply(params, state, action)
+            return q_values
+        
+        self.predict_q = _jax_wrapped_q_predict
+               
+        # ***********************************************************************
+        # Q-VALUE NETWORK INITIALIZATION
+        #
+        # ***********************************************************************
+        
+        def _jax_wrapped_q_init(key, state, action):
+            state = {var: value[0, ...] 
+                     for (var, value) in state.items()
+                     if var in observed_vars}
+            state = _jax_wrapped_flatten_subs(state)
+            action = _jax_wrapped_flatten_subs(action)
+            params = predict_fn.init(key, state, action)
+            return params
+        
+        self.initializer = _jax_wrapped_q_init
+
+
 # ***********************************************************************
 # ALL VERSIONS OF JAX PLANNER
 # 
@@ -1567,7 +1665,479 @@ class JaxBackpropPlanner:
                     bbox_inches='tight')
         plt.clf()
         plt.close(fig)
+
+
+class Buffer:
     
+    def __init__(self, n_samples:int=10000, n_batch:int=32) -> None:
+        self.n_samples = n_samples
+        self.n_batch = n_batch
+        
+        def _reshape(arr):
+            return arr.reshape((-1,) + arr.shape[2:])
+        
+        # convert trajectories in log into tensors whose leading dimension
+        # combines the batch and time dimensions of the original trajectories
+        def _jax_process_trajectories(log):
+            states, actions, rewards, dones = \
+                log['pvar'], log['action'], log['reward'], log['termination']
+            mask = ~_reshape(dones[:, :-1])
+            curr_states = {key: _reshape(val[:, :-1, ...]) for (key, val) in states.items()}
+            curr_actions = {key: _reshape(val[:, :-1, ...]) for (key, val) in actions.items()}
+            next_states = {key: _reshape(val[:, 1:, ...]) for (key, val) in states.items()}
+            rewards = _reshape(rewards[:, 1:])
+            dones = _reshape(dones[:, 1:])
+            return curr_states, curr_actions, rewards, next_states, dones, mask
+        
+        self.process_fn = jax.jit(_jax_process_trajectories)
+        
+        # process the first transition of the trajectory
+        def _jax_process_first_step(subs, action, log):
+            states, rewards, dones = log['pvar'], log['reward'], log['termination']
+            n_elem = dones.shape[0]
+            curr_states = {key: jnp.repeat(val[jnp.newaxis, ...], repeats=n_elem, axis=0)
+                           for (key, val) in subs.items()}
+            curr_actions = {key: jnp.repeat(val[jnp.newaxis, ...], repeats=n_elem, axis=0)
+                            for (key, val) in action.items()}
+            rewards = rewards[:, 0]
+            next_states = {key: val[:, 0, ...] for (key, val) in states.items()}
+            dones = dones[:, 0]
+            return curr_states, curr_actions, rewards, next_states, dones
+        
+        self.process_first_step_fn = jax.jit(_jax_process_first_step)
+                    
+    def reset(self) -> None:
+        self.states = {}
+        self.actions = {}
+        self.rewards = None
+        self.next_states = {}
+        self.dones = None
+        self.index = 0
+        self.size = 0
+    
+    def replay(self) -> Tuple[np.ndarray, ...]:
+        if self.size < self.n_batch: 
+            return None
+        indices = np.random.randint(low=0, high=self.size, size=(self.n_batch,))
+        states = {key: val[indices] for (key, val) in self.states.items()}
+        actions = {key: val[indices] for (key, val) in self.actions.items()}
+        rewards = self.rewards[indices]
+        next_states = {key: val[indices] for (key, val) in self.next_states.items()}
+        dones = self.dones[indices]
+        return states, actions, rewards, next_states, dones
+    
+    def _initialize(self, states, actions, next_states):
+        self.states = {
+            key: np.empty((self.n_samples,) + val.shape[1:], dtype=val.dtype)
+            for (key, val) in states.items()
+        }
+        self.actions = {
+            key: np.empty((self.n_samples,) + val.shape[1:], dtype=val.dtype)
+            for (key, val) in actions.items()
+        }
+        self.rewards = np.empty((self.n_samples,), dtype=float)
+        self.next_states = {
+            key: np.empty((self.n_samples,) + val.shape[1:], dtype=val.dtype)
+            for (key, val) in next_states.items()
+        }
+        self.dones = np.empty((self.n_samples,), dtype=bool)
+    
+    def _append(self, states, actions, rewards, next_states, dones, mask=None):
+        if not self.size:
+            self._initialize(states, actions, next_states)
+        if mask is None:
+            mask = np.ones((dones.size,), dtype=bool)
+        mask = np.asarray(mask)
+        n_keep = np.sum(mask)
+        indices = np.arange(self.index, self.index + n_keep) % self.n_samples
+        for (key, val) in states.items():
+            self.states[key][indices] = np.asarray(val)[mask]
+        for (key, val) in actions.items():
+            self.actions[key][indices] = np.asarray(val)[mask]
+        self.rewards[indices] = np.asarray(rewards)[mask]
+        for (key, val) in next_states.items():
+            self.next_states[key][indices] = np.asarray(val)[mask]
+        self.dones[indices] = np.asarray(dones)[mask]        
+        self.index += n_keep
+        self.size = min(self.size + n_keep, self.n_samples)
+        
+    def append(self, state, action, log):
+        self._append(*self.process_first_step_fn(state, action, log))
+        self._append(*self.process_fn(log))
+        
+        
+class JaxBackpropPlannerWithQ(JaxBackpropPlanner):
+    
+    def __init__(self, *args,
+                 q: JaxQValueFunction,
+                 optimizer_q: Callable[..., optax.GradientTransformation]=optax.adam,
+                 optimizer_q_kwargs: Optional[Dict[str, object]]=None,
+                 buffer:Buffer=Buffer(),
+                 tau:float=0.001,
+                 num_q_updates:int=3,
+                 **kwargs) -> None:
+        self.q = q
+        if optimizer_q_kwargs is None:
+            optimizer_q_kwargs = {'learning_rate': 0.0005}
+        self.optimizer_q_kwargs = optimizer_q_kwargs  
+        self.optimizer_q = optimizer_q(**optimizer_q_kwargs)   
+        self.buffer = buffer
+        self.tau = tau
+        self.num_q_updates = num_q_updates
+                        
+        super(JaxBackpropPlannerWithQ, self).__init__(*args, **kwargs)
+        
+    def summarize_hyperparameters(self):
+        super(JaxBackpropPlannerWithQ, self).summarize_hyperparameters()
+        self.q.summarize_hyperparameters()
+                
+    def _jax_compile_optimizer(self):
+        
+        # policy
+        self.plan.compile(self.compiled,
+                          _bounds=self._action_bounds,
+                          horizon=self.horizon)
+        self.train_policy = jax.jit(self.plan.train_policy)
+        self.test_policy = jax.jit(self.plan.test_policy)
+        
+        # value
+        self.q.compile(self.compiled)
+        
+        # roll-outs
+        train_rollouts = self.compiled.compile_rollouts(
+            policy=self.plan.train_policy,
+            n_steps=self.horizon,
+            n_batch=self.batch_size_train)
+        
+        test_rollouts = self.test_compiled.compile_rollouts(
+            policy=self.plan.test_policy,
+            n_steps=self.horizon,
+            n_batch=self.batch_size_test)
+        self.test_rollouts = jax.jit(test_rollouts)
+        
+        # initialization
+        self.initialize = jax.jit(self._jax_init())
+        self.initialize_q = jax.jit(self._jax_init_q())
+        
+        # policy losses
+        train_loss = self._jax_loss(train_rollouts, use_symlog=self.use_symlog_reward)
+        self.train_loss = jax.jit(train_loss)
+        self.test_loss = jax.jit(self._jax_loss(test_rollouts, use_symlog=False))
+        
+        # q-value losses
+        q_loss = self._jax_loss_q()
+        self.q_loss = jax.jit(q_loss)
+        
+        # optimization
+        self.update = jax.jit(self._jax_update(train_loss))
+        self.update_q = jax.jit(self._jax_update_q(q_loss))
+    
+    def _jax_init_q(self):        
+        init_q = self.q.initializer
+        optimizer_q = self.optimizer_q
+        policy = self.test_policy
+        
+        def _jax_wrapped_init_q(key, policy_params, hyperparams, subs):            
+            init_subs = {name: var[0, ...] for (name, var) in subs.items()}
+            action = policy(key, policy_params, hyperparams, 0, init_subs)  
+            q_params = init_q(key, subs, action)
+            q_opt_state = optimizer_q.init(q_params)
+            return q_params, q_opt_state
+        
+        return _jax_wrapped_init_q
+        
+    def _jax_loss_q(self): 
+        q_fn = self.q.predict_q
+        gamma = self.rddl.discount
+        
+        # the value loss is the MSE between current Q and target values
+        def _jax_wrapped_q_loss(q_params, q_target_params, state, action, reward,
+                                next_state, next_action, done):
+            q_value = q_fn(q_params, state, action)
+            next_q_value = q_fn(q_target_params, next_state, next_action)
+            target = reward + gamma * (1 - done) * next_q_value
+            target = jax.lax.stop_gradient(target)
+            loss = optax.huber_loss(q_value, target)
+            return loss
+        
+        # batched loss
+        def _jax_wrapped_q_loss_batched(q_params, q_target_params, 
+                                        states, actions, rewards,
+                                        next_states, next_actions, dones):
+            batched_loss_fn = jax.vmap(
+                _jax_wrapped_q_loss, in_axes=(None, None, 0, 0, 0, 0, 0, 0))
+            losses = batched_loss_fn(
+                q_params, q_target_params, states, actions, rewards, 
+                next_states, next_actions, dones)
+            loss = jnp.mean(losses)
+            return loss
+            
+        return _jax_wrapped_q_loss_batched
+        
+    def _jax_update_q(self, q_loss):
+        optimizer_q = self.optimizer_q
+        policy = self.test_policy
+        tau = self.tau
+        
+        # update the q-value parameters and the target parameters
+        def _jax_wrapped_q_update(q_params, q_opt_state, q_target_params,
+                                  states, actions, rewards, 
+                                  next_states, next_actions, dones):
+            grad_fn = jax.value_and_grad(q_loss, argnums=0)
+            loss, grad = grad_fn(q_params, q_target_params, 
+                                 states, actions, rewards,
+                                 next_states, next_actions, dones)
+            updates, q_opt_state = optimizer_q.update(grad, q_opt_state)
+            q_params = optax.apply_updates(q_params, updates)
+            q_target_params = jax.tree_map(
+                lambda x, y: tau * x + (1. - tau) * y, q_params, q_target_params)
+            return q_params, q_opt_state, q_target_params, loss        
+        
+        # update the q-value parameters and the target parameters using the actor
+        def _jax_wrapped_q_update_policy(q_params, q_opt_state, q_target_params,
+                                         states, actions, rewards, 
+                                         next_states, dones, 
+                                         key, policy_params, hyperparams):
+            key, *subkeys = random.split(key, num=1 + dones.size)
+            keys = jnp.asarray(subkeys)
+            batched_policy_fn = jax.vmap(policy, in_axes=(0, None, None, None, 0))
+            next_actions = batched_policy_fn(
+                keys, policy_params, hyperparams, 0, next_states)
+            return _jax_wrapped_q_update(q_params, q_opt_state, q_target_params, 
+                                         states, actions, rewards, 
+                                         next_states, next_actions, dones)
+        
+        return _jax_wrapped_q_update_policy
+            
+    def optimize_generator(self, key: random.PRNGKey,
+                           epochs: int=999999,
+                           train_seconds: float=120.,
+                           plot_step: Optional[int]=None,
+                           model_params: Optional[Dict[str, object]]=None,
+                           policy_hyperparams: Optional[Dict[str, object]]=None,
+                           subs: Optional[Dict[str, object]]=None,
+                           guess: Optional[Dict[str, object]]=None,
+                           verbose: int=2,
+                           test_rolling_window: int=10,
+                           tqdm_position: Optional[int]=None) -> Generator[Dict[str, object], None, None]:
+        verbose = int(verbose)
+        start_time = time.time()
+        elapsed_outside_loop = 0
+        
+        # if policy_hyperparams is not provided
+        if policy_hyperparams is None:
+            raise_warning('policy_hyperparams is not set, setting 1.0 for '
+                          'all action-fluents which could be suboptimal.', 'red')
+            policy_hyperparams = {action: 1.0 
+                                  for action in self.rddl.action_fluents}
+        
+        # if policy_hyperparams is a scalar
+        elif isinstance(policy_hyperparams, (int, float, np.number)):
+            raise_warning(f'policy_hyperparams is {policy_hyperparams}, '
+                          'setting this value for all action-fluents.')
+            hyperparam_value = float(policy_hyperparams)
+            policy_hyperparams = {action: hyperparam_value
+                                  for action in self.rddl.action_fluents}
+            
+        # print summary of parameters:
+        if verbose >= 1:
+            print('==============================================\n'
+                  'JAX PLANNER PARAMETER SUMMARY\n'
+                  '==============================================')
+            self.summarize_hyperparameters()
+            print(f'optimize() call hyper-parameters:\n'
+                  f'    max_iterations     ={epochs}\n'
+                  f'    max_seconds        ={train_seconds}\n'
+                  f'    model_params       ={model_params}\n'
+                  f'    policy_hyper_params={policy_hyperparams}\n'
+                  f'    override_subs_dict ={subs is not None}\n'
+                  f'    provide_param_guess={guess is not None}\n'
+                  f'    test_rolling_window={test_rolling_window}\n' 
+                  f'    plot_frequency     ={plot_step}\n')
+            
+        # compute a batched version of the initial values
+        if subs is None:
+            subs = self.test_compiled.init_values
+        else:
+            # if some p-variables are not provided, add their default values
+            subs = subs.copy()
+            added_pvars_to_subs = []
+            for (var, value) in self.test_compiled.init_values.items():
+                if var not in subs:
+                    subs[var] = value
+                    added_pvars_to_subs.append(var)
+            if added_pvars_to_subs:
+                raise_warning(f'p-variables {added_pvars_to_subs} not in '
+                              'provided subs, using their initial values '
+                              'from the RDDL files.')
+        train_subs, test_subs = self._batched_init_subs(subs)
+        
+        # initialize model parameters
+        if model_params is None:
+            model_params = self.compiled.model_params
+        model_params_test = self.test_compiled.model_params
+        
+        # initialize policy parameters
+        if guess is None:
+            key, subkey = random.split(key)
+            policy_params, opt_state = self.initialize(
+                subkey, policy_hyperparams, train_subs)
+        else:
+            policy_params = guess
+            opt_state = self.optimizer.init(policy_params)
+        
+        # initialize q-value parameters
+        key, subkey = random.split(key)
+        q_params, q_opt_state = self.initialize_q(
+            key, policy_params, policy_hyperparams, train_subs)
+        q_target_params = q_params
+        
+        # initialize replay buffer
+        state0 = {key: val[0, ...] for (key, val) in test_subs.items()}
+        self.buffer.reset()
+        q_losses = []
+        
+        # initialize running statistics
+        best_params, best_loss, best_grad = policy_params, jnp.inf, jnp.inf
+        last_iter_improve = 0
+        rolling_test_loss = RollingMean(test_rolling_window)
+        log = {}
+        
+        # training loop
+        iters = range(epochs)
+        if verbose >= 2:
+            iters = tqdm(iters, total=100, position=tqdm_position)
+        
+        for it in iters:
+            
+            # update the parameters of the plan
+            key, subkey1, subkey2, subkey3 = random.split(key, num=4)
+            policy_params, converged, opt_state, train_log = self.update(
+                subkey1, policy_params, policy_hyperparams,
+                train_subs, model_params, opt_state)
+            if not np.all(converged):
+                raise_warning(
+                    'Projected gradient method for satisfying action concurrency '
+                    'constraints reached the iteration limit: plan is possibly '
+                    'invalid for the current instance.', 'red')
+            
+            # evaluate losses
+            train_loss, _ = self.train_loss(
+                subkey2, policy_params, policy_hyperparams, 
+                train_subs, model_params)
+            test_loss, log = self.test_loss(
+                subkey3, policy_params, policy_hyperparams,
+                test_subs, model_params_test)
+            test_loss = rolling_test_loss.update(test_loss)
+            
+            # append trajectories to buffer
+            key, subkey = random.split(key)
+            action0 = self.test_policy(
+                subkey, policy_params, policy_hyperparams, 0, state0)
+            self.buffer.append(state0, action0, log)
+            
+            # update Q-values
+            key, *subkeys = random.split(key, num=1 + self.num_q_updates)
+            q_loss_mean = 0.
+            for subkey in subkeys:
+                batch = self.buffer.replay()
+                q_params, q_opt_state, q_target_params, q_loss_val = self.update_q(
+                    q_params, q_opt_state, q_target_params, *batch, 
+                    subkey, policy_params, policy_hyperparams)
+                q_loss_mean += q_loss_val / self.num_q_updates
+            q_losses.append(q_loss_mean)  
+            
+            # record the best plan so far
+            if test_loss < best_loss:
+                best_params, best_loss, best_grad = \
+                    policy_params, test_loss, train_log['grad']
+                last_iter_improve = it
+            
+            # save the plan figure
+            if plot_step is not None and it % plot_step == 0:
+                self._plot_actions(
+                    key, policy_params, policy_hyperparams, test_subs, it)
+            
+            # if the progress bar is used
+            elapsed = time.time() - start_time - elapsed_outside_loop
+            if verbose >= 2:
+                iters.n = int(100 * min(1, max(elapsed / train_seconds, it / epochs)))
+                iters.set_description(
+                    f'[{tqdm_position}] {it:6} it / {-train_loss:14.4f} train / '
+                    f'{-test_loss:14.4f} test / {-best_loss:14.4f} best / '
+                    f'{q_loss_mean:14.4f} q-loss')
+            
+            # return a callback
+            start_time_outside = time.time()
+            yield {
+                'iteration': it,
+                'train_return':-train_loss,
+                'test_return':-test_loss,
+                'best_return':-best_loss,
+                'params': policy_params,
+                'best_params': best_params,
+                'last_iteration_improved': last_iter_improve,
+                'grad': train_log['grad'],
+                'best_grad': best_grad,
+                'updates': train_log['updates'],
+                'elapsed_time': elapsed,
+                'key': key,
+                **log
+            }
+            elapsed_outside_loop += (time.time() - start_time_outside)
+            
+            # reached time budget
+            if elapsed >= train_seconds:
+                break
+            
+            # numerical error
+            if not np.isfinite(train_loss):
+                raise_warning(
+                    f'Aborting optimization due to invalid train loss {train_loss}.',
+                    'red')
+                break
+            if not np.isfinite(q_loss_mean):
+                raise_warning(
+                    f'Aborting optimization due to invalid q loss {q_loss_mean}.',
+                    'red')
+                break
+        
+        if verbose >= 2:
+            iters.close()
+        
+        # validate the test return
+        if log:
+            messages = set()
+            for error_code in np.unique(log['error']):
+                messages.update(JaxRDDLCompiler.get_error_messages(error_code))
+            if messages:
+                messages = '\n'.join(messages)
+                raise_warning('The JAX compiler encountered the following '
+                              'problems in the original RDDL '
+                              f'during test evaluation:\n{messages}', 'red')                               
+        
+        # summarize and test for convergence
+        if verbose >= 1:
+            grad_norm = jax.tree_map(
+                lambda x: np.array(jnp.linalg.norm(x)).item(), best_grad)
+            diagnosis = self._perform_diagnosis(
+                last_iter_improve, -train_loss, -test_loss, -best_loss, grad_norm)
+            print(f'summary of optimization:\n'
+                  f'    time_elapsed  ={elapsed}\n'
+                  f'    iterations    ={it}\n'
+                  f'    best_objective={-best_loss}\n'
+                  f'    grad_norm     ={grad_norm}\n'
+                  f'diagnosis: {diagnosis}\n')
+        
+        n_smooth = 5
+        import matplotlib.pyplot as plt
+        q_losses = np.asarray(q_losses)
+        ret = np.cumsum(q_losses, dtype=float)
+        ret[n_smooth:] = ret[n_smooth:] - ret[:-n_smooth]
+        q_losses = ret[n_smooth - 1:] / n_smooth
+        plt.plot(q_losses)
+        plt.savefig('q_value.pdf')
+
 
 class JaxArmijoLineSearchPlanner(JaxBackpropPlanner):
     '''A class for optimizing an action sequence in the given RDDL MDP using 
