@@ -1775,6 +1775,7 @@ class JaxBackpropPlannerWithQ(JaxBackpropPlanner):
                  buffer:Buffer=Buffer(),
                  tau:float=0.001,
                  num_q_updates:int=3,
+                 reg_penalty:float=0.,
                  **kwargs) -> None:
         self.q = q
         if optimizer_q_kwargs is None:
@@ -1784,6 +1785,7 @@ class JaxBackpropPlannerWithQ(JaxBackpropPlanner):
         self.buffer = buffer
         self.tau = tau
         self.num_q_updates = num_q_updates
+        self.reg_penalty = reg_penalty
                         
         super(JaxBackpropPlannerWithQ, self).__init__(*args, **kwargs)
         
@@ -1820,9 +1822,11 @@ class JaxBackpropPlannerWithQ(JaxBackpropPlanner):
         self.initialize_q = jax.jit(self._jax_init_q())
         
         # policy losses
-        train_loss = self._jax_loss(train_rollouts, use_symlog=self.use_symlog_reward)
+        train_loss = self._jax_loss(
+            train_rollouts, self.train_policy, use_symlog=self.use_symlog_reward)
         self.train_loss = jax.jit(train_loss)
-        self.test_loss = jax.jit(self._jax_loss(test_rollouts, use_symlog=False))
+        self.test_loss = jax.jit(self._jax_loss(
+            test_rollouts, self.test_policy, use_symlog=False))
         
         # q-value losses
         q_loss = self._jax_loss_q()
@@ -1838,7 +1842,7 @@ class JaxBackpropPlannerWithQ(JaxBackpropPlanner):
         policy = self.test_policy
         
         def _jax_wrapped_init_q(key, policy_params, hyperparams, subs):            
-            init_subs = {name: var[0, ...] for (name, var) in subs.items()}
+            init_subs = {name: val[0, ...] for (name, val) in subs.items()}
             action = policy(key, policy_params, hyperparams, 0, init_subs)  
             q_params = init_q(key, subs, action)
             q_opt_state = optimizer_q.init(q_params)
@@ -1846,9 +1850,48 @@ class JaxBackpropPlannerWithQ(JaxBackpropPlanner):
         
         return _jax_wrapped_init_q
         
+    def _jax_loss(self, rollouts, policy, use_symlog=False): 
+        utility_fn = self.utility        
+        _jax_wrapped_returns = self._jax_return(use_symlog)
+        q_fn = self.q.predict_q
+        gamma = self.rddl.discount
+        
+        # evaluate Q(state, policy(state)) at the terminal state
+        def _jax_wrapped_plan_bootstrap(key, policy_params, hyperparams,
+                                        q_params, log):
+            n_batch, n_steps = log['reward'].shape
+            key, *subkeys = random.split(key, num=1 + n_batch)
+            keys = jnp.asarray(subkeys)
+            states = {name: val[:, -1] for (name, val) in log['pvar'].items()}
+            batched_policy_fn = jax.vmap(policy, in_axes=(0, None, None, None, 0))
+            actions = batched_policy_fn(
+                keys, policy_params, hyperparams, n_steps, states)
+            q_values = jax.vmap(
+                q_fn, in_axes=(None, 0, 0))(q_params, states, actions)
+            return q_values
+            
+        # the loss is the average cumulative reward across all roll-outs
+        # but also terminates at the Q-value function 
+        def _jax_wrapped_plan_loss(key, policy_params, hyperparams,
+                                   subs, model_params, q_params):
+            key, subkey1, subkey2 = random.split(key, num=3)
+            log = rollouts(subkey1, policy_params, hyperparams, subs, model_params)
+            q_values = _jax_wrapped_plan_bootstrap(
+                subkey2, policy_params, hyperparams, q_params, log)
+            rewards = log['reward']
+            returns = _jax_wrapped_returns(rewards)
+            q_values = q_values.reshape(returns.shape)           
+            returns += jnp.power(gamma, rewards.shape[1]) * q_values
+            utility = utility_fn(returns)
+            loss = -utility
+            return loss, log
+        
+        return _jax_wrapped_plan_loss
+    
     def _jax_loss_q(self): 
         q_fn = self.q.predict_q
         gamma = self.rddl.discount
+        reg_penalty = self.reg_penalty
         
         # the value loss is the MSE between current Q and target values
         def _jax_wrapped_q_loss(q_params, q_target_params, state, action, reward,
@@ -1858,6 +1901,8 @@ class JaxBackpropPlannerWithQ(JaxBackpropPlanner):
             target = reward + gamma * (1 - done) * next_q_value
             target = jax.lax.stop_gradient(target)
             loss = optax.huber_loss(q_value, target)
+            loss += reg_penalty * sum(jnp.mean(jnp.square(param))
+                                      for param in jax.tree_leaves(q_params))
             return loss
         
         # batched loss
@@ -1874,6 +1919,26 @@ class JaxBackpropPlannerWithQ(JaxBackpropPlanner):
             
         return _jax_wrapped_q_loss_batched
         
+    def _jax_update(self, loss):
+        optimizer = self.optimizer
+        projection = self.plan.projection
+        
+        # calculate the plan gradient w.r.t. return loss and update optimizer
+        # also perform a projection step to satisfy constraints on actions
+        def _jax_wrapped_plan_update(key, policy_params, hyperparams,
+                                     subs, model_params, opt_state, q_params):
+            grad_fn = jax.grad(loss, argnums=1, has_aux=True)
+            grad, log = grad_fn(
+                key, policy_params, hyperparams, subs, model_params, q_params)  
+            updates, opt_state = optimizer.update(grad, opt_state) 
+            policy_params = optax.apply_updates(policy_params, updates)
+            policy_params, converged = projection(policy_params, hyperparams)
+            log['grad'] = grad
+            log['updates'] = updates
+            return policy_params, converged, opt_state, log
+        
+        return _jax_wrapped_plan_update
+            
     def _jax_update_q(self, q_loss):
         optimizer_q = self.optimizer_q
         policy = self.test_policy
@@ -1986,16 +2051,16 @@ class JaxBackpropPlannerWithQ(JaxBackpropPlanner):
             policy_params = guess
             opt_state = self.optimizer.init(policy_params)
         
+        # initialize replay buffer
+        state0 = {name: val[0, ...] for (name, val) in test_subs.items()}
+        self.buffer.reset()
+        q_losses = []
+        
         # initialize q-value parameters
         key, subkey = random.split(key)
         q_params, q_opt_state = self.initialize_q(
-            key, policy_params, policy_hyperparams, train_subs)
+            subkey, policy_params, policy_hyperparams, train_subs)
         q_target_params = q_params
-        
-        # initialize replay buffer
-        state0 = {key: val[0, ...] for (key, val) in test_subs.items()}
-        self.buffer.reset()
-        q_losses = []
         
         # initialize running statistics
         best_params, best_loss, best_grad = policy_params, jnp.inf, jnp.inf
@@ -2014,7 +2079,7 @@ class JaxBackpropPlannerWithQ(JaxBackpropPlanner):
             key, subkey1, subkey2, subkey3 = random.split(key, num=4)
             policy_params, converged, opt_state, train_log = self.update(
                 subkey1, policy_params, policy_hyperparams,
-                train_subs, model_params, opt_state)
+                train_subs, model_params, opt_state, q_params)
             if not np.all(converged):
                 raise_warning(
                     'Projected gradient method for satisfying action concurrency '
@@ -2024,10 +2089,10 @@ class JaxBackpropPlannerWithQ(JaxBackpropPlanner):
             # evaluate losses
             train_loss, _ = self.train_loss(
                 subkey2, policy_params, policy_hyperparams, 
-                train_subs, model_params)
+                train_subs, model_params, q_params)
             test_loss, log = self.test_loss(
                 subkey3, policy_params, policy_hyperparams,
-                test_subs, model_params_test)
+                test_subs, model_params_test, q_params)
             test_loss = rolling_test_loss.update(test_loss)
             
             # append trajectories to buffer
@@ -2041,10 +2106,11 @@ class JaxBackpropPlannerWithQ(JaxBackpropPlanner):
             q_loss_mean = 0.
             for subkey in subkeys:
                 batch = self.buffer.replay()
-                q_params, q_opt_state, q_target_params, q_loss_val = self.update_q(
-                    q_params, q_opt_state, q_target_params, *batch, 
-                    subkey, policy_params, policy_hyperparams)
-                q_loss_mean += q_loss_val / self.num_q_updates
+                if batch is not None:
+                    q_params, q_opt_state, q_target_params, q_loss_val = self.update_q(
+                        q_params, q_opt_state, q_target_params, *batch, 
+                        subkey, policy_params, policy_hyperparams)
+                    q_loss_mean += q_loss_val / self.num_q_updates
             q_losses.append(q_loss_mean)  
             
             # record the best plan so far
@@ -2129,7 +2195,7 @@ class JaxBackpropPlannerWithQ(JaxBackpropPlanner):
                   f'    grad_norm     ={grad_norm}\n'
                   f'diagnosis: {diagnosis}\n')
         
-        n_smooth = 5
+        n_smooth = 10
         import matplotlib.pyplot as plt
         q_losses = np.asarray(q_losses)
         ret = np.cumsum(q_losses, dtype=float)
