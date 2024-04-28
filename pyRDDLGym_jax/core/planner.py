@@ -938,11 +938,11 @@ class JaxQValueFunction:
     
     def summarize_hyperparameters(self):
         print(f'Q-function hyper-parameters:\n'
-              f'    topology_state  ={self._topology_state}\n'
-              f'    topology_action ={self._topology_action}\n'
-              f'    topology_common ={self._topology_common}\n'
-              f'    activation_fn   ={self._activation.__name__}\n'
-              f'    initializer     ={type(self._initializer_base).__name__}')
+              f'    topology_state ={self._topology_state}\n'
+              f'    topology_action={self._topology_action}\n'
+              f'    topology_common={self._topology_common}\n'
+              f'    activation_fn  ={self._activation.__name__}\n'
+              f'    initializer    ={type(self._initializer_base).__name__}')
     
     def compile(self, compiled: JaxRDDLCompilerWithGrad) -> None:
         rddl = compiled.rddl
@@ -1669,43 +1669,52 @@ class JaxBackpropPlanner:
 
 class Buffer:
     
-    def __init__(self, n_samples:int=10000, n_batch:int=32) -> None:
+    def __init__(self, n_samples:int=1000, n_batch:int=32) -> None:
         self.n_samples = n_samples
         self.n_batch = n_batch
         
         def _reshape(arr):
-            return arr.reshape((-1,) + arr.shape[2:])
+            return jnp.reshape(arr, newshape=(-1,) + arr.shape[2:])
         
         # convert trajectories in log into tensors whose leading dimension
         # combines the batch and time dimensions of the original trajectories
         def _jax_process_trajectories(log):
-            states, actions, rewards, dones = \
+            pvars, actions, rewards, dones = \
                 log['pvar'], log['action'], log['reward'], log['termination']
             mask = ~_reshape(dones[:, :-1])
-            curr_states = {key: _reshape(val[:, :-1, ...]) for (key, val) in states.items()}
-            curr_actions = {key: _reshape(val[:, :-1, ...]) for (key, val) in actions.items()}
-            next_states = {key: _reshape(val[:, 1:, ...]) for (key, val) in states.items()}
+            states = {name: _reshape(val[:, :-1, ...]) 
+                      for (name, values) in pvars.items()}
+            actions = {name: _reshape(val[:, :-1, ...]) 
+                       for (name, values) in actions.items()}
+            next_states = {name: _reshape(val[:, 1:, ...]) 
+                           for (name, values) in pvars.items()}
             rewards = _reshape(rewards[:, 1:])
             dones = _reshape(dones[:, 1:])
-            return curr_states, curr_actions, rewards, next_states, dones, mask
+            return states, actions, rewards, next_states, dones, mask
         
         self.process_fn = jax.jit(_jax_process_trajectories)
         
         # process the first transition of the trajectory
         def _jax_process_first_step(subs, action, log):
-            states, rewards, dones = log['pvar'], log['reward'], log['termination']
+            pvars, rewards, dones = log['pvar'], log['reward'], log['termination']
             n_elem = dones.shape[0]
-            curr_states = {key: jnp.repeat(val[jnp.newaxis, ...], repeats=n_elem, axis=0)
-                           for (key, val) in subs.items()}
-            curr_actions = {key: jnp.repeat(val[jnp.newaxis, ...], repeats=n_elem, axis=0)
-                            for (key, val) in action.items()}
+            states = {name: jnp.repeat(values[jnp.newaxis, ...], n_elem, axis=0)
+                      for (name, values) in subs.items()}
+            actions = {name: jnp.repeat(values[jnp.newaxis, ...], n_elem, axis=0)
+                       for (name, values) in action.items()}
             rewards = rewards[:, 0]
-            next_states = {key: val[:, 0, ...] for (key, val) in states.items()}
+            next_states = {name: values[:, 0, ...] 
+                           for (name, values) in pvars.items()}
             dones = dones[:, 0]
-            return curr_states, curr_actions, rewards, next_states, dones
+            return states, actions, rewards, next_states, dones
         
         self.process_first_step_fn = jax.jit(_jax_process_first_step)
-                    
+                   
+    def summarize_hyperparameters(self):
+        print(f'replay buffer hyper-parameters:\n'
+              f'    capacity  ={self.n_samples}\n'
+              f'    batch_size={self.n_batch}')
+     
     def reset(self) -> None:
         self.states = {}
         self.actions = {}
@@ -1773,14 +1782,15 @@ class JaxBackpropPlannerWithQ(JaxBackpropPlanner):
                  optimizer_q: Callable[..., optax.GradientTransformation]=optax.adam,
                  optimizer_q_kwargs: Optional[Dict[str, object]]=None,
                  buffer:Buffer=Buffer(),
-                 tau:float=0.001,
-                 num_q_updates:int=3,
+                 tau:float=0.1,
+                 num_q_updates:int=1,
                  reg_penalty:float=0.,
                  **kwargs) -> None:
         self.q = q
         if optimizer_q_kwargs is None:
             optimizer_q_kwargs = {'learning_rate': 0.0005}
         self.optimizer_q_kwargs = optimizer_q_kwargs  
+        self._optimizer_q_name = optimizer_q
         self.optimizer_q = optimizer_q(**optimizer_q_kwargs)   
         self.buffer = buffer
         self.tau = tau
@@ -1792,6 +1802,13 @@ class JaxBackpropPlannerWithQ(JaxBackpropPlanner):
     def summarize_hyperparameters(self):
         super(JaxBackpropPlannerWithQ, self).summarize_hyperparameters()
         self.q.summarize_hyperparameters()
+        self.buffer.summarize_hyperparameters()
+        print(f'Q-function optimizer hyper-parameters:\n'
+              f'    optimizer          ={self._optimizer_q_name.__name__}\n'
+              f'    optimizer args     ={self.optimizer_q_kwargs}\n'
+              f'    target_weight (tau)={self.tau}\n'
+              f'    num_updates        ={self.num_q_updates}\n'
+              f'    l2_regularization  ={self.reg_penalty}')
                 
     def _jax_compile_optimizer(self):
         
@@ -1823,10 +1840,11 @@ class JaxBackpropPlannerWithQ(JaxBackpropPlanner):
         
         # policy losses
         train_loss = self._jax_loss(
-            train_rollouts, self.train_policy, use_symlog=self.use_symlog_reward)
+            train_rollouts, self.train_policy, 
+            bootstrap=False, use_symlog=self.use_symlog_reward)
         self.train_loss = jax.jit(train_loss)
         self.test_loss = jax.jit(self._jax_loss(
-            test_rollouts, self.test_policy, use_symlog=False))
+            test_rollouts, self.test_policy, bootstrap=False, use_symlog=False))
         
         # q-value losses
         q_loss = self._jax_loss_q()
@@ -1839,7 +1857,7 @@ class JaxBackpropPlannerWithQ(JaxBackpropPlanner):
     def _jax_init_q(self):        
         init_q = self.q.initializer
         optimizer_q = self.optimizer_q
-        policy = self.test_policy
+        policy = self.train_policy
         
         def _jax_wrapped_init_q(key, policy_params, hyperparams, subs):            
             init_subs = {name: val[0, ...] for (name, val) in subs.items()}
@@ -1850,38 +1868,32 @@ class JaxBackpropPlannerWithQ(JaxBackpropPlanner):
         
         return _jax_wrapped_init_q
         
-    def _jax_loss(self, rollouts, policy, use_symlog=False): 
+    def _jax_loss(self, rollouts, policy, bootstrap=True, use_symlog=False): 
         utility_fn = self.utility        
         _jax_wrapped_returns = self._jax_return(use_symlog)
         q_fn = self.q.predict_q
         gamma = self.rddl.discount
         
-        # evaluate Q(state, policy(state)) at the terminal state
-        def _jax_wrapped_plan_bootstrap(key, policy_params, hyperparams,
-                                        q_params, log):
-            n_batch, n_steps = log['reward'].shape
-            key, *subkeys = random.split(key, num=1 + n_batch)
-            keys = jnp.asarray(subkeys)
-            states = {name: val[:, -1] for (name, val) in log['pvar'].items()}
-            batched_policy_fn = jax.vmap(policy, in_axes=(0, None, None, None, 0))
-            actions = batched_policy_fn(
-                keys, policy_params, hyperparams, n_steps, states)
-            q_values = jax.vmap(
-                q_fn, in_axes=(None, 0, 0))(q_params, states, actions)
-            return q_values
-            
         # the loss is the average cumulative reward across all roll-outs
-        # but also terminates at the Q-value function 
+        # optionally add Q(state, policy(state)) for the last state
         def _jax_wrapped_plan_loss(key, policy_params, hyperparams,
                                    subs, model_params, q_params):
-            key, subkey1, subkey2 = random.split(key, num=3)
-            log = rollouts(subkey1, policy_params, hyperparams, subs, model_params)
-            q_values = _jax_wrapped_plan_bootstrap(
-                subkey2, policy_params, hyperparams, q_params, log)
+            key, subkey = random.split(key)
+            log = rollouts(subkey, policy_params, hyperparams, subs, model_params)
             rewards = log['reward']
             returns = _jax_wrapped_returns(rewards)
-            q_values = q_values.reshape(returns.shape)           
-            returns += jnp.power(gamma, rewards.shape[1]) * q_values
+            if bootstrap:     
+                n_batch, n_steps = rewards.shape
+                key, *subkeys = random.split(key, num=1 + n_batch)
+                keys = jnp.asarray(subkeys)
+                last_states = {name: val[:, -1, ...] 
+                               for (name, val) in log['pvar'].items()}
+                last_actions = jax.vmap(policy, in_axes=(0, None, None, None, 0))(
+                    keys, policy_params, hyperparams, n_steps, last_states)
+                q_values = jax.vmap(q_fn, in_axes=(None, 0, 0))(
+                    q_params, last_states, last_actions)                
+                q_values = jnp.reshape(q_values, newshape=returns.shape)      
+                returns += jnp.power(gamma, n_steps) * q_values
             utility = utility_fn(returns)
             loss = -utility
             return loss, log
@@ -1893,28 +1905,27 @@ class JaxBackpropPlannerWithQ(JaxBackpropPlanner):
         gamma = self.rddl.discount
         reg_penalty = self.reg_penalty
         
-        # the value loss is the MSE between current Q and target values
-        def _jax_wrapped_q_loss(q_params, q_target_params, state, action, reward,
-                                next_state, next_action, done):
+        # the error between current Q-value and target value
+        def _jax_wrapped_q_error(q_params, q_target_params, state, action, reward,
+                                 next_state, next_action, done):
             q_value = q_fn(q_params, state, action)
             next_q_value = q_fn(q_target_params, next_state, next_action)
-            target = reward + gamma * (1 - done) * next_q_value
-            target = jax.lax.stop_gradient(target)
-            loss = optax.huber_loss(q_value, target)
-            loss += reg_penalty * sum(jnp.mean(jnp.square(param))
-                                      for param in jax.tree_leaves(q_params))
-            return loss
+            target = reward + (1 - done) * gamma * next_q_value
+            error = q_value - jax.lax.stop_gradient(target)
+            return error
         
-        # batched loss
+        # batched MSE loss function for training Q-value function
         def _jax_wrapped_q_loss_batched(q_params, q_target_params, 
                                         states, actions, rewards,
                                         next_states, next_actions, dones):
-            batched_loss_fn = jax.vmap(
-                _jax_wrapped_q_loss, in_axes=(None, None, 0, 0, 0, 0, 0, 0))
-            losses = batched_loss_fn(
+            batched_error_fn = jax.vmap(
+                _jax_wrapped_q_error, in_axes=(None, None, 0, 0, 0, 0, 0, 0))
+            errors = batched_error_fn(
                 q_params, q_target_params, states, actions, rewards, 
                 next_states, next_actions, dones)
-            loss = jnp.mean(losses)
+            loss = jnp.mean(jnp.square(errors))
+            for param in jax.tree_util.tree_leaves(q_params):
+                loss += reg_penalty * jnp.mean(jnp.square(param))
             return loss
             
         return _jax_wrapped_q_loss_batched
@@ -1927,8 +1938,7 @@ class JaxBackpropPlannerWithQ(JaxBackpropPlanner):
         # also perform a projection step to satisfy constraints on actions
         def _jax_wrapped_plan_update(key, policy_params, hyperparams,
                                      subs, model_params, opt_state, q_params):
-            grad_fn = jax.grad(loss, argnums=1, has_aux=True)
-            grad, log = grad_fn(
+            grad, log = jax.grad(loss, argnums=1, has_aux=True)(
                 key, policy_params, hyperparams, subs, model_params, q_params)  
             updates, opt_state = optimizer.update(grad, opt_state) 
             policy_params = optax.apply_updates(policy_params, updates)
@@ -1948,10 +1958,9 @@ class JaxBackpropPlannerWithQ(JaxBackpropPlanner):
         def _jax_wrapped_q_update(q_params, q_opt_state, q_target_params,
                                   states, actions, rewards, 
                                   next_states, next_actions, dones):
-            grad_fn = jax.value_and_grad(q_loss, argnums=0)
-            loss, grad = grad_fn(q_params, q_target_params, 
-                                 states, actions, rewards,
-                                 next_states, next_actions, dones)
+            loss, grad = jax.value_and_grad(q_loss, argnums=0)(
+                q_params, q_target_params, 
+                states, actions, rewards, next_states, next_actions, dones)
             updates, q_opt_state = optimizer_q.update(grad, q_opt_state)
             q_params = optax.apply_updates(q_params, updates)
             q_target_params = jax.tree_map(
@@ -1965,8 +1974,7 @@ class JaxBackpropPlannerWithQ(JaxBackpropPlanner):
                                          key, policy_params, hyperparams):
             key, *subkeys = random.split(key, num=1 + dones.size)
             keys = jnp.asarray(subkeys)
-            batched_policy_fn = jax.vmap(policy, in_axes=(0, None, None, None, 0))
-            next_actions = batched_policy_fn(
+            next_actions = jax.vmap(policy, in_axes=(0, None, None, None, 0))(
                 keys, policy_params, hyperparams, 0, next_states)
             return _jax_wrapped_q_update(q_params, q_opt_state, q_target_params, 
                                          states, actions, rewards, 
@@ -2111,8 +2119,20 @@ class JaxBackpropPlannerWithQ(JaxBackpropPlanner):
                         q_params, q_opt_state, q_target_params, *batch, 
                         subkey, policy_params, policy_hyperparams)
                     q_loss_mean += q_loss_val / self.num_q_updates
-            q_losses.append(q_loss_mean)  
+            q_losses.append(q_loss_mean)
             
+            if it % 200 == 0:
+                n = 30
+                grid_values = np.zeros((n, n))
+                for i1, r1 in enumerate(np.linspace(0, 100, n)):
+                    for i2, r2 in enumerate(np.linspace(0, 100, n)):
+                        state_r1_r2 = {'rlevel': np.asarray([r1, r2])}
+                        action_r1_r2 = {'release': np.asarray([0., 0.])}
+                        grid_values[i1, i2] = self.q.predict_q(q_params, state_r1_r2, action_r1_r2)
+                import matplotlib.pyplot as plt
+                plt.imshow(grid_values, extent=[0, 100, 0, 100], origin='lower')
+                plt.savefig(f'grid_{it}.pdf')
+                    
             # record the best plan so far
             if test_loss < best_loss:
                 best_params, best_loss, best_grad = \
