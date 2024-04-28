@@ -1869,7 +1869,7 @@ class JaxBackpropPlannerWithQ(JaxBackpropPlanner):
                 n_batch, n_steps = rewards.shape
                 key, *subkeys = random.split(key, num=1 + n_batch)
                 keys = jnp.asarray(subkeys)
-                last_states = {name: values[:, -1, ...]
+                last_states = {rddl.prev_state[name]: values[:, -1, ...]
                                for (name, values) in log['fluents'].items()
                                if name in rddl.prev_state}
                 last_actions = jax.vmap(policy, in_axes=(0, None, None, None, 0))(
@@ -2100,7 +2100,7 @@ class JaxBackpropPlannerWithQ(JaxBackpropPlanner):
                     q_loss_mean += q_loss_val / self.num_q_updates
             q_losses.append(q_loss_mean)
             
-            if it % 200 == 0:
+            if it % 500 == 0:
                 n = 30
                 grid_values = np.zeros((n, n))
                 for i1, r1 in enumerate(np.linspace(0, 100, n)):
