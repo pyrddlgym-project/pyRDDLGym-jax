@@ -1669,9 +1669,11 @@ class JaxBackpropPlanner:
 
 class Buffer:
     
-    def __init__(self, n_samples:int=1000, n_batch:int=32) -> None:
+    def __init__(self, n_samples:int=10000, n_batch:int=32) -> None:
         self.n_samples = n_samples
         self.n_batch = n_batch
+        
+    def compile(self, rddl):
         
         def _reshape(arr):
             return jnp.reshape(arr, newshape=(-1,) + arr.shape[2:])
@@ -1679,37 +1681,23 @@ class Buffer:
         # convert trajectories in log into tensors whose leading dimension
         # combines the batch and time dimensions of the original trajectories
         def _jax_process_trajectories(log):
-            pvars, actions, rewards, dones = \
-                log['pvar'], log['action'], log['reward'], log['termination']
-            mask = ~_reshape(dones[:, :-1])
-            states = {name: _reshape(val[:, :-1, ...]) 
-                      for (name, values) in pvars.items()}
-            actions = {name: _reshape(val[:, :-1, ...]) 
-                       for (name, values) in actions.items()}
-            next_states = {name: _reshape(val[:, 1:, ...]) 
-                           for (name, values) in pvars.items()}
-            rewards = _reshape(rewards[:, 1:])
-            dones = _reshape(dones[:, 1:])
-            return states, actions, rewards, next_states, dones, mask
-        
-        self.process_fn = jax.jit(_jax_process_trajectories)
-        
-        # process the first transition of the trajectory
-        def _jax_process_first_step(subs, action, log):
-            pvars, rewards, dones = log['pvar'], log['reward'], log['termination']
-            n_elem = dones.shape[0]
-            states = {name: jnp.repeat(values[jnp.newaxis, ...], n_elem, axis=0)
-                      for (name, values) in subs.items()}
-            actions = {name: jnp.repeat(values[jnp.newaxis, ...], n_elem, axis=0)
-                       for (name, values) in action.items()}
-            rewards = rewards[:, 0]
-            next_states = {name: values[:, 0, ...] 
-                           for (name, values) in pvars.items()}
-            dones = dones[:, 0]
+            fluents, rewards, dones = \
+                log['fluents'], log['reward'], log['termination']
+            states = {name: _reshape(values) 
+                      for (name, values) in fluents.items()
+                      if name in rddl.state_fluents}
+            actions = {name: _reshape(values)
+                       for (name, values) in fluents.items()
+                       if name in rddl.action_fluents}
+            next_states = {rddl.prev_state[name]: _reshape(values)
+                           for (name, values) in fluents.items()
+                           if name in rddl.prev_state}
+            rewards = _reshape(rewards)
+            dones = _reshape(dones)
             return states, actions, rewards, next_states, dones
         
-        self.process_first_step_fn = jax.jit(_jax_process_first_step)
-                   
+        self.process_fn = jax.jit(_jax_process_trajectories)
+                      
     def summarize_hyperparameters(self):
         print(f'replay buffer hyper-parameters:\n'
               f'    capacity  ={self.n_samples}\n'
@@ -1728,51 +1716,45 @@ class Buffer:
         if self.size < self.n_batch: 
             return None
         indices = np.random.randint(low=0, high=self.size, size=(self.n_batch,))
-        states = {key: val[indices] for (key, val) in self.states.items()}
-        actions = {key: val[indices] for (key, val) in self.actions.items()}
+        states = {name: values[indices] for (name, values) in self.states.items()}
+        actions = {name: values[indices] for (name, values) in self.actions.items()}
         rewards = self.rewards[indices]
-        next_states = {key: val[indices] for (key, val) in self.next_states.items()}
+        next_states = {name: values[indices] for (name, values) in self.next_states.items()}
         dones = self.dones[indices]
         return states, actions, rewards, next_states, dones
     
     def _initialize(self, states, actions, next_states):
         self.states = {
-            key: np.empty((self.n_samples,) + val.shape[1:], dtype=val.dtype)
-            for (key, val) in states.items()
+            name: np.empty((self.n_samples,) + values.shape[1:], dtype=values.dtype)
+            for (name, values) in states.items()
         }
         self.actions = {
-            key: np.empty((self.n_samples,) + val.shape[1:], dtype=val.dtype)
-            for (key, val) in actions.items()
+            name: np.empty((self.n_samples,) + values.shape[1:], dtype=values.dtype)
+            for (name, values) in actions.items()
         }
         self.rewards = np.empty((self.n_samples,), dtype=float)
         self.next_states = {
-            key: np.empty((self.n_samples,) + val.shape[1:], dtype=val.dtype)
-            for (key, val) in next_states.items()
+            name: np.empty((self.n_samples,) + values.shape[1:], dtype=values.dtype)
+            for (name, values) in next_states.items()
         }
         self.dones = np.empty((self.n_samples,), dtype=bool)
     
-    def _append(self, states, actions, rewards, next_states, dones, mask=None):
+    def append(self, log):
+        states, actions, rewards, next_states, dones = self.process_fn(log)
         if not self.size:
             self._initialize(states, actions, next_states)
-        if mask is None:
-            mask = np.ones((dones.size,), dtype=bool)
-        mask = np.asarray(mask)
-        n_keep = np.sum(mask)
-        indices = np.arange(self.index, self.index + n_keep) % self.n_samples
-        for (key, val) in states.items():
-            self.states[key][indices] = np.asarray(val)[mask]
-        for (key, val) in actions.items():
-            self.actions[key][indices] = np.asarray(val)[mask]
-        self.rewards[indices] = np.asarray(rewards)[mask]
-        for (key, val) in next_states.items():
-            self.next_states[key][indices] = np.asarray(val)[mask]
-        self.dones[indices] = np.asarray(dones)[mask]        
-        self.index += n_keep
-        self.size = min(self.size + n_keep, self.n_samples)
-        
-    def append(self, state, action, log):
-        self._append(*self.process_first_step_fn(state, action, log))
-        self._append(*self.process_fn(log))
+        n_steps = rewards.size
+        indices = np.arange(self.index, self.index + n_steps) % self.n_samples
+        for (name, values) in states.items():
+            self.states[name][indices] = np.asarray(values)
+        for (name, values) in actions.items():
+            self.actions[name][indices] = np.asarray(values)
+        self.rewards[indices] = np.asarray(rewards)
+        for (name, values) in next_states.items():
+            self.next_states[name][indices] = np.asarray(values)
+        self.dones[indices] = np.asarray(dones)       
+        self.index += n_steps
+        self.size = min(self.size + n_steps, self.n_samples)
         
         
 class JaxBackpropPlannerWithQ(JaxBackpropPlanner):
@@ -1860,7 +1842,7 @@ class JaxBackpropPlannerWithQ(JaxBackpropPlanner):
         policy = self.train_policy
         
         def _jax_wrapped_init_q(key, policy_params, hyperparams, subs):            
-            init_subs = {name: val[0, ...] for (name, val) in subs.items()}
+            init_subs = {name: values[0, ...] for (name, values) in subs.items()}
             action = policy(key, policy_params, hyperparams, 0, init_subs)  
             q_params = init_q(key, subs, action)
             q_opt_state = optimizer_q.init(q_params)
@@ -1872,6 +1854,7 @@ class JaxBackpropPlannerWithQ(JaxBackpropPlanner):
         utility_fn = self.utility        
         _jax_wrapped_returns = self._jax_return(use_symlog)
         q_fn = self.q.predict_q
+        rddl = self.rddl
         gamma = self.rddl.discount
         
         # the loss is the average cumulative reward across all roll-outs
@@ -1886,8 +1869,9 @@ class JaxBackpropPlannerWithQ(JaxBackpropPlanner):
                 n_batch, n_steps = rewards.shape
                 key, *subkeys = random.split(key, num=1 + n_batch)
                 keys = jnp.asarray(subkeys)
-                last_states = {name: val[:, -1, ...] 
-                               for (name, val) in log['pvar'].items()}
+                last_states = {name: values[:, -1, ...]
+                               for (name, values) in log['fluents'].items()
+                               if name in rddl.prev_state}
                 last_actions = jax.vmap(policy, in_axes=(0, None, None, None, 0))(
                     keys, policy_params, hyperparams, n_steps, last_states)
                 q_values = jax.vmap(q_fn, in_axes=(None, 0, 0))(
@@ -2060,7 +2044,7 @@ class JaxBackpropPlannerWithQ(JaxBackpropPlanner):
             opt_state = self.optimizer.init(policy_params)
         
         # initialize replay buffer
-        state0 = {name: val[0, ...] for (name, val) in test_subs.items()}
+        self.buffer.compile(self.rddl)
         self.buffer.reset()
         q_losses = []
         
@@ -2103,13 +2087,8 @@ class JaxBackpropPlannerWithQ(JaxBackpropPlanner):
                 test_subs, model_params_test, q_params)
             test_loss = rolling_test_loss.update(test_loss)
             
-            # append trajectories to buffer
-            key, subkey = random.split(key)
-            action0 = self.test_policy(
-                subkey, policy_params, policy_hyperparams, 0, state0)
-            self.buffer.append(state0, action0, log)
-            
             # update Q-values
+            self.buffer.append(log)
             key, *subkeys = random.split(key, num=1 + self.num_q_updates)
             q_loss_mean = 0.
             for subkey in subkeys:
