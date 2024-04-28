@@ -42,7 +42,7 @@ def main(domain, instance, method, episodes=1):
     planner_args, _, train_args = load_config(config_path)
     
     # create the planning algorithm
-    q = JaxQValueFunction([16], [16], [32, 16])
+    q = JaxQValueFunction([64], [64], [64])
     planner = JaxBackpropPlannerWithQ(rddl=env.model, q=q, **planner_args)
     
     # create the controller   
