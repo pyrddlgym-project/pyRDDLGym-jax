@@ -1770,7 +1770,7 @@ class JaxBackpropPlannerWithQ(JaxBackpropPlanner):
                  **kwargs) -> None:
         self.q = q
         if optimizer_q_kwargs is None:
-            optimizer_q_kwargs = {'learning_rate': 0.0005}
+            optimizer_q_kwargs = {'learning_rate': 0.0001}
         self.optimizer_q_kwargs = optimizer_q_kwargs  
         self._optimizer_q_name = optimizer_q
         self.optimizer_q = optimizer_q(**optimizer_q_kwargs)   
@@ -1895,6 +1895,7 @@ class JaxBackpropPlannerWithQ(JaxBackpropPlanner):
             q_value = q_fn(q_params, state, action)
             next_q_value = q_fn(q_target_params, next_state, next_action)
             target = reward + (1 - done) * gamma * next_q_value
+            target = jnp.reshape(target, newshape=q_value.shape)
             error = q_value - jax.lax.stop_gradient(target)
             return error
         
@@ -2200,6 +2201,7 @@ class JaxBackpropPlannerWithQ(JaxBackpropPlanner):
         ret = np.cumsum(q_losses, dtype=float)
         ret[n_smooth:] = ret[n_smooth:] - ret[:-n_smooth]
         q_losses = ret[n_smooth - 1:] / n_smooth
+        plt.clf()
         plt.plot(q_losses)
         plt.savefig('q_value.pdf')
 
