@@ -91,7 +91,7 @@ def main():
     my_args = [jax.random.PRNGKey(42), params, None, subs, compiler.model_params]
     
     # print the fluents over the trajectory, return and gradient
-    print(step_fn(*my_args)['pvar'])
+    print(step_fn(*my_args)['fluents'])
     print(sum_of_rewards(*my_args))
     print(jax.grad(sum_of_rewards, argnums=1)(*my_args))
     
