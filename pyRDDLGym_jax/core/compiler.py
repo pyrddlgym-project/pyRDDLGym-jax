@@ -361,6 +361,10 @@ class JaxRDDLCompiler:
             reward, key, err = reward_fn(subs, model_params, key)
             errors |= err
             
+            # calculate fluent values
+            fluents = {name: values for (name, values) in subs.items() 
+                       if name not in rddl.non_fluents}
+            
             # set the next state to the current state
             for (state, next_state) in rddl.next_state.items():
                 subs[state] = subs[next_state]
@@ -383,8 +387,7 @@ class JaxRDDLCompiler:
             
             # prepare the return value
             log = {
-                'pvar': subs,
-                'action': actions,
+                'fluents': fluents,
                 'reward': reward,
                 'error': errors,
                 'precondition': precond_check,
@@ -395,7 +398,7 @@ class JaxRDDLCompiler:
                 log['inequalities'] = inequalities
                 log['equalities'] = equalities
                 
-            return log
+            return subs, log
         
         return _jax_wrapped_single_step        
     
@@ -442,19 +445,18 @@ class JaxRDDLCompiler:
                       if var in observed_vars}
             actions = policy(key, policy_params, hyperparams, step, states)
             key, subkey = random.split(key)
-            log = jax_step_fn(subkey, actions, subs, model_params)
-            return log
+            subs, log = jax_step_fn(subkey, actions, subs, model_params)
+            return subs, log
                         
         # do a batched step update from the policy
         def _jax_wrapped_batched_step_policy(carry, step):
             key, policy_params, hyperparams, subs, model_params = carry  
             key, *subkeys = random.split(key, num=1 + n_batch)
             keys = jnp.asarray(subkeys)
-            log = jax.vmap(
+            subs, log = jax.vmap(
                 _jax_wrapped_single_step_policy,
                 in_axes=(0, None, None, None, 0, None)
             )(keys, policy_params, hyperparams, step, subs, model_params)
-            subs = log['pvar']
             carry = (key, policy_params, hyperparams, subs, model_params)
             return carry, log            
             
