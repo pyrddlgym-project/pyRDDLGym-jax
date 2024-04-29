@@ -1753,7 +1753,7 @@ class Buffer:
         for (name, values) in next_states.items():
             self.next_states[name][indices] = np.asarray(values)
         self.dones[indices] = np.asarray(dones)       
-        self.index += n_steps
+        self.index = (self.index + n_steps) % self.n_samples
         self.size = min(self.size + n_steps, self.n_samples)
         
         
@@ -1763,19 +1763,19 @@ class JaxBackpropPlannerWithQ(JaxBackpropPlanner):
                  q: JaxQValueFunction,
                  optimizer_q: Callable[..., optax.GradientTransformation]=optax.adam,
                  optimizer_q_kwargs: Optional[Dict[str, object]]=None,
-                 buffer:Buffer=Buffer(),
-                 tau:float=0.1,
-                 num_q_updates:int=1,
-                 reg_penalty:float=0.,
+                 buffer: Buffer=Buffer(),
+                 target_update_freq: int=10,
+                 num_q_updates: int=1,
+                 reg_penalty: float=0.,
                  **kwargs) -> None:
         self.q = q
         if optimizer_q_kwargs is None:
-            optimizer_q_kwargs = {'learning_rate': 0.0001}
+            optimizer_q_kwargs = {'learning_rate': 0.00001}
         self.optimizer_q_kwargs = optimizer_q_kwargs  
         self._optimizer_q_name = optimizer_q
         self.optimizer_q = optimizer_q(**optimizer_q_kwargs)   
         self.buffer = buffer
-        self.tau = tau
+        self.target_update_freq = target_update_freq
         self.num_q_updates = num_q_updates
         self.reg_penalty = reg_penalty
                         
@@ -1786,11 +1786,11 @@ class JaxBackpropPlannerWithQ(JaxBackpropPlanner):
         self.q.summarize_hyperparameters()
         self.buffer.summarize_hyperparameters()
         print(f'Q-function optimizer hyper-parameters:\n'
-              f'    optimizer          ={self._optimizer_q_name.__name__}\n'
-              f'    optimizer args     ={self.optimizer_q_kwargs}\n'
-              f'    target_weight (tau)={self.tau}\n'
-              f'    num_updates        ={self.num_q_updates}\n'
-              f'    l2_regularization  ={self.reg_penalty}')
+              f'    optimizer         ={self._optimizer_q_name.__name__}\n'
+              f'    optimizer args    ={self.optimizer_q_kwargs}\n'
+              f'    target_update_freq={self.target_update_freq}\n'
+              f'    num_updates       ={self.num_q_updates}\n'
+              f'    l2_regularization ={self.reg_penalty}')
                 
     def _jax_compile_optimizer(self):
         
@@ -1807,7 +1807,7 @@ class JaxBackpropPlannerWithQ(JaxBackpropPlanner):
         # roll-outs
         train_rollouts = self.compiled.compile_rollouts(
             policy=self.plan.train_policy,
-            n_steps=self.horizon,
+            n_steps=5,#self.horizon,
             n_batch=self.batch_size_train)
         
         test_rollouts = self.test_compiled.compile_rollouts(
@@ -1823,7 +1823,7 @@ class JaxBackpropPlannerWithQ(JaxBackpropPlanner):
         # policy losses
         train_loss = self._jax_loss(
             train_rollouts, self.train_policy, 
-            bootstrap=False, use_symlog=self.use_symlog_reward)
+            bootstrap=True, use_symlog=self.use_symlog_reward)
         self.train_loss = jax.jit(train_loss)
         self.test_loss = jax.jit(self._jax_loss(
             test_rollouts, self.test_policy, bootstrap=False, use_symlog=False))
@@ -1906,8 +1906,8 @@ class JaxBackpropPlannerWithQ(JaxBackpropPlanner):
             batched_error_fn = jax.vmap(
                 _jax_wrapped_q_error, in_axes=(None, None, 0, 0, 0, 0, 0, 0))
             errors = batched_error_fn(
-                q_params, q_target_params, states, actions, rewards, 
-                next_states, next_actions, dones)
+                q_params, q_target_params, 
+                states, actions, rewards, next_states, next_actions, dones)
             loss = jnp.mean(jnp.square(errors))
             for param in jax.tree_util.tree_leaves(q_params):
                 loss += reg_penalty * jnp.mean(jnp.square(param))
@@ -1937,7 +1937,6 @@ class JaxBackpropPlannerWithQ(JaxBackpropPlanner):
     def _jax_update_q(self, q_loss):
         optimizer_q = self.optimizer_q
         policy = self.test_policy
-        tau = self.tau
         
         # update the q-value parameters and the target parameters
         def _jax_wrapped_q_update(q_params, q_opt_state, q_target_params,
@@ -1948,9 +1947,7 @@ class JaxBackpropPlannerWithQ(JaxBackpropPlanner):
                 states, actions, rewards, next_states, next_actions, dones)
             updates, q_opt_state = optimizer_q.update(grad, q_opt_state)
             q_params = optax.apply_updates(q_params, updates)
-            q_target_params = jax.tree_map(
-                lambda x, y: tau * x + (1. - tau) * y, q_params, q_target_params)
-            return q_params, q_opt_state, q_target_params, loss        
+            return q_params, q_opt_state, loss        
         
         # update the q-value parameters and the target parameters using the actor
         def _jax_wrapped_q_update_policy(q_params, q_opt_state, q_target_params,
@@ -1961,12 +1958,27 @@ class JaxBackpropPlannerWithQ(JaxBackpropPlanner):
             keys = jnp.asarray(subkeys)
             next_actions = jax.vmap(policy, in_axes=(0, None, None, None, 0))(
                 keys, policy_params, hyperparams, 0, next_states)
-            return _jax_wrapped_q_update(q_params, q_opt_state, q_target_params, 
-                                         states, actions, rewards, 
-                                         next_states, next_actions, dones)
+            return _jax_wrapped_q_update(
+                q_params, q_opt_state, q_target_params,
+                states, actions, rewards, next_states, next_actions, dones)
         
         return _jax_wrapped_q_update_policy
-            
+    
+    # def _jax_exploration_policy(self):
+    #
+    #     def _jax_wrapped_perturb_policy_params(key, policy_params, rate):
+    #         treedef = jax.tree_util.tree_structure(policy_params)
+    #         keys = random.split(key, num=treedef.num_leaves)
+    #         keys_tree = jax.tree_util.tree_unflatten(treedef, keys)
+    #         param_norms = jax.tree_map(jnp.linalg.norm, policy_params)
+    #         param_norms = jax.lax.stop_gradient(param_norms)
+    #         new_params = jax.tree_map(
+    #             lambda p, n, k: p + rate * n * random.normal(k, shape=p.shape), 
+    #             policy_params, param_norms, keys_tree)
+    #         return new_params
+    #
+    #     return _jax_wrapped_perturb_policy_params
+        
     def optimize_generator(self, key: random.PRNGKey,
                            epochs: int=999999,
                            train_seconds: float=120.,
@@ -2095,23 +2107,25 @@ class JaxBackpropPlannerWithQ(JaxBackpropPlanner):
             for subkey in subkeys:
                 batch = self.buffer.replay()
                 if batch is not None:
-                    q_params, q_opt_state, q_target_params, q_loss_val = self.update_q(
+                    q_params, q_opt_state, q_loss_val = self.update_q(
                         q_params, q_opt_state, q_target_params, *batch, 
                         subkey, policy_params, policy_hyperparams)
                     q_loss_mean += q_loss_val / self.num_q_updates
             q_losses.append(q_loss_mean)
+            if it % self.target_update_freq:
+                q_target_params = q_params
             
-            if it % 500 == 0:
-                n = 30
-                grid_values = np.zeros((n, n))
-                for i1, r1 in enumerate(np.linspace(0, 100, n)):
-                    for i2, r2 in enumerate(np.linspace(0, 100, n)):
-                        state_r1_r2 = {'rlevel': np.asarray([r1, r2])}
-                        action_r1_r2 = {'release': np.asarray([0., 0.])}
-                        grid_values[i1, i2] = self.q.predict_q(q_params, state_r1_r2, action_r1_r2)
-                import matplotlib.pyplot as plt
-                plt.imshow(grid_values, extent=[0, 100, 0, 100], origin='lower')
-                plt.savefig(f'grid_{it}.pdf')
+            # if it % 500 == 0:
+            #     n = 30
+            #     grid_values = np.zeros((n, n))
+            #     for i1, r1 in enumerate(np.linspace(0, 100, n)):
+            #         for i2, r2 in enumerate(np.linspace(0, 100, n)):
+            #             state_r1_r2 = {'rlevel': np.asarray([r1, r2])}
+            #             action_r1_r2 = {'release': np.asarray([2., 4.])}
+            #             grid_values[i1, i2] = self.q.predict_q(q_params, state_r1_r2, action_r1_r2)
+            #     import matplotlib.pyplot as plt
+            #     plt.imshow(grid_values, extent=[0, 100, 0, 100], origin='lower')
+            #     plt.savefig(f'grid_{it}.pdf')
                     
             # record the best plan so far
             if test_loss < best_loss:
