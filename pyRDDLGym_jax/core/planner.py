@@ -15,6 +15,16 @@ import time
 from tqdm import tqdm
 from typing import Callable, Dict, Generator, Optional, Set, Sequence, Tuple
 
+# try to import matplotlib, if failed then skip plotting
+try:
+    import matplotlib
+    import matplotlib.pyplot as plt
+    matplotlib.use('TkAgg')
+except Exception:
+    raise_warning('matplotlib is not installed, '
+                  'plotting functionality is disabled.', 'red')
+    plt = None
+            
 from pyRDDLGym.core.compiler.model import RDDLPlanningModel, RDDLLiftedModel
 from pyRDDLGym.core.debug.logger import Logger
 from pyRDDLGym.core.debug.exception import (
@@ -945,6 +955,76 @@ class RollingMean:
         return self._total / len(memory)
 
 
+class JaxPlannerPlot:
+    
+    def __init__(self, rddl: RDDLPlanningModel, horizon: int) -> None:
+        self._fig, axes = plt.subplots(1 + len(rddl.action_fluents))
+        
+        # prepare the loss plot
+        self._loss_ax = axes[0]
+        self._loss_ax.autoscale(enable=True)
+        self._loss_ax.set_xlabel('decision epoch')
+        self._loss_ax.set_ylabel('loss value')
+        self._loss_plot = self._loss_ax.plot([], [], linestyle=':', marker='o')[0]
+        self._loss_back = self._fig.canvas.copy_from_bbox(self._loss_ax.bbox)
+        
+        # prepare the action plots
+        self._action_ax = {name: axes[idx + 1]
+                           for (idx, name) in enumerate(rddl.action_fluents)}
+        self._action_plots = {}
+        for name in rddl.action_fluents:
+            ax = self._action_ax[name]
+            if rddl.variable_ranges[name] == 'bool':
+                vmin, vmax = 0.0, 1.0
+            else:
+                vmin, vmax = None, None  
+            action_dim = 1
+            for dim in rddl.object_counts(rddl.variable_params[name]):
+                action_dim *= dim     
+            action_plot = ax.pcolormesh(
+                np.zeros((action_dim, horizon)), 
+                cmap='seismic', vmin=vmin, vmax=vmax)
+            ax.set_aspect('auto')        
+            ax.set_xlabel('decision epoch')
+            ax.set_ylabel(name)
+            plt.colorbar(action_plot, ax=ax)
+            self._action_plots[name] = action_plot
+        self._action_back = {name: self._fig.canvas.copy_from_bbox(ax.bbox)
+                             for (name, ax) in self._action_ax.items()}
+        
+        plt.tight_layout()
+        plt.show(block=False)
+        
+    def redraw(self, xticks, losses, actions) -> None:
+        
+        # draw the loss curve
+        self._fig.canvas.restore_region(self._loss_back)
+        self._loss_plot.set_xdata(xticks)
+        self._loss_plot.set_ydata(losses)        
+        self._loss_ax.set_xlim([0, len(xticks)])
+        self._loss_ax.set_ylim([np.min(losses), np.max(losses)])
+        self._loss_ax.draw_artist(self._loss_plot)
+        self._fig.canvas.blit(self._loss_ax.bbox)
+        
+        # draw the actions
+        for (name, values) in actions.items():
+            values = np.mean(values, axis=0, dtype=float)
+            values = np.reshape(values, newshape=(values.shape[0], -1)).T
+            self._fig.canvas.restore_region(self._action_back[name])
+            self._action_plots[name].set_array(values)
+            self._action_ax[name].draw_artist(self._action_plots[name])
+            self._fig.canvas.blit(self._action_ax[name].bbox)
+            self._action_plots[name].set_clim([np.min(values), np.max(values)])
+        self._fig.canvas.draw()
+        self._fig.canvas.flush_events()
+        
+    def close(self) -> None:
+        plt.close(self._fig)
+        del self._loss_ax, self._action_ax, \
+            self._loss_plot, self._action_plots, self._fig, \
+            self._loss_back, self._action_back
+        
+
 class JaxBackpropPlanner:
     '''A class for optimizing an action sequence in the given RDDL MDP using 
     gradient descent.'''
@@ -1335,6 +1415,13 @@ class JaxBackpropPlanner:
         rolling_test_loss = RollingMean(test_rolling_window)
         log = {}
         
+        # initialize plot area
+        if plot_step is None or plt is None:
+            plot = None
+        else:
+            plot = JaxPlannerPlot(self.rddl, self.horizon)
+        xticks, loss_values = [], []
+        
         # training loop
         iters = range(epochs)
         if verbose >= 2:
@@ -1369,9 +1456,13 @@ class JaxBackpropPlanner:
                 last_iter_improve = it
             
             # save the plan figure
-            if plot_step is not None and it % plot_step == 0:
-                self._plot_actions(
-                    key, policy_params, policy_hyperparams, test_subs, it)
+            if plot is not None and it % plot_step == 0:
+                xticks.append(it // plot_step)
+                loss_values.append(test_loss.item())
+                action_values = {name: values 
+                                 for (name, values) in log['fluents'].items()
+                                 if name in self.rddl.action_fluents}
+                plot.redraw(xticks, loss_values, action_values)
             
             # if the progress bar is used
             elapsed = time.time() - start_time - elapsed_outside_loop
@@ -1411,8 +1502,11 @@ class JaxBackpropPlanner:
                     'red')
                 break
         
+        # release resources
         if verbose >= 2:
             iters.close()
+        if plot is not None:
+            plot.close()
         
         # validate the test return
         if log:
@@ -1532,41 +1626,6 @@ class JaxBackpropPlanner:
         actions = self.test_policy(key, params, policy_hyperparams, step, subs)
         actions = jax.tree_map(np.asarray, actions)
         return actions      
-            
-    def _plot_actions(self, key, params, hyperparams, subs, it):
-        try:
-            import matplotlib.pyplot as plt
-        except Exception:
-            raise_warning('matplotlib is not installed, aborting plot.', 'red')
-            return
-            
-        # predict actions from the trained policy or plan
-        actions = self.test_rollouts(key, params, hyperparams, subs, {})['action']
-            
-        # plot the action sequences as color maps
-        fig, axs = plt.subplots(nrows=len(actions), constrained_layout=True)
-        if len(actions) == 1:
-            axs = [axs]
-        
-        rddl = self.rddl
-        for (ax, name) in zip(axs, actions):
-            action = np.mean(actions[name], axis=0, dtype=float)
-            action = np.reshape(action, newshape=(action.shape[0], -1)).T
-            if rddl.variable_ranges[name] == 'bool':
-                vmin, vmax = 0.0, 1.0
-            else:
-                vmin, vmax = None, None                
-            img = ax.imshow(
-                action, vmin=vmin, vmax=vmax, cmap='seismic', aspect='auto')
-            ax.set_xlabel('time')
-            ax.set_ylabel(name)
-            plt.colorbar(img, ax=ax)
-            
-        # write plot to disk
-        plt.savefig(f'plan_{rddl.domain_name}_{rddl.instance_name}_{it}.pdf',
-                    bbox_inches='tight')
-        plt.clf()
-        plt.close(fig)
     
 
 class JaxArmijoLineSearchPlanner(JaxBackpropPlanner):
