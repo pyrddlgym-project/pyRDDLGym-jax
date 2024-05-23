@@ -15,6 +15,8 @@ import time
 from tqdm import tqdm
 from typing import Callable, Dict, Generator, Optional, Set, Sequence, Tuple
 
+from pyRDDLGym.core.debug.exception import raise_warning
+
 # try to import matplotlib, if failed then skip plotting
 try:
     import matplotlib
@@ -28,7 +30,6 @@ except Exception:
 from pyRDDLGym.core.compiler.model import RDDLPlanningModel, RDDLLiftedModel
 from pyRDDLGym.core.debug.logger import Logger
 from pyRDDLGym.core.debug.exception import (
-    raise_warning,
     RDDLNotImplementedError,
     RDDLUndefinedVariableError,
     RDDLTypeError
