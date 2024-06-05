@@ -223,8 +223,7 @@ An [example is provided to illustrate how you can define your own policy class a
 The following citation describes the main ideas of the framework. Please cite it if you found it useful:
 
 ```
-@inproceedings{
-    gimelfarb2024jaxplan,
+@inproceedings{gimelfarb2024jaxplan,
     title={JaxPlan and GurobiPlan: Optimization Baselines for Replanning in Discrete and Mixed Discrete and Continuous Probabilistic Domains},
     author={Michael Gimelfarb and Ayal Taitler and Scott Sanner},
     booktitle={34th International Conference on Automated Planning and Scheduling},
