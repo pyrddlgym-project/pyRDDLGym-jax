@@ -220,19 +220,34 @@ An [example is provided to illustrate how you can define your own policy class a
 
 ## Citing pyRDDLGym-jax
 
-The main ideas of this approach are discussed in the following preprint:
+The following citation describes the main ideas of the framework. Please cite it if you found it useful:
 
 ```
-@article{taitler2022pyrddlgym,
-      title={pyRDDLGym: From RDDL to Gym Environments},
-      author={Taitler, Ayal and Gimelfarb, Michael and Gopalakrishnan, Sriram and Mladenov, Martin and Liu, Xiaotian and Sanner, Scott},
-      journal={arXiv preprint arXiv:2211.05939},
-      year={2022}
+@inproceedings{
+    gimelfarb2024jaxplan,
+    title={JaxPlan and GurobiPlan: Optimization Baselines for Replanning in Discrete and Mixed Discrete and Continuous Probabilistic Domains},
+    author={Michael Gimelfarb and Ayal Taitler and Scott Sanner},
+    booktitle={34th International Conference on Automated Planning and Scheduling},
+    year={2024},
+    url={https://openreview.net/forum?id=7IKtmUpLEH}
 }
 ```
 
-Many of the implementation details discussed come from the following literature, which you may wish to cite in your research papers:
-- [A Distributional Framework for Risk-Sensitive End-to-End Planning in Continuous MDP, AAAI 2022](https://ojs.aaai.org/index.php/AAAI/article/view/21226)
+The utility optimization is discussed in this paper:
+
+```
+@inproceedings{patton2022distributional,
+    title={A distributional framework for risk-sensitive end-to-end planning in continuous mdps},
+    author={Patton, Noah and Jeong, Jihwan and Gimelfarb, Mike and Sanner, Scott},
+    booktitle={Proceedings of the AAAI Conference on Artificial Intelligence},
+    volume={36},
+    number={9},
+    pages={9894--9901},
+    year={2022}
+}
+```
+
+Some of the implementation details derive from the following literature, which you may wish to also cite in your research papers:
 - [Deep reactive policies for planning in stochastic nonlinear domains, AAAI 2019](https://ojs.aaai.org/index.php/AAAI/article/view/4744)
 - [Scalable planning with tensorflow for hybrid nonlinear domains, NeurIPS 2017](https://proceedings.neurips.cc/paper/2017/file/98b17f068d5d9b7668e19fb8ae470841-Paper.pdf)
 
