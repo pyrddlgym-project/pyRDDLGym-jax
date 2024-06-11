@@ -220,7 +220,7 @@ An [example is provided to illustrate how you can define your own policy class a
 
 ## Citing pyRDDLGym-jax
 
-The following citation describes the main ideas of the framework. Please cite it if you found it useful:
+The [following citation](https://ojs.aaai.org/index.php/ICAPS/article/view/31480) describes the main ideas of the framework. Please cite it if you found it useful:
 
 ```
 @inproceedings{gimelfarb2024jaxplan,
@@ -232,7 +232,7 @@ The following citation describes the main ideas of the framework. Please cite it
 }
 ```
 
-The utility optimization is discussed in this paper:
+The utility optimization is discussed in [this paper](https://ojs.aaai.org/index.php/AAAI/article/view/21226):
 
 ```
 @inproceedings{patton2022distributional,
