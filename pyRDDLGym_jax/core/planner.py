@@ -1032,9 +1032,8 @@ class JaxPlannerStatus(Enum):
     NORMAL = 0
     BUDGET_REACHED = 1
     INVALID_GRADIENT = 2
-    ZERO_GRADIENT = 3
-    PRECONDITION_POSSIBLY_UNSATISFIED = 4
-    OTHER = 5
+    PRECONDITION_POSSIBLY_UNSATISFIED = 3
+    OTHER = 4
 
 
 class JaxBackpropPlanner:
@@ -1499,14 +1498,6 @@ class JaxBackpropPlanner:
                     'red')
                 status = JaxPlannerStatus.INVALID_GRADIENT
         
-            # check zero gradients
-            grad_norms, _ = jax.tree_util.tree_flatten(
-                jax.tree_map(lambda x: jnp.linalg.norm(x).item(), train_log['grad']))
-            if np.allclose(grad_norms, 0):
-                raise_warning(f'Aborting JAX planner due to zero gradient {grad_norms}.', 
-                              'red')
-                status = JaxPlannerStatus.ZERO_GRADIENT
-            
             # return a callback
             start_time_outside = time.time()
             yield {
