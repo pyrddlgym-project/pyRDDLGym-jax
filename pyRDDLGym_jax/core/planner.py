@@ -1388,7 +1388,8 @@ class JaxBackpropPlanner:
                   f'    override_subs_dict ={subs is not None}\n'
                   f'    provide_param_guess={guess is not None}\n'
                   f'    test_rolling_window={test_rolling_window}\n' 
-                  f'    plot_frequency     ={plot_step}\n')
+                  f'    plot_frequency     ={plot_step}\n'
+                  f'    verbose            ={verbose}\n')
             
         # compute a batched version of the initial values
         if subs is None:
