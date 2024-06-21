@@ -1430,7 +1430,7 @@ class JaxBackpropPlanner:
         status = JaxPlannerStatus.NORMAL
         
         # initialize plot area
-        if plot_step is None or plt is None:
+        if plot_step is None or plot_step <= 0 or plt is None:
             plot = None
         else:
             plot = JaxPlannerPlot(self.rddl, self.horizon)
