@@ -55,6 +55,7 @@ class JaxRDDLCompiler:
         self.logger = logger
         # jax.config.update('jax_log_compiles', True) # for testing ONLY
         
+        self.use64bit = use64bit
         if use64bit:
             self.INT = jnp.int64
             self.REAL = jnp.float64
@@ -62,6 +63,7 @@ class JaxRDDLCompiler:
         else:
             self.INT = jnp.int32
             self.REAL = jnp.float32
+            jax.config.update('jax_enable_x64', False)
         self.ONE = jnp.asarray(1, dtype=self.INT)
         self.JAX_TYPES = {
             'int': self.INT,
@@ -668,6 +670,17 @@ class JaxRDDLCompiler:
         
         return _jax_wrapped_cast
    
+    def _fix_dtype(self, value):
+        dtype = jnp.atleast_1d(value).dtype
+        if jnp.issubdtype(dtype, jnp.integer):
+            return self.INT
+        elif jnp.issubdtype(dtype, jnp.floating):
+            return self.REAL
+        elif jnp.issubdtype(dtype, jnp.bool_) or jnp.issubdtype(dtype, bool):
+            return bool
+        else:
+            raise TypeError(f'Invalid type {dtype} of {value}.')
+       
     # ===========================================================================
     # leaves
     # ===========================================================================
@@ -677,7 +690,7 @@ class JaxRDDLCompiler:
         cached_value = self.traced.cached_sim_info(expr)
         
         def _jax_wrapped_constant(x, params, key):
-            sample = jnp.asarray(cached_value)
+            sample = jnp.asarray(cached_value, dtype=self._fix_dtype(cached_value))
             return sample, key, NORMAL
 
         return _jax_wrapped_constant
@@ -701,7 +714,7 @@ class JaxRDDLCompiler:
             cached_value = cached_info
 
             def _jax_wrapped_object(x, params, key):
-                sample = jnp.asarray(cached_value)
+                sample = jnp.asarray(cached_value, dtype=self._fix_dtype(cached_value))
                 return sample, key, NORMAL
             
             return _jax_wrapped_object
@@ -710,7 +723,8 @@ class JaxRDDLCompiler:
         elif cached_info is None:
             
             def _jax_wrapped_pvar_scalar(x, params, key):
-                sample = jnp.asarray(x[var])
+                value = x[var]
+                sample = jnp.asarray(value, dtype=self._fix_dtype(value))
                 return sample, key, NORMAL
             
             return _jax_wrapped_pvar_scalar
@@ -729,7 +743,8 @@ class JaxRDDLCompiler:
                 
                 def _jax_wrapped_pvar_tensor_nested(x, params, key):
                     error = NORMAL
-                    sample = jnp.asarray(x[var])
+                    value = x[var]
+                    sample = jnp.asarray(value, dtype=self._fix_dtype(value))
                     new_slices = [None] * len(jax_nested_expr)
                     for (i, jax_expr) in enumerate(jax_nested_expr):
                         new_slices[i], key, err = jax_expr(x, params, key)
@@ -744,7 +759,8 @@ class JaxRDDLCompiler:
             else:
     
                 def _jax_wrapped_pvar_tensor_non_nested(x, params, key):
-                    sample = jnp.asarray(x[var])
+                    value = x[var]
+                    sample = jnp.asarray(value, dtype=self._fix_dtype(value))
                     if slices:
                         sample = sample[slices]
                     if axis:
@@ -991,7 +1007,7 @@ class JaxRDDLCompiler:
             for (i, jax_case) in enumerate(jax_cases):
                 sample_cases[i], key, err_case = jax_case(x, params, key)
                 err |= err_case                
-            sample_cases = jnp.asarray(sample_cases)
+            sample_cases = jnp.asarray(sample_cases, dtype=self._fix_dtype(sample_cases))
             
             # predicate (enum) is an integer - use it to extract from case array
             param = params.get(jax_param, None)
@@ -1274,8 +1290,8 @@ class JaxRDDLCompiler:
         def _jax_wrapped_distribution_binomial(x, params, key):
             trials, key, err2 = jax_trials(x, params, key)       
             prob, key, err1 = jax_prob(x, params, key)
-            trials = jnp.asarray(trials, self.REAL)
-            prob = jnp.asarray(prob, self.REAL)
+            trials = jnp.asarray(trials, dtype=self.REAL)
+            prob = jnp.asarray(prob, dtype=self.REAL)
             key, subkey = random.split(key)
             dist = tfp.distributions.Binomial(total_count=trials, probs=prob)
             sample = dist.sample(seed=subkey).astype(self.INT)
@@ -1298,11 +1314,10 @@ class JaxRDDLCompiler:
         def _jax_wrapped_distribution_negative_binomial(x, params, key):
             trials, key, err2 = jax_trials(x, params, key)       
             prob, key, err1 = jax_prob(x, params, key)
-            trials = jnp.asarray(trials, self.REAL)
-            prob = jnp.asarray(prob, self.REAL)
+            trials = jnp.asarray(trials, dtype=self.REAL)
+            prob = jnp.asarray(prob, dtype=self.REAL)
             key, subkey = random.split(key)
-            dist = tfp.distributions.NegativeBinomial(
-                total_count=trials, probs=prob)
+            dist = tfp.distributions.NegativeBinomial(total_count=trials, probs=prob)
             sample = dist.sample(seed=subkey).astype(self.INT)
             out_of_bounds = jnp.logical_not(jnp.all(
                 (prob >= 0) & (prob <= 1) & (trials > 0)))
@@ -1324,7 +1339,7 @@ class JaxRDDLCompiler:
             shape, key, err1 = jax_shape(x, params, key)
             rate, key, err2 = jax_rate(x, params, key)
             key, subkey = random.split(key)
-            sample = random.beta(key=subkey, a=shape, b=rate)
+            sample = random.beta(key=subkey, a=shape, b=rate, dtype=self.REAL)
             out_of_bounds = jnp.logical_not(jnp.all((shape > 0) & (rate > 0)))
             err = err1 | err2 | (out_of_bounds * ERR)
             return sample, key, err
@@ -1367,7 +1382,7 @@ class JaxRDDLCompiler:
             shape, key, err1 = jax_shape(x, params, key)
             scale, key, err2 = jax_scale(x, params, key)
             key, subkey = random.split(key)
-            sample = scale * random.pareto(key=subkey, b=shape)
+            sample = scale * random.pareto(key=subkey, b=shape, dtype=self.REAL)
             out_of_bounds = jnp.logical_not(jnp.all((shape > 0) & (scale > 0)))
             err = err1 | err2 | (out_of_bounds * ERR)
             return sample, key, err
@@ -1385,7 +1400,8 @@ class JaxRDDLCompiler:
         def _jax_wrapped_distribution_t(x, params, key):
             df, key, err = jax_df(x, params, key)
             key, subkey = random.split(key)
-            sample = random.t(key=subkey, df=df, shape=jnp.shape(df))
+            sample = random.t(
+                key=subkey, df=df, shape=jnp.shape(df), dtype=self.REAL)
             out_of_bounds = jnp.logical_not(jnp.all(df > 0))
             err |= (out_of_bounds * ERR)
             return sample, key, err
@@ -1695,7 +1711,7 @@ class JaxRDDLCompiler:
             out_of_bounds = jnp.logical_not(jnp.all(alpha > 0))
             error |= (out_of_bounds * ERR)
             key, subkey = random.split(key)
-            Gamma = random.gamma(key=subkey, a=alpha)
+            Gamma = random.gamma(key=subkey, a=alpha, dtype=self.REAL)
             sample = Gamma / jnp.sum(Gamma, axis=-1, keepdims=True)
             sample = jnp.moveaxis(sample, source=-1, destination=index)
             return sample, key, error
@@ -1714,8 +1730,8 @@ class JaxRDDLCompiler:
         def _jax_wrapped_distribution_multinomial(x, params, key):
             trials, key, err1 = jax_trials(x, params, key)
             prob, key, err2 = jax_prob(x, params, key)
-            trials = jnp.asarray(trials, self.REAL)
-            prob = jnp.asarray(prob, self.REAL)
+            trials = jnp.asarray(trials, dtype=self.REAL)
+            prob = jnp.asarray(prob, dtype=self.REAL)
             key, subkey = random.split(key)
             dist = tfp.distributions.Multinomial(total_count=trials, probs=prob)
             sample = dist.sample(seed=subkey).astype(self.INT)
