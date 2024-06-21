@@ -7,7 +7,7 @@ title: "pyRDDLGym-jax"
 version: 1.0
 date-released: 2024-01-01
 preferred-citation:
-type: article
+  type: article
   authors:
   - family-names: "Gimelfarb"
     given-names: "Michael"
