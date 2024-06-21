@@ -3,12 +3,24 @@ message: "If you use this software, please cite it as below."
 authors:
 - family-names: "Gimelfarb"
   given-names: "Michael"
-- family-names: "Taitler"
-  given-names: "Ayal"
-- family-names: "Sanner"
-  given-names: "Scott"
-title: "JaxPlan and GurobiPlan: Optimization Baselines for Replanning in Discrete and Mixed Discrete and Continuous Probabilistic Domains"
+title: "pyRDDLGym-jax"
 version: 1.0
-date-released: 2024-02-14
-journal: "Proceedings of the International Conference on Automated Planning and Scheduling"
-url: "https://openreview.net/forum?id=7IKtmUpLEH"
+date-released: 2024-01-01
+preferred-citation:
+type: article
+  authors:
+  - family-names: "Gimelfarb"
+    given-names: "Michael"
+  - family-names: "Taitler"
+    given-names: "Ayal"
+  - family-names: "Sanner"
+    given-names: "Scott"
+  title: "JaxPlan and GurobiPlan: Optimization Baselines for Replanning in Discrete and Mixed Discrete and Continuous Probabilistic Domains"
+  journal: "Proceedings of the International Conference on Automated Planning and Scheduling"
+  url: "https://openreview.net/forum?id=7IKtmUpLEH"
+  month: 5
+  day: 30
+  year: 2024
+  volume: 34
+  start: 230
+  end: 238
