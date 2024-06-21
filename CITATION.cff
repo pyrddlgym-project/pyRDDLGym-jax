@@ -10,4 +10,5 @@ authors:
 title: "JaxPlan and GurobiPlan: Optimization Baselines for Replanning in Discrete and Mixed Discrete and Continuous Probabilistic Domains"
 version: 1.0
 date-released: 2024-02-14
+journal: "Proceedings of the International Conference on Automated Planning and Scheduling"
 url: "https://openreview.net/forum?id=7IKtmUpLEH"
