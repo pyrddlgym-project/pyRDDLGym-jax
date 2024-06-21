@@ -307,10 +307,16 @@ class FuzzyLogic:
         if self.verbose:
             raise_warning('Using the replacement rule: '
                           'floor(x) --> x - atan(-1.0 / tan(pi * x)) / pi - 0.5')
-            
+        
+        debias = 'floor' in self.debias
+        
         def _jax_wrapped_calc_floor_approx(x, param):
             sawtooth_part = jnp.arctan(-1.0 / jnp.tan(x * jnp.pi)) / jnp.pi + 0.5
-            return x - jax.lax.stop_gradient(sawtooth_part)
+            sample = x - jax.lax.stop_gradient(sawtooth_part)
+            if debias:
+                hard_sample = jnp.floor(x)
+                sample += jax.lax.stop_gradient(hard_sample - sample)
+            return sample
         
         return _jax_wrapped_calc_floor_approx, None
         
@@ -326,8 +332,14 @@ class FuzzyLogic:
         if self.verbose:
             raise_warning('Using the replacement rule: round(x) --> x')
         
+        debias = 'round' in self.debias
+        
         def _jax_wrapped_calc_round_approx(x, param):
-            return x
+            sample = x
+            if debias:
+                hard_sample = jnp.round(x)
+                sample += jax.lax.stop_gradient(hard_sample - sample)
+            return sample
         
         return _jax_wrapped_calc_round_approx, None
     
@@ -405,8 +417,14 @@ class FuzzyLogic:
             raise_warning('Using the replacement rule: '
                           'if c then a else b --> c * a + (1 - c) * b')
         
+        debias = 'If' in self.debias
+        
         def _jax_wrapped_calc_if_approx(c, a, b, param):
-            return c * a + (1.0 - c) * b
+            sample = c * a + (1.0 - c) * b
+            if debias:
+                hard_sample = jnp.select([c, ~c], [a, b])
+                sample += jax.lax.stop_gradient(hard_sample - sample)
+            return sample
         
         return _jax_wrapped_calc_if_approx, None
     
