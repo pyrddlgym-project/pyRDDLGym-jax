@@ -1,6 +1,7 @@
 from ast import literal_eval
 from collections import deque
 import configparser
+from enum import Enum
 import haiku as hk
 import jax
 import jax.numpy as jnp
@@ -1025,7 +1026,16 @@ class JaxPlannerPlot:
         del self._loss_ax, self._action_ax, \
             self._loss_plot, self._action_plots, self._fig, \
             self._loss_back, self._action_back
-        
+
+
+class JaxPlannerStatus(Enum):
+    NORMAL = 0
+    BUDGET_REACHED = 1
+    INVALID_GRADIENT = 2
+    ZERO_GRADIENT = 3
+    PRECONDITION_POSSIBLY_UNSATISFIED = 4
+    OTHER = 5
+
 
 class JaxBackpropPlanner:
     '''A class for optimizing an action sequence in the given RDDL MDP using 
@@ -1417,6 +1427,7 @@ class JaxBackpropPlanner:
         last_iter_improve = 0
         rolling_test_loss = RollingMean(test_rolling_window)
         log = {}
+        status = JaxPlannerStatus.NORMAL
         
         # initialize plot area
         if plot_step is None or plt is None:
@@ -1431,6 +1442,7 @@ class JaxBackpropPlanner:
             iters = tqdm(iters, total=100, position=tqdm_position)
         
         for it in iters:
+            status = JaxPlannerStatus.NORMAL
             
             # update the parameters of the plan
             key, subkey1, subkey2, subkey3 = random.split(key, num=4)
@@ -1442,6 +1454,7 @@ class JaxBackpropPlanner:
                     'Projected gradient method for satisfying action concurrency '
                     'constraints reached the iteration limit: plan is possibly '
                     'invalid for the current instance.', 'red')
+                status = JaxPlannerStatus.PRECONDITION_POSSIBLY_UNSATISFIED
             
             # evaluate losses
             train_loss, _ = self.train_loss(
@@ -1474,10 +1487,30 @@ class JaxBackpropPlanner:
                 iters.set_description(
                     f'[{tqdm_position}] {it:6} it / {-train_loss:14.4f} train / '
                     f'{-test_loss:14.4f} test / {-best_loss:14.4f} best')
+                        
+            # reached time budget
+            if elapsed >= train_seconds:
+                status = JaxPlannerStatus.BUDGET_REACHED
+            
+            # numerical error
+            if not np.isfinite(train_loss):
+                raise_warning(
+                    f'Aborting JAX planner due to invalid train loss {train_loss}.',
+                    'red')
+                status = JaxPlannerStatus.INVALID_GRADIENT
+        
+            # check zero gradients
+            grad_norms, _ = jax.tree_util.tree_flatten(
+                jax.tree_map(lambda x: jnp.linalg.norm(x).item(), train_log['grad']))
+            if np.allclose(grad_norms, 0):
+                raise_warning(f'Aborting JAX planner due to zero gradient {grad_norms}.', 
+                              'red')
+                status = JaxPlannerStatus.ZERO_GRADIENT
             
             # return a callback
             start_time_outside = time.time()
             yield {
+                'status': status,
                 'iteration': it,
                 'train_return':-train_loss,
                 'test_return':-test_loss,
@@ -1494,17 +1527,11 @@ class JaxBackpropPlanner:
             }
             elapsed_outside_loop += (time.time() - start_time_outside)
             
-            # reached time budget
-            if elapsed >= train_seconds:
+            # abortion check
+            if status != JaxPlannerStatus.NORMAL \
+            and status != JaxPlannerStatus.PRECONDITION_POSSIBLY_UNSATISFIED:
                 break
-            
-            # numerical error
-            if not np.isfinite(train_loss):
-                raise_warning(
-                    f'Aborting optimization due to invalid train loss {train_loss}.',
-                    'red')
-                break
-        
+                        
         # release resources
         if verbose >= 2:
             iters.close()
@@ -1529,10 +1556,11 @@ class JaxBackpropPlanner:
             diagnosis = self._perform_diagnosis(
                 last_iter_improve, -train_loss, -test_loss, -best_loss, grad_norm)
             print(f'summary of optimization:\n'
+                  f'    status_code   ={status}\n'
                   f'    time_elapsed  ={elapsed}\n'
                   f'    iterations    ={it}\n'
                   f'    best_objective={-best_loss}\n'
-                  f'    grad_norm     ={grad_norm}\n'
+                  f'    best_grad_norm={grad_norm}\n'
                   f'diagnosis: {diagnosis}\n')
     
     def _perform_diagnosis(self, last_iter_improve, 
