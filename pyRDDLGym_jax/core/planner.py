@@ -156,6 +156,7 @@ class JaxRDDLCompilerWithGrad(JaxRDDLCompiler):
         '''
         super(JaxRDDLCompilerWithGrad, self).__init__(*args, **kwargs)
         self.logic = logic
+        self.logic.set_use64bit(self.use64bit)
         if cpfs_without_grad is None:
             cpfs_without_grad = set()
         self.cpfs_without_grad = cpfs_without_grad
@@ -327,8 +328,8 @@ class JaxPlan:
             else:
                 lower, upper = compiled.constraints.bounds[name]
                 lower, upper = user_bounds.get(name, (lower, upper))
-                lower = np.asarray(lower, dtype=np.float32)
-                upper = np.asarray(upper, dtype=np.float32)
+                lower = np.asarray(lower, dtype=compiled.REAL)
+                upper = np.asarray(upper, dtype=compiled.REAL)
                 lower_finite = np.isfinite(lower)
                 upper_finite = np.isfinite(upper)
                 bounds_safe[name] = (np.where(lower_finite, lower, 0.0),
@@ -354,7 +355,7 @@ class JaxStraightLinePlan(JaxPlan):
     
     def __init__(self, initializer: initializers.Initializer=initializers.normal(),
                  wrap_sigmoid: bool=True,
-                 min_action_prob: float=1e-5,
+                 min_action_prob: float=1e-6,
                  wrap_non_bool: bool=False,
                  wrap_softmax: bool=False,
                  use_new_projection: bool=False,
@@ -524,7 +525,7 @@ class JaxStraightLinePlan(JaxPlan):
         def _jax_wrapped_slp_predict_test(key, params, hyperparams, step, subs):
             actions = {}
             for (var, param) in params.items():
-                action = jnp.asarray(param[step, ...])
+                action = jnp.asarray(param[step, ...], dtype=compiled.REAL)
                 if var == bool_key:
                     output = jax.nn.softmax(action)
                     bool_actions = _jax_unstack_bool_from_softmax(output)
@@ -1113,6 +1114,7 @@ class JaxBackpropPlanner:
             )
             
         self.logic = logic
+        self.logic.set_use64bit(self.use64bit)
         self.use_symlog_reward = use_symlog_reward
         self.utility = utility
         if cpfs_without_grad is None:
@@ -1523,7 +1525,7 @@ class JaxBackpropPlanner:
         # summarize and test for convergence
         if verbose >= 1:
             grad_norm = jax.tree_map(
-                lambda x: np.array(jnp.linalg.norm(x)).item(), best_grad)
+                lambda x: np.asarray(jnp.linalg.norm(x)).item(), best_grad)
             diagnosis = self._perform_diagnosis(
                 last_iter_improve, -train_loss, -test_loss, -best_loss, grad_norm)
             print(f'summary of optimization:\n'

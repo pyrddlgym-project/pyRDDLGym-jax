@@ -74,7 +74,8 @@ class FuzzyLogic:
                  weight: float=10.0,
                  debias: Optional[Set[str]]=None,
                  eps: float=1e-10,
-                 verbose: bool=False):
+                 verbose: bool=False,
+                 use64bit: bool=False):
         '''Creates a new fuzzy logic in Jax.
         
         :param tnorm: fuzzy operator for logical AND
@@ -84,6 +85,7 @@ class FuzzyLogic:
         :param debias: which functions to de-bias approximate on forward pass
         :param eps: small positive float to mitigate underflow
         :param verbose: whether to dump replacements and other info to console
+        :param use64bit: whether to perform arithmetic in 64 bit
         '''
         self.tnorm = tnorm
         self.complement = complement
@@ -93,14 +95,27 @@ class FuzzyLogic:
         self.debias = debias
         self.eps = eps
         self.verbose = verbose
+        self.set_use64bit(use64bit)
     
+    def set_use64bit(self, use64bit: bool) -> None:
+        self.use64bit = use64bit
+        if use64bit:
+            self.REAL = jnp.float64
+            self.INT = jnp.int64
+            jax.config.update('jax_enable_x64', True)
+        else:
+            self.REAL = jnp.float32
+            self.INT = jnp.int32
+            jax.config.update('jax_enable_x64', False)
+        
     def summarize_hyperparameters(self):
         print(f'model relaxation:\n'
               f'    tnorm         ={type(self.tnorm).__name__}\n'
               f'    complement    ={type(self.complement).__name__}\n'
               f'    sigmoid_weight={self.weight}\n'
               f'    cpfs_to_debias={self.debias}\n'
-              f'    underflow_tol ={self.eps}')
+              f'    underflow_tol ={self.eps}\n'
+              f'    use64bit      ={self.use64bit}')
         
     # ===========================================================================
     # logical operators
@@ -456,7 +471,7 @@ class FuzzyLogic:
     # ===========================================================================
      
     def _gumbel_softmax(self, key, prob):
-        Gumbel01 = random.gumbel(key=key, shape=prob.shape)
+        Gumbel01 = random.gumbel(key=key, shape=prob.shape, dtype=self.REAL)
         sample = Gumbel01 + jnp.log1p(prob + self.eps - 1.0)
         return sample
         
