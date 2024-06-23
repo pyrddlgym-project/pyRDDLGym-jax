@@ -968,7 +968,8 @@ class JaxPlannerPlot:
         self._loss_ax.autoscale(enable=True)
         self._loss_ax.set_xlabel('decision epoch')
         self._loss_ax.set_ylabel('loss value')
-        self._loss_plot = self._loss_ax.plot([], [], linestyle=':', marker='o')[0]
+        self._loss_plot = self._loss_ax.plot(
+            [], [], linestyle=':', marker='o', markersize=2)[0]
         self._loss_back = self._fig.canvas.copy_from_bbox(self._loss_ax.bbox)
         
         # prepare the action plots
