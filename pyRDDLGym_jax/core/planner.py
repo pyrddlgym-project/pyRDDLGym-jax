@@ -443,7 +443,7 @@ class JaxStraightLinePlan(JaxPlan):
         def _jax_bool_action_to_param(var, action, hyperparams):
             if wrap_sigmoid:
                 weight = hyperparams[var]
-                return (-1.0 / weight) * jnp.log1p(1.0 / action - 2.0)
+                return (-1.0 / weight) * jnp.log(1.0 / action - 1.0)
             else:
                 return action
             
@@ -1219,7 +1219,7 @@ class JaxBackpropPlanner:
                 rewards = rewards * discount[jnp.newaxis, ...]
             returns = jnp.sum(rewards, axis=1)
             if use_symlog:
-                returns = jnp.sign(returns) * jnp.log1p(jnp.abs(returns))
+                returns = jnp.sign(returns) * jnp.log(1.0 + jnp.abs(returns))
             return returns
         
         return _jax_wrapped_returns
