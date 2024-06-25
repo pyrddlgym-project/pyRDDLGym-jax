@@ -1057,7 +1057,8 @@ class JaxBackpropPlanner:
                  clip_grad: Optional[float]=None,
                  logic: FuzzyLogic=FuzzyLogic(),
                  use_symlog_reward: bool=False,
-                 utility=jnp.mean,
+                 utility: Callable[[jnp.ndarray], float] | str=jnp.mean,
+                 utility_kwargs: Optional[Dict[str, object]]=None,
                  cpfs_without_grad: Optional[Set]=None,
                  logger: Optional[Logger]=None) -> None:
         '''Creates a new gradient-based algorithm for optimizing action sequences
@@ -1084,7 +1085,11 @@ class JaxBackpropPlanner:
         :param use_symlog_reward: whether to use the symlog transform on the 
         reward as a form of normalization
         :param utility: how to aggregate return observations to compute utility
-        of a policy or plan
+        of a policy or plan; must be either a function mapping jax array to a 
+        scalar, or a a string identifying the utility function by name 
+        ("mean", "mean_var", "entropic", or "cvar" are currently supported)
+        :param utility_kwargs: additional keyword arguments to pass hyper-
+        parameters to the utility function call
         :param cpfs_without_grad: which CPFs do not have gradients (use straight
         through gradient trick)
         :param logger: to log information about compilation to file
@@ -1126,11 +1131,33 @@ class JaxBackpropPlanner:
                 optax.clip(clip_grad),
                 optimizer
             )
-            
+        
+        # set utility
+        if isinstance(utility, str):
+            utility = utility.lower()
+            if utility == 'mean':
+                utility_fn = jnp.mean
+            elif utility == 'mean_var':
+                utility_fn = mean_variance_utility
+            elif utility == 'entropic':
+                utility_fn = entropic_utility
+            elif utility == 'cvar':
+                utility_fn = cvar_utility
+            else:
+                raise RDDLNotImplementedError(
+                    f'Utility function <{utility}> is not supported: '
+                    'must be one of ["mean", "mean_var", "entropic", "cvar"].')
+        else:
+            utility_fn = utility
+        self.utility = utility_fn
+        
+        if utility_kwargs is None:
+            utility_kwargs = {}
+        self.utility_kwargs = utility_kwargs    
+        
         self.logic = logic
         self.logic.set_use64bit(self.use64bit)
         self.use_symlog_reward = use_symlog_reward
-        self.utility = utility
         if cpfs_without_grad is None:
             cpfs_without_grad = set()
         self.cpfs_without_grad = cpfs_without_grad
@@ -1141,7 +1168,8 @@ class JaxBackpropPlanner:
         
     def summarize_hyperparameters(self):
         print(f'objective and relaxations:\n'
-              f'    objective_fn    ={self.utility.__name__}\n'
+              f'    utility_fn      ={self.utility.__name__}\n'
+              f'    utility args    ={self.utility_kwargs}\n'
               f'    use_symlog      ={self.use_symlog_reward}\n'
               f'    lookahead       ={self.horizon}\n'
               f'    model relaxation={type(self.logic).__name__}\n'
@@ -1225,7 +1253,8 @@ class JaxBackpropPlanner:
         return _jax_wrapped_returns
         
     def _jax_loss(self, rollouts, use_symlog=False): 
-        utility_fn = self.utility        
+        utility_fn = self.utility    
+        utility_kwargs = self.utility_kwargs 
         _jax_wrapped_returns = self._jax_return(use_symlog)
         
         # the loss is the average cumulative reward across all roll-outs
@@ -1234,7 +1263,7 @@ class JaxBackpropPlanner:
             log = rollouts(key, policy_params, hyperparams, subs, model_params)
             rewards = log['reward']
             returns = _jax_wrapped_returns(rewards)
-            utility = utility_fn(returns)
+            utility = utility_fn(returns, **utility_kwargs)
             loss = -utility
             return loss, log
         
@@ -1767,6 +1796,37 @@ class JaxArmijoLineSearchPlanner(JaxBackpropPlanner):
             
         return _jax_wrapped_plan_update
 
+# ***********************************************************************
+# ALL VERSIONS OF RISK FUNCTIONS
+# 
+# Based on the original paper "A Distributional Framework for Risk-Sensitive 
+# End-to-End Planning in Continuous MDPs" by Patton et al., AAAI 2022.
+#
+# Original risk functions:
+# - entropic utility
+# - mean-variance approximation
+# - conditional value at risk with straight-through gradient trick
+#
+# ***********************************************************************
+
+
+@jax.jit
+def entropic_utility(returns: jnp.ndarray, beta: float) -> float:
+    return (-1.0 / beta) * jax.scipy.special.logsumexp(
+            -beta * returns, b=1.0 / returns.size)
+
+
+@jax.jit
+def mean_variance_utility(returns: jnp.ndarray, beta: float) -> float:
+    return jnp.mean(returns) - (beta / 2.0) * jnp.var(returns)
+    
+
+@jax.jit
+def cvar_utility(returns: jnp.ndarray, alpha: float) -> float:
+    alpha_mask = jax.lax.stop_gradient(
+        returns <= jnp.percentile(returns, q=100 * alpha))
+    return jnp.sum(returns * alpha_mask) / jnp.sum(alpha_mask)
+    
 
 # ***********************************************************************
 # ALL VERSIONS OF CONTROLLERS
