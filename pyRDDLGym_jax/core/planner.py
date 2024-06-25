@@ -99,8 +99,8 @@ def _load_config(config, args):
         init_kwargs = plan_kwargs.pop('initializer_kwargs', {})
         try: 
             plan_kwargs['initializer'] = init_class(**init_kwargs)
-        except:
-            raise_warning(f'ignoring arguments for initializer <{init_name}>')
+        except Exception as _:
+            raise_warning(f'Ignoring invalid arguments for initializer <{init_name}>.')
             plan_kwargs['initializer'] = init_class
                
     if 'activation' in plan_kwargs:  # activation function
@@ -1116,7 +1116,7 @@ class JaxBackpropPlanner:
         # set optimizer
         try:
             optimizer = optax.inject_hyperparams(optimizer)(**optimizer_kwargs)
-        except:
+        except Exception as _:
             raise_warning(
                 'Failed to inject hyperparameters into optax optimizer, '
                 'rolling back to safer method: please note that modification of '
@@ -1396,7 +1396,7 @@ class JaxBackpropPlanner:
         # if policy_hyperparams is not provided
         if policy_hyperparams is None:
             raise_warning('policy_hyperparams is not set, setting 1.0 for '
-                          'all action-fluents which could be suboptimal.', 'red')
+                          'all action-fluents which could be suboptimal.')
             policy_hyperparams = {action: 1.0 
                                   for action in self.rddl.action_fluents}
         
