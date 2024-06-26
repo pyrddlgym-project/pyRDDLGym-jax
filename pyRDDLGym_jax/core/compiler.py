@@ -1220,21 +1220,34 @@ class JaxRDDLCompiler:
     def _jax_bernoulli(self, expr, info):
         ERR = JaxRDDLCompiler.ERROR_CODES['INVALID_PARAM_BERNOULLI']
         JaxRDDLCompiler._check_num_args(expr, 1)
-        jax_bern, jax_param = self._unwrap(
-            self._jax_bernoulli_helper(), expr.id, info)
         
         arg_prob, = expr.args
         jax_prob = self._jax(arg_prob, info)
         
-        # uses the implicit JAX subroutine
-        def _jax_wrapped_distribution_bernoulli(x, params, key):
-            prob, key, err = jax_prob(x, params, key)
-            key, subkey = random.split(key)
-            param = params.get(jax_param, None)
-            sample = jax_bern(subkey, prob, param)
-            out_of_bounds = jnp.logical_not(jnp.all((prob >= 0) & (prob <= 1)))
-            err |= (out_of_bounds * ERR)
-            return sample, key, err
+        if self.traced.cached_is_fluent(arg_prob):            
+            jax_bern, jax_param = self._unwrap(
+                self._jax_bernoulli_helper(), expr.id, info)
+        
+            # probability is fluent: uses the implicit JAX subroutine
+            def _jax_wrapped_distribution_bernoulli(x, params, key):
+                prob, key, err = jax_prob(x, params, key)
+                key, subkey = random.split(key)
+                param = params.get(jax_param, None)
+                sample = jax_bern(subkey, prob, param)
+                out_of_bounds = jnp.logical_not(jnp.all((prob >= 0) & (prob <= 1)))
+                err |= (out_of_bounds * ERR)
+                return sample, key, err
+        
+        else:
+            
+            # probability is non-fluent: no need to reparameterize
+            def _jax_wrapped_distribution_bernoulli(x, params, key):
+                prob, key, err = jax_prob(x, params, key)
+                key, subkey = random.split(key)
+                sample = random.bernoulli(subkey, prob)
+                out_of_bounds = jnp.logical_not(jnp.all((prob >= 0) & (prob <= 1)))
+                err |= (out_of_bounds * ERR)
+                return sample, key, err
         
         return _jax_wrapped_distribution_bernoulli
     
@@ -1352,19 +1365,32 @@ class JaxRDDLCompiler:
         
         arg_prob, = expr.args
         jax_prob = self._jax(arg_prob, info)
-        floor_op, jax_param = self._unwrap(
-            self.KNOWN_UNARY['floor'], expr.id, info)
         
-        # reparameterization trick Geom(p) = floor(ln(U(0, 1)) / ln(p)) + 1
-        def _jax_wrapped_distribution_geometric(x, params, key):
-            prob, key, err = jax_prob(x, params, key)
-            key, subkey = random.split(key)
-            U = random.uniform(key=subkey, shape=jnp.shape(prob), dtype=self.REAL)
-            param = params.get(jax_param, None)
-            sample = floor_op(jnp.log1p(-U) / jnp.log1p(-prob), param) + 1
-            out_of_bounds = jnp.logical_not(jnp.all((prob >= 0) & (prob <= 1)))
-            err |= (out_of_bounds * ERR)
-            return sample, key, err
+        if self.traced.cached_is_fluent(arg_prob):            
+            floor_op, jax_param = self._unwrap(
+                self.KNOWN_UNARY['floor'], expr.id, info)
+            
+            # reparameterization trick Geom(p) = floor(ln(U(0, 1)) / ln(p)) + 1
+            def _jax_wrapped_distribution_geometric(x, params, key):
+                prob, key, err = jax_prob(x, params, key)
+                key, subkey = random.split(key)
+                U = random.uniform(key=subkey, shape=jnp.shape(prob), dtype=self.REAL)
+                param = params.get(jax_param, None)
+                sample = floor_op(jnp.log1p(-U) / jnp.log1p(-prob), param) + 1
+                out_of_bounds = jnp.logical_not(jnp.all((prob >= 0) & (prob <= 1)))
+                err |= (out_of_bounds * ERR)
+                return sample, key, err
+        
+        else:
+            
+            # prob is non-fluent: do not reparameterize
+            def _jax_wrapped_distribution_geometric(x, params, key):
+                prob, key, err = jax_prob(x, params, key)
+                key, subkey = random.split(key)
+                sample = random.geometric(key=subkey, p=prob, dtype=self.INT)
+                out_of_bounds = jnp.logical_not(jnp.all((prob >= 0) & (prob <= 1)))
+                err |= (out_of_bounds * ERR)
+                return sample, key, err
         
         return _jax_wrapped_distribution_geometric
     
