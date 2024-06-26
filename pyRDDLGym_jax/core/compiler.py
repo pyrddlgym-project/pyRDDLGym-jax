@@ -93,73 +93,118 @@ class JaxRDDLCompiler:
         self.constraints = constraints
         
         # basic operations
-        self.NEGATIVE = lambda x, param: jnp.negative(x)  
+        self.NEGATIVE = self._function_unary_exact_named(jnp.negative, 'negative')
         self.ARITHMETIC_OPS = {
-            '+': lambda x, y, param: jnp.add(x, y),
-            '-': lambda x, y, param: jnp.subtract(x, y),
-            '*': lambda x, y, param: jnp.multiply(x, y),
-            '/': lambda x, y, param: jnp.divide(x, y)
+            '+': self._function_binary_exact_named(jnp.add, 'add'),
+            '-': self._function_binary_exact_named(jnp.subtract, 'subtract'),
+            '*': self._function_binary_exact_named(jnp.multiply, 'multiply'),
+            '/': self._function_binary_exact_named(jnp.divide, 'divide')
         }    
         self.RELATIONAL_OPS = {
-            '>=': lambda x, y, param: jnp.greater_equal(x, y),
-            '<=': lambda x, y, param: jnp.less_equal(x, y),
-            '<': lambda x, y, param: jnp.less(x, y),
-            '>': lambda x, y, param: jnp.greater(x, y),
-            '==': lambda x, y, param: jnp.equal(x, y),
-            '~=': lambda x, y, param: jnp.not_equal(x, y)
+            '>=': self._function_binary_exact_named(jnp.greater_equal, 'greater_equal'),
+            '<=': self._function_binary_exact_named(jnp.less_equal, 'less_equal'),
+            '<': self._function_binary_exact_named(jnp.less, 'less'),
+            '>': self._function_binary_exact_named(jnp.greater, 'greater'),
+            '==': self._function_binary_exact_named(jnp.equal, 'equal'),
+            '~=': self._function_binary_exact_named(jnp.not_equal, 'not_equal')
         }
-        self.LOGICAL_NOT = lambda x, param: jnp.logical_not(x)
+        self.LOGICAL_NOT = self._function_unary_exact_named(jnp.logical_not, 'not')
         self.LOGICAL_OPS = {
-            '^': lambda x, y, param: jnp.logical_and(x, y),
-            '&': lambda x, y, param: jnp.logical_and(x, y),
-            '|': lambda x, y, param: jnp.logical_or(x, y),
-            '~': lambda x, y, param: jnp.logical_xor(x, y),
-            '=>': lambda x, y, param: jnp.logical_or(jnp.logical_not(x), y),
-            '<=>': lambda x, y, param: jnp.equal(x, y)
+            '^': self._function_binary_exact_named(jnp.logical_and, 'and'),
+            '&': self._function_binary_exact_named(jnp.logical_and, 'and'),
+            '|': self._function_binary_exact_named(jnp.logical_or, 'or'),
+            '~': self._function_binary_exact_named(jnp.logical_xor, 'xor'),
+            '=>': self._function_binary_exact_named_implies(),
+            '<=>': self._function_binary_exact_named(jnp.equal, 'iff')
         }
         self.AGGREGATION_OPS = {
-            'sum': lambda x, axis, param: jnp.sum(x, axis=axis),
-            'avg': lambda x, axis, param: jnp.mean(x, axis=axis),
-            'prod': lambda x, axis, param: jnp.prod(x, axis=axis),
-            'minimum': lambda x, axis, param: jnp.min(x, axis=axis),
-            'maximum': lambda x, axis, param: jnp.max(x, axis=axis),
-            'forall': lambda x, axis, param: jnp.all(x, axis=axis),
-            'exists': lambda x, axis, param: jnp.any(x, axis=axis),
-            'argmin': lambda x, axis, param: jnp.argmin(x, axis=axis),
-            'argmax': lambda x, axis, param: jnp.argmax(x, axis=axis)
+            'sum': self._function_aggregation_exact_named(jnp.sum, 'sum'),
+            'avg': self._function_aggregation_exact_named(jnp.mean, 'avg'),
+            'prod': self._function_aggregation_exact_named(jnp.prod, 'prod'),
+            'minimum': self._function_aggregation_exact_named(jnp.min, 'minimum'),
+            'maximum': self._function_aggregation_exact_named(jnp.max, 'maximum'),
+            'forall': self._function_aggregation_exact_named(jnp.all, 'forall'),
+            'exists': self._function_aggregation_exact_named(jnp.any, 'exists'),
+            'argmin': self._function_aggregation_exact_named(jnp.argmin, 'argmin'),
+            'argmax': self._function_aggregation_exact_named(jnp.argmax, 'argmax')
         }
         self.AGGREGATION_BOOL = {'forall', 'exists'}
         self.KNOWN_UNARY = {        
-            'abs': lambda x, param: jnp.abs(x),
-            'sgn': lambda x, param: jnp.sign(x),
-            'round': lambda x, param: jnp.round(x),
-            'floor': lambda x, param: jnp.floor(x),
-            'ceil': lambda x, param: jnp.ceil(x),
-            'cos': lambda x, param: jnp.cos(x),
-            'sin': lambda x, param: jnp.sin(x),
-            'tan': lambda x, param: jnp.tan(x),
-            'acos': lambda x, param: jnp.arccos(x),
-            'asin': lambda x, param: jnp.arcsin(x),
-            'atan': lambda x, param: jnp.arctan(x),
-            'cosh': lambda x, param: jnp.cosh(x),
-            'sinh': lambda x, param: jnp.sinh(x),
-            'tanh': lambda x, param: jnp.tanh(x),
-            'exp': lambda x, param: jnp.exp(x),
-            'ln': lambda x, param: jnp.log(x),
-            'sqrt': lambda x, param: jnp.sqrt(x),
-            'lngamma': lambda x, param: scipy.special.gammaln(x),
-            'gamma': lambda x, param: jnp.exp(scipy.special.gammaln(x))
+            'abs': self._function_unary_exact_named(jnp.abs, 'abs'),
+            'sgn': self._function_unary_exact_named(jnp.sign, 'sgn'),
+            'round': self._function_unary_exact_named(jnp.round, 'round'),
+            'floor': self._function_unary_exact_named(jnp.floor, 'floor'),
+            'ceil': self._function_unary_exact_named(jnp.ceil, 'ceil'),
+            'cos': self._function_unary_exact_named(jnp.cos, 'cos'),
+            'sin': self._function_unary_exact_named(jnp.sin, 'sin'),
+            'tan': self._function_unary_exact_named(jnp.tan, 'tan'),
+            'acos': self._function_unary_exact_named(jnp.arccos, 'acos'),
+            'asin': self._function_unary_exact_named(jnp.arcsin, 'asin'),
+            'atan': self._function_unary_exact_named(jnp.arctan, 'atan'),
+            'cosh': self._function_unary_exact_named(jnp.cosh, 'cosh'),
+            'sinh': self._function_unary_exact_named(jnp.sinh, 'sinh'),
+            'tanh': self._function_unary_exact_named(jnp.tanh, 'tanh'),
+            'exp': self._function_unary_exact_named(jnp.exp, 'exp'),
+            'ln': self._function_unary_exact_named(jnp.log, 'ln'),
+            'sqrt': self._function_unary_exact_named(jnp.sqrt, 'sqrt'),
+            'lngamma': self._function_unary_exact_named(scipy.special.gammaln, 'lngamma'),
+            'gamma': self._function_unary_exact_named_gamma()
         }        
         self.KNOWN_BINARY = {
-            'div': lambda x, y, param: jnp.floor_divide(x, y),
-            'mod': lambda x, y, param: jnp.mod(x, y),
-            'fmod': lambda x, y, param: jnp.mod(x, y),
-            'min': lambda x, y, param: jnp.minimum(x, y),
-            'max': lambda x, y, param: jnp.maximum(x, y),
-            'pow': lambda x, y, param: jnp.power(x, y),
-            'log': lambda x, y, param: jnp.log(x) / jnp.log(y),
-            'hypot': lambda x, y, param: jnp.hypot(x, y)
+            'div': self._function_binary_exact_named(jnp.floor_divide, 'div'),
+            'mod': self._function_binary_exact_named(jnp.mod, 'mod'),
+            'fmod': self._function_binary_exact_named(jnp.mod, 'fmod'),
+            'min': self._function_binary_exact_named(jnp.minimum, 'min'),
+            'max': self._function_binary_exact_named(jnp.maximum, 'max'),
+            'pow': self._function_binary_exact_named(jnp.power, 'pow'),
+            'log': self._function_binary_exact_named_log(),
+            'hypot': self._function_binary_exact_named(jnp.hypot, 'hypot'),
         }
+    
+    def _function_unary_exact_named(self, op, name):
+        
+        def _jax_wrapped_named_unary_fn(x, param):
+            return op(x)
+        
+        return jax.named_call(
+            _jax_wrapped_named_unary_fn, name=f'_jax_wrapped_unary_func_{name}')
+        
+    def _function_unary_exact_named_gamma(self):
+        
+        def _jax_wrapped_unary_function_gamma(x, param):
+            return jnp.exp(scipy.special.gammaln(x))
+        
+        return _jax_wrapped_unary_function_gamma        
+    
+    def _function_binary_exact_named(self, op, name):
+        
+        def _jax_wrapped_named_binary_fn(x, y, param):
+            return op(x, y)
+        
+        return jax.named_call(
+            _jax_wrapped_named_binary_fn, name=f'_jax_wrapped_binary_func_{name}')
+    
+    def _function_binary_exact_named_implies(self):
+        
+        def _jax_wrapped_binary_function_implies(x, y, param):
+            return jnp.logical_or(jnp.logical_not(x), y)
+        
+        return _jax_wrapped_binary_function_implies
+    
+    def _function_binary_exact_named_log(self):
+        
+        def _jax_wrapped_binary_function_log(x, y, param):
+            return jnp.log(x) / jnp.log(y)
+        
+        return _jax_wrapped_binary_function_log
+    
+    def _function_aggregation_exact_named(self, op, name):
+        
+        def _jax_wrapped_named_aggregation_fn(x, axis, param):
+            return op(x, axis=axis)
+        
+        return jax.named_call(
+            _jax_wrapped_named_aggregation_fn, name=f'_jax_wrapped_agg_func_{name}')
         
     # ===========================================================================
     # main compilation subroutines
