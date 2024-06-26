@@ -369,10 +369,10 @@ class FuzzyLogic:
     def floorDiv(self):
         jax_floor, jax_param = self.floor()
         
-        def _jax_wrapped_calc_mod_approx(x, y, param):
+        def _jax_wrapped_calc_floordiv_approx(x, y, param):
             return jax_floor(x / y, param)
         
-        return _jax_wrapped_calc_mod_approx, jax_param
+        return _jax_wrapped_calc_floordiv_approx, jax_param
     
     def sqrt(self):
         if self.verbose:
@@ -483,13 +483,13 @@ class FuzzyLogic:
         jax_gs = self._gumbel_softmax
         jax_argmax, jax_param = self.argmax()
         
-        def _jax_wrapped_calc_switch_approx(key, prob, param):
+        def _jax_wrapped_calc_bernoulli_approx(key, prob, param):
             prob = jnp.stack([1.0 - prob, prob], axis=-1)
             sample = jax_gs(key, prob)
             sample = jax_argmax(sample, -1, param)
             return sample
         
-        return _jax_wrapped_calc_switch_approx, jax_param
+        return _jax_wrapped_calc_bernoulli_approx, jax_param
     
     def discrete(self):
         if self.verbose:
