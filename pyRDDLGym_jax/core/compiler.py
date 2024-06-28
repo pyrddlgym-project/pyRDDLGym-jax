@@ -13,7 +13,9 @@ try:
     from tensorflow_probability.substrates import jax as tfp
 except Exception:
     raise_warning('Failed to import tensorflow-probability: '
-                  'compilation of some complex distributions will not work.', 
+                  'compilation of some complex distributions '
+                  '(Binomial, Negative-Binomial, Multinomial) will fail. '
+                  'Please ensure this package is installed correctly.', 
                   'red')
     traceback.print_exc()
     tfp = None
@@ -131,6 +133,10 @@ class JaxRDDLCompiler:
     
     MODEL_PARAM_TAG_SEPARATOR = '___'
     
+    # ===========================================================================
+    # EXACT RDDL TO JAX COMPILATION RULES BY DEFAULT
+    # ===========================================================================
+
     EXACT_RDDL_TO_JAX_NEGATIVE = _function_unary_exact_named(jnp.negative, 'negative')
     
     EXACT_RDDL_TO_JAX_ARITHMETIC = {
@@ -740,6 +746,8 @@ class JaxRDDLCompiler:
         return ids
     
     def model_params_as_string(self) -> str:
+        '''Returns a string of information about model hyper-parameters in the
+        compiled model.'''
         col = "{:<5} {:<20} {:<40} {:<30} {:<30}\n"
         table = col.format('ID','RDDL Expr.','JAX Expr.', 'Parameter', 'Value')
         for (name, (values, _, expr_id, jax_op)) in self.relaxations.items():
