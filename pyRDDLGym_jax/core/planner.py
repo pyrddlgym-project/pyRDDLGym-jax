@@ -1184,6 +1184,10 @@ class JaxBackpropPlanner:
         self.plan.summarize_hyperparameters()
         self.logic.summarize_hyperparameters()
         
+    # ===========================================================================
+    # COMPILATION SUBROUTINES
+    # ===========================================================================
+
     def _jax_compile_rddl(self):
         rddl = self.rddl
         
@@ -1324,6 +1328,10 @@ class JaxBackpropPlanner:
         
         return init_train, init_test
     
+    # ===========================================================================
+    # OPTIMIZE API
+    # ===========================================================================
+
     def optimize(self, *args, return_callback: bool=False, **kwargs) -> Dict[str, object]:
         ''' Compute an optimal straight-line plan. Returns the parameters
         for the optimized policy.
@@ -1662,9 +1670,9 @@ class JaxBackpropPlanner:
         :param key: the JAX PRNG key
         :param params: the trainable parameter PyTree of the policy
         :param step: the time step at which decision is made
-        :param policy_hyperparams: hyper-parameters for the policy/plan, such as
-        weights for sigmoid wrapping boolean actions
         :param subs: the dict of pvariables
+        :param policy_hyperparams: hyper-parameters for the policy/plan, such as
+        weights for sigmoid wrapping boolean actions (optional)
         '''
         
         # check compatibility of the subs dictionary
