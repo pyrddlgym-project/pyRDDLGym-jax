@@ -32,6 +32,98 @@ from pyRDDLGym.core.debug.logger import Logger
 from pyRDDLGym.core.simulator import RDDLSimulatorPrecompiled
 
 
+# ===========================================================================
+# EXACT RDDL TO JAX COMPILATION RULES
+# ===========================================================================
+     
+def _function_unary_exact_named(op, name):
+        
+    def _jax_wrapped_unary_fn_exact(x, param):
+        return op(x)
+        
+    return _jax_wrapped_unary_fn_exact
+        
+        
+def _function_unary_exact_named_gamma():
+        
+    def _jax_wrapped_unary_gamma_exact(x, param):
+        return jnp.exp(scipy.special.gammaln(x))
+        
+    return _jax_wrapped_unary_gamma_exact        
+    
+    
+def _function_binary_exact_named(op, name):
+        
+    def _jax_wrapped_binary_fn_exact(x, y, param):
+        return op(x, y)
+        
+    return _jax_wrapped_binary_fn_exact
+    
+    
+def _function_binary_exact_named_implies():
+        
+    def _jax_wrapped_binary_implies_exact(x, y, param):
+        return jnp.logical_or(jnp.logical_not(x), y)
+        
+    return _jax_wrapped_binary_implies_exact
+    
+    
+def _function_binary_exact_named_log():
+        
+    def _jax_wrapped_binary_log_exact(x, y, param):
+        return jnp.log(x) / jnp.log(y)
+        
+    return _jax_wrapped_binary_log_exact
+    
+    
+def _function_aggregation_exact_named(op, name):
+        
+    def _jax_wrapped_aggregation_fn_exact(x, axis, param):
+        return op(x, axis=axis)
+        
+    return _jax_wrapped_aggregation_fn_exact
+    
+    
+def _function_if_exact_named():
+        
+    def _jax_wrapped_if_exact(c, a, b, param):
+        return jnp.where(c, a, b)
+        
+    return _jax_wrapped_if_exact
+    
+    
+def _function_switch_exact_named():
+        
+    def _jax_wrapped_switch_exact(pred, cases, param):
+        pred = pred[jnp.newaxis, ...]
+        sample = jnp.take_along_axis(cases, pred, axis=0)
+        assert sample.shape[0] == 1
+        return sample[0, ...]
+
+    return _jax_wrapped_switch_exact
+    
+    
+def _function_bernoulli_exact_named():
+        
+    def _jax_wrapped_bernoulli_exact(key, prob, param):
+        return random.bernoulli(key, prob)
+        
+    return _jax_wrapped_bernoulli_exact
+    
+    
+def _function_discrete_exact_named():
+        
+    def _jax_wrapped_discrete_exact(key, prob, param):
+        logits = jnp.log(prob)
+        sample = random.categorical(key=key, logits=logits, axis=-1)
+        out_of_bounds = jnp.logical_not(jnp.logical_and(
+            jnp.all(prob >= 0),
+            jnp.allclose(jnp.sum(prob, axis=-1), 1.0)))
+        return sample, out_of_bounds
+        
+    return _jax_wrapped_discrete_exact
+
+
 class JaxRDDLCompiler:
     '''Compiles a RDDL AST representation into an equivalent JAX representation.
     All operations are identical to their numpy equivalents.
@@ -39,6 +131,88 @@ class JaxRDDLCompiler:
     
     MODEL_PARAM_TAG_SEPARATOR = '___'
     
+    EXACT_RDDL_TO_JAX_NEGATIVE = _function_unary_exact_named(jnp.negative, 'negative')
+    
+    EXACT_RDDL_TO_JAX_ARITHMETIC = {
+        '+': _function_binary_exact_named(jnp.add, 'add'),
+        '-': _function_binary_exact_named(jnp.subtract, 'subtract'),
+        '*': _function_binary_exact_named(jnp.multiply, 'multiply'),
+        '/': _function_binary_exact_named(jnp.divide, 'divide')
+    }    
+        
+    EXACT_RDDL_TO_JAX_RELATIONAL = {
+        '>=': _function_binary_exact_named(jnp.greater_equal, 'greater_equal'),
+        '<=': _function_binary_exact_named(jnp.less_equal, 'less_equal'),
+        '<': _function_binary_exact_named(jnp.less, 'less'),
+        '>': _function_binary_exact_named(jnp.greater, 'greater'),
+        '==': _function_binary_exact_named(jnp.equal, 'equal'),
+        '~=': _function_binary_exact_named(jnp.not_equal, 'not_equal')
+    }
+        
+    EXACT_RDDL_TO_JAX_LOGICAL = {
+        '^': _function_binary_exact_named(jnp.logical_and, 'and'),
+        '&': _function_binary_exact_named(jnp.logical_and, 'and'),
+        '|': _function_binary_exact_named(jnp.logical_or, 'or'),
+        '~': _function_binary_exact_named(jnp.logical_xor, 'xor'),
+        '=>': _function_binary_exact_named_implies(),
+        '<=>': _function_binary_exact_named(jnp.equal, 'iff')
+    }
+    
+    EXACT_RDDL_TO_JAX_LOGICAL_NOT = _function_unary_exact_named(jnp.logical_not, 'not')
+    
+    EXACT_RDDL_TO_JAX_AGGREGATION = {
+        'sum': _function_aggregation_exact_named(jnp.sum, 'sum'),
+        'avg': _function_aggregation_exact_named(jnp.mean, 'avg'),
+        'prod': _function_aggregation_exact_named(jnp.prod, 'prod'),
+        'minimum': _function_aggregation_exact_named(jnp.min, 'minimum'),
+        'maximum': _function_aggregation_exact_named(jnp.max, 'maximum'),
+        'forall': _function_aggregation_exact_named(jnp.all, 'forall'),
+        'exists': _function_aggregation_exact_named(jnp.any, 'exists'),
+        'argmin': _function_aggregation_exact_named(jnp.argmin, 'argmin'),
+        'argmax': _function_aggregation_exact_named(jnp.argmax, 'argmax')
+    }
+    
+    EXACT_RDDL_TO_JAX_UNARY = {        
+        'abs': _function_unary_exact_named(jnp.abs, 'abs'),
+        'sgn': _function_unary_exact_named(jnp.sign, 'sgn'),
+        'round': _function_unary_exact_named(jnp.round, 'round'),
+        'floor': _function_unary_exact_named(jnp.floor, 'floor'),
+        'ceil': _function_unary_exact_named(jnp.ceil, 'ceil'),
+        'cos': _function_unary_exact_named(jnp.cos, 'cos'),
+        'sin': _function_unary_exact_named(jnp.sin, 'sin'),
+        'tan': _function_unary_exact_named(jnp.tan, 'tan'),
+        'acos': _function_unary_exact_named(jnp.arccos, 'acos'),
+        'asin': _function_unary_exact_named(jnp.arcsin, 'asin'),
+        'atan': _function_unary_exact_named(jnp.arctan, 'atan'),
+        'cosh': _function_unary_exact_named(jnp.cosh, 'cosh'),
+        'sinh': _function_unary_exact_named(jnp.sinh, 'sinh'),
+        'tanh': _function_unary_exact_named(jnp.tanh, 'tanh'),
+        'exp': _function_unary_exact_named(jnp.exp, 'exp'),
+        'ln': _function_unary_exact_named(jnp.log, 'ln'),
+        'sqrt': _function_unary_exact_named(jnp.sqrt, 'sqrt'),
+        'lngamma': _function_unary_exact_named(scipy.special.gammaln, 'lngamma'),
+        'gamma': _function_unary_exact_named_gamma()
+    }      
+        
+    EXACT_RDDL_TO_JAX_BINARY = {
+        'div': _function_binary_exact_named(jnp.floor_divide, 'div'),
+        'mod': _function_binary_exact_named(jnp.mod, 'mod'),
+        'fmod': _function_binary_exact_named(jnp.mod, 'fmod'),
+        'min': _function_binary_exact_named(jnp.minimum, 'min'),
+        'max': _function_binary_exact_named(jnp.maximum, 'max'),
+        'pow': _function_binary_exact_named(jnp.power, 'pow'),
+        'log': _function_binary_exact_named_log(),
+        'hypot': _function_binary_exact_named(jnp.hypot, 'hypot'),
+    }
+    
+    EXACT_RDDL_TO_JAX_IF = _function_if_exact_named()
+    
+    EXACT_RDDL_TO_JAX_SWITCH = _function_switch_exact_named()
+    
+    EXACT_RDDL_TO_JAX_BERNOULLI = _function_bernoulli_exact_named()
+    
+    EXACT_RDDL_TO_JAX_DISCRETE = _function_discrete_exact_named()
+
     def __init__(self, rddl: RDDLLiftedModel,
                  allow_synchronous_state: bool=True,
                  logger: Optional[Logger]=None,
@@ -92,120 +266,21 @@ class JaxRDDLCompiler:
         constraints = RDDLConstraints(simulator, vectorized=True)
         self.constraints = constraints
         
-        # basic operations
-        self.NEGATIVE = self._function_unary_exact_named(jnp.negative, 'negative')
-        self.ARITHMETIC_OPS = {
-            '+': self._function_binary_exact_named(jnp.add, 'add'),
-            '-': self._function_binary_exact_named(jnp.subtract, 'subtract'),
-            '*': self._function_binary_exact_named(jnp.multiply, 'multiply'),
-            '/': self._function_binary_exact_named(jnp.divide, 'divide')
-        }    
-        self.RELATIONAL_OPS = {
-            '>=': self._function_binary_exact_named(jnp.greater_equal, 'greater_equal'),
-            '<=': self._function_binary_exact_named(jnp.less_equal, 'less_equal'),
-            '<': self._function_binary_exact_named(jnp.less, 'less'),
-            '>': self._function_binary_exact_named(jnp.greater, 'greater'),
-            '==': self._function_binary_exact_named(jnp.equal, 'equal'),
-            '~=': self._function_binary_exact_named(jnp.not_equal, 'not_equal')
-        }
-        self.LOGICAL_NOT = self._function_unary_exact_named(jnp.logical_not, 'not')
-        self.LOGICAL_OPS = {
-            '^': self._function_binary_exact_named(jnp.logical_and, 'and'),
-            '&': self._function_binary_exact_named(jnp.logical_and, 'and'),
-            '|': self._function_binary_exact_named(jnp.logical_or, 'or'),
-            '~': self._function_binary_exact_named(jnp.logical_xor, 'xor'),
-            '=>': self._function_binary_exact_named_implies(),
-            '<=>': self._function_binary_exact_named(jnp.equal, 'iff')
-        }
-        self.AGGREGATION_OPS = {
-            'sum': self._function_aggregation_exact_named(jnp.sum, 'sum'),
-            'avg': self._function_aggregation_exact_named(jnp.mean, 'avg'),
-            'prod': self._function_aggregation_exact_named(jnp.prod, 'prod'),
-            'minimum': self._function_aggregation_exact_named(jnp.min, 'minimum'),
-            'maximum': self._function_aggregation_exact_named(jnp.max, 'maximum'),
-            'forall': self._function_aggregation_exact_named(jnp.all, 'forall'),
-            'exists': self._function_aggregation_exact_named(jnp.any, 'exists'),
-            'argmin': self._function_aggregation_exact_named(jnp.argmin, 'argmin'),
-            'argmax': self._function_aggregation_exact_named(jnp.argmax, 'argmax')
-        }
+        # basic operations - these can be override in subclasses
+        self.NEGATIVE = JaxRDDLCompiler.EXACT_RDDL_TO_JAX_NEGATIVE
+        self.ARITHMETIC_OPS = JaxRDDLCompiler.EXACT_RDDL_TO_JAX_ARITHMETIC.copy()
+        self.RELATIONAL_OPS = JaxRDDLCompiler.EXACT_RDDL_TO_JAX_RELATIONAL.copy()
+        self.LOGICAL_NOT = JaxRDDLCompiler.EXACT_RDDL_TO_JAX_LOGICAL_NOT
+        self.LOGICAL_OPS = JaxRDDLCompiler.EXACT_RDDL_TO_JAX_LOGICAL.copy()
+        self.AGGREGATION_OPS = JaxRDDLCompiler.EXACT_RDDL_TO_JAX_AGGREGATION.copy()
         self.AGGREGATION_BOOL = {'forall', 'exists'}
-        self.KNOWN_UNARY = {        
-            'abs': self._function_unary_exact_named(jnp.abs, 'abs'),
-            'sgn': self._function_unary_exact_named(jnp.sign, 'sgn'),
-            'round': self._function_unary_exact_named(jnp.round, 'round'),
-            'floor': self._function_unary_exact_named(jnp.floor, 'floor'),
-            'ceil': self._function_unary_exact_named(jnp.ceil, 'ceil'),
-            'cos': self._function_unary_exact_named(jnp.cos, 'cos'),
-            'sin': self._function_unary_exact_named(jnp.sin, 'sin'),
-            'tan': self._function_unary_exact_named(jnp.tan, 'tan'),
-            'acos': self._function_unary_exact_named(jnp.arccos, 'acos'),
-            'asin': self._function_unary_exact_named(jnp.arcsin, 'asin'),
-            'atan': self._function_unary_exact_named(jnp.arctan, 'atan'),
-            'cosh': self._function_unary_exact_named(jnp.cosh, 'cosh'),
-            'sinh': self._function_unary_exact_named(jnp.sinh, 'sinh'),
-            'tanh': self._function_unary_exact_named(jnp.tanh, 'tanh'),
-            'exp': self._function_unary_exact_named(jnp.exp, 'exp'),
-            'ln': self._function_unary_exact_named(jnp.log, 'ln'),
-            'sqrt': self._function_unary_exact_named(jnp.sqrt, 'sqrt'),
-            'lngamma': self._function_unary_exact_named(scipy.special.gammaln, 'lngamma'),
-            'gamma': self._function_unary_exact_named_gamma()
-        }        
-        self.KNOWN_BINARY = {
-            'div': self._function_binary_exact_named(jnp.floor_divide, 'div'),
-            'mod': self._function_binary_exact_named(jnp.mod, 'mod'),
-            'fmod': self._function_binary_exact_named(jnp.mod, 'fmod'),
-            'min': self._function_binary_exact_named(jnp.minimum, 'min'),
-            'max': self._function_binary_exact_named(jnp.maximum, 'max'),
-            'pow': self._function_binary_exact_named(jnp.power, 'pow'),
-            'log': self._function_binary_exact_named_log(),
-            'hypot': self._function_binary_exact_named(jnp.hypot, 'hypot'),
-        }
+        self.KNOWN_UNARY = JaxRDDLCompiler.EXACT_RDDL_TO_JAX_UNARY.copy()
+        self.KNOWN_BINARY = JaxRDDLCompiler.EXACT_RDDL_TO_JAX_BINARY.copy()
+        self.IF_HELPER = JaxRDDLCompiler.EXACT_RDDL_TO_JAX_IF
+        self.SWITCH_HELPER = JaxRDDLCompiler.EXACT_RDDL_TO_JAX_SWITCH
+        self.BERNOULLI_HELPER = JaxRDDLCompiler.EXACT_RDDL_TO_JAX_BERNOULLI
+        self.DISCRETE_HELPER = JaxRDDLCompiler.EXACT_RDDL_TO_JAX_DISCRETE
     
-    def _function_unary_exact_named(self, op, name):
-        
-        def _jax_wrapped_named_unary_fn(x, param):
-            return op(x)
-        
-        return jax.named_call(
-            _jax_wrapped_named_unary_fn, name=f'_jax_wrapped_unary_func_{name}')
-        
-    def _function_unary_exact_named_gamma(self):
-        
-        def _jax_wrapped_unary_function_gamma(x, param):
-            return jnp.exp(scipy.special.gammaln(x))
-        
-        return _jax_wrapped_unary_function_gamma        
-    
-    def _function_binary_exact_named(self, op, name):
-        
-        def _jax_wrapped_named_binary_fn(x, y, param):
-            return op(x, y)
-        
-        return jax.named_call(
-            _jax_wrapped_named_binary_fn, name=f'_jax_wrapped_binary_func_{name}')
-    
-    def _function_binary_exact_named_implies(self):
-        
-        def _jax_wrapped_binary_function_implies(x, y, param):
-            return jnp.logical_or(jnp.logical_not(x), y)
-        
-        return _jax_wrapped_binary_function_implies
-    
-    def _function_binary_exact_named_log(self):
-        
-        def _jax_wrapped_binary_function_log(x, y, param):
-            return jnp.log(x) / jnp.log(y)
-        
-        return _jax_wrapped_binary_function_log
-    
-    def _function_aggregation_exact_named(self, op, name):
-        
-        def _jax_wrapped_named_aggregation_fn(x, axis, param):
-            return op(x, axis=axis)
-        
-        return jax.named_call(
-            _jax_wrapped_named_aggregation_fn, name=f'_jax_wrapped_agg_func_{name}')
-        
     # ===========================================================================
     # main compilation subroutines
     # ===========================================================================
@@ -223,7 +298,8 @@ class JaxRDDLCompiler:
         self.terminations = self._compile_constraints(self.rddl.terminations, info)
         self.cpfs = self._compile_cpfs(info)
         self.reward = self._compile_reward(info)
-        self.model_params = info
+        self.model_params = {key: value for (key, (value, *_)) in info.items()}
+        self.relaxations = info
         
         if log_jax_expr and self.logger is not None:
             printed = self.print_jax()
@@ -654,7 +730,7 @@ class JaxRDDLCompiler:
                 name = f'{name}{sep}{expr_id}'
                 if name in info:
                     raise RuntimeError(f'Model parameter {name} is already defined.')
-                info[name] = values
+                info[name] = (values, tags, expr_id, jax_op.__name__)
         return jax_op, name
     
     def get_ids_of_parameterized_expressions(self) -> List[int]:
@@ -663,6 +739,14 @@ class JaxRDDLCompiler:
         ids = [int(key.split(sep)[-1]) for key in self.model_params] 
         return ids
     
+    def model_params_as_string(self) -> str:
+        col = "{:<5} {:<20} {:<40} {:<30} {:<30}\n"
+        table = col.format('ID','RDDL Expr.','JAX Expr.', 'Parameter', 'Value')
+        for (name, (values, _, expr_id, jax_op)) in self.relaxations.items():
+            rddl_expr = self.traced.lookup(expr_id).etype[1]
+            table += col.format(expr_id, rddl_expr, jax_op, name, values)
+        return table
+        
     # ===========================================================================
     # expression compilation
     # ===========================================================================
@@ -695,7 +779,8 @@ class JaxRDDLCompiler:
             raise RDDLNotImplementedError(
                 f'Internal error: expression type {expr} is not supported.\n' + 
                 print_stack_trace(expr))
-                
+            
+        # force type cast of tensor as required by caller
         if dtype is not None:
             jax_expr = self._jax_cast(jax_expr, dtype)
         
@@ -864,16 +949,23 @@ class JaxRDDLCompiler:
     
     def _jax_arithmetic(self, expr, info):
         _, op = expr.etype
-        valid_ops = self.ARITHMETIC_OPS
+        
+        # if expression is non-fluent, always use the exact operation
+        if self.traced.cached_is_fluent(expr):
+            valid_ops = self.ARITHMETIC_OPS
+            negative_op = self.NEGATIVE
+        else:
+            valid_ops = JaxRDDLCompiler.EXACT_RDDL_TO_JAX_ARITHMETIC
+            negative_op = JaxRDDLCompiler.EXACT_RDDL_TO_JAX_NEGATIVE
         JaxRDDLCompiler._check_valid_op(expr, valid_ops)
-                    
+        
+        # recursively compile arguments
         args = expr.args
         n = len(args)
-        
         if n == 1 and op == '-':
             arg, = args
             jax_expr = self._jax(arg, info)
-            jax_op, jax_param = self._unwrap(self.NEGATIVE, expr.id, info)
+            jax_op, jax_param = self._unwrap(negative_op, expr.id, info)
             return self._jax_unary(jax_expr, jax_op, jax_param, at_least_int=True)
                     
         elif n == 2:
@@ -888,29 +980,42 @@ class JaxRDDLCompiler:
     
     def _jax_relational(self, expr, info):
         _, op = expr.etype
-        valid_ops = self.RELATIONAL_OPS
-        JaxRDDLCompiler._check_valid_op(expr, valid_ops)
-        JaxRDDLCompiler._check_num_args(expr, 2)
         
+        # if expression is non-fluent, always use the exact operation
+        if self.traced.cached_is_fluent(expr):
+            valid_ops = self.RELATIONAL_OPS
+        else:
+            valid_ops = JaxRDDLCompiler.EXACT_RDDL_TO_JAX_RELATIONAL
+        JaxRDDLCompiler._check_valid_op(expr, valid_ops)
+        jax_op, jax_param = self._unwrap(valid_ops[op], expr.id, info)
+        
+        # recursively compile arguments
+        JaxRDDLCompiler._check_num_args(expr, 2)
         lhs, rhs = expr.args
         jax_lhs = self._jax(lhs, info)
         jax_rhs = self._jax(rhs, info)
-        jax_op, jax_param = self._unwrap(valid_ops[op], expr.id, info)
         return self._jax_binary(
             jax_lhs, jax_rhs, jax_op, jax_param, at_least_int=True)
            
     def _jax_logical(self, expr, info):
         _, op = expr.etype
-        valid_ops = self.LOGICAL_OPS    
+        
+        # if expression is non-fluent, always use the exact operation
+        if self.traced.cached_is_fluent(expr):
+            valid_ops = self.LOGICAL_OPS 
+            logical_not_op = self.LOGICAL_NOT 
+        else:
+            valid_ops = JaxRDDLCompiler.EXACT_RDDL_TO_JAX_LOGICAL  
+            logical_not_op = JaxRDDLCompiler.EXACT_RDDL_TO_JAX_LOGICAL_NOT
         JaxRDDLCompiler._check_valid_op(expr, valid_ops)
                 
+        # recursively compile arguments
         args = expr.args
-        n = len(args)
-        
+        n = len(args)        
         if n == 1 and op == '~':
             arg, = args
             jax_expr = self._jax(arg, info)
-            jax_op, jax_param = self._unwrap(self.LOGICAL_NOT, expr.id, info)
+            jax_op, jax_param = self._unwrap(logical_not_op, expr.id, info)
             return self._jax_unary(jax_expr, jax_op, jax_param, check_dtype=bool)
         
         elif n == 2:
@@ -925,17 +1030,21 @@ class JaxRDDLCompiler:
     
     def _jax_aggregation(self, expr, info):
         ERR = JaxRDDLCompiler.ERROR_CODES['INVALID_CAST']
-        
         _, op = expr.etype
-        valid_ops = self.AGGREGATION_OPS      
+        
+        # if expression is non-fluent, always use the exact operation
+        if self.traced.cached_is_fluent(expr):
+            valid_ops = self.AGGREGATION_OPS   
+        else:
+            valid_ops = JaxRDDLCompiler.EXACT_RDDL_TO_JAX_AGGREGATION   
         JaxRDDLCompiler._check_valid_op(expr, valid_ops) 
-        is_floating = op not in self.AGGREGATION_BOOL
-        
-        * _, arg = expr.args  
-        _, axes = self.traced.cached_sim_info(expr)
-        
-        jax_expr = self._jax(arg, info)
         jax_op, jax_param = self._unwrap(valid_ops[op], expr.id, info)
+        
+        # recursively compile arguments
+        is_floating = op not in self.AGGREGATION_BOOL
+        * _, arg = expr.args  
+        _, axes = self.traced.cached_sim_info(expr)        
+        jax_expr = self._jax(arg, info)
         
         def _jax_wrapped_aggregation(x, params, key):
             sample, key, err = jax_expr(x, params, key)
@@ -953,21 +1062,28 @@ class JaxRDDLCompiler:
     def _jax_functional(self, expr, info):
         _, op = expr.etype
         
-        # unary function
-        if op in self.KNOWN_UNARY:
+        # if expression is non-fluent, always use the exact operation
+        if self.traced.cached_is_fluent(expr):
+            unary_ops = self.KNOWN_UNARY
+            binary_ops = self.KNOWN_BINARY
+        else:
+            unary_ops = JaxRDDLCompiler.EXACT_RDDL_TO_JAX_UNARY
+            binary_ops = JaxRDDLCompiler.EXACT_RDDL_TO_JAX_BINARY
+        
+        # recursively compile arguments
+        if op in unary_ops:
             JaxRDDLCompiler._check_num_args(expr, 1)                            
             arg, = expr.args
             jax_expr = self._jax(arg, info)
-            jax_op, jax_param = self._unwrap(self.KNOWN_UNARY[op], expr.id, info)
+            jax_op, jax_param = self._unwrap(unary_ops[op], expr.id, info)
             return self._jax_unary(jax_expr, jax_op, jax_param, at_least_int=True)
             
-        # binary function
-        elif op in self.KNOWN_BINARY:
+        elif op in binary_ops:
             JaxRDDLCompiler._check_num_args(expr, 2)                
             lhs, rhs = expr.args
             jax_lhs = self._jax(lhs, info)
             jax_rhs = self._jax(rhs, info)
-            jax_op, jax_param = self._unwrap(self.KNOWN_BINARY[op], expr.id, info)
+            jax_op, jax_param = self._unwrap(binary_ops[op], expr.id, info)
             return self._jax_binary(
                 jax_lhs, jax_rhs, jax_op, jax_param, at_least_int=True)
         
@@ -990,18 +1106,18 @@ class JaxRDDLCompiler:
             f'Control operator {op} is not supported.\n' + 
             print_stack_trace(expr))   
     
-    def _jax_if_helper(self):
-        
-        def _jax_wrapped_if_calc_exact(c, a, b, param):
-            return jnp.where(c, a, b)
-        
-        return _jax_wrapped_if_calc_exact
-    
     def _jax_if(self, expr, info):
         ERR = JaxRDDLCompiler.ERROR_CODES['INVALID_CAST']
-        JaxRDDLCompiler._check_num_args(expr, 3)
-        jax_if, jax_param = self._unwrap(self._jax_if_helper(), expr.id, info)
         
+        # if expression is non-fluent, always use the exact operation
+        if self.traced.cached_is_fluent(expr):
+            if_op = self.IF_HELPER
+        else:
+            if_op = JaxRDDLCompiler.EXACT_RDDL_TO_JAX_IF
+        jax_if, jax_param = self._unwrap(if_op, expr.id, info)
+        
+        # recursively compile arguments
+        JaxRDDLCompiler._check_num_args(expr, 3)
         pred, if_true, if_false = expr.args        
         jax_pred = self._jax(pred, info)
         jax_true = self._jax(if_true, info)
@@ -1020,23 +1136,20 @@ class JaxRDDLCompiler:
             
         return _jax_wrapped_if_then_else
     
-    def _jax_switch_helper(self):
-        
-        def _jax_wrapped_switch_calc_exact(pred, cases, param):
-            pred = pred[jnp.newaxis, ...]
-            sample = jnp.take_along_axis(cases, pred, axis=0)
-            assert sample.shape[0] == 1
-            return sample[0, ...]
-
-        return _jax_wrapped_switch_calc_exact
-        
     def _jax_switch(self, expr, info):
-        pred, *_ = expr.args             
-        jax_pred = self._jax(pred, info)
-        jax_switch, jax_param = self._unwrap(
-            self._jax_switch_helper(), expr.id, info)
+             
+        # if expression is non-fluent, always use the exact operation
+        if self.traced.cached_is_fluent(expr):
+            switch_op = self.SWITCH_HELPER
+        else:
+            switch_op = JaxRDDLCompiler.EXACT_RDDL_TO_JAX_SWITCH
+        jax_switch, jax_param = self._unwrap(switch_op, expr.id, info)
         
-        # wrap cases as JAX expressions
+        # recursively compile predicate
+        pred, *_ = expr.args  
+        jax_pred = self._jax(pred, info)
+        
+        # recursively compile cases
         cases, default = self.traced.cached_sim_info(expr) 
         jax_default = None if default is None else self._jax(default, info)
         jax_cases = [(jax_default if _case is None else self._jax(_case, info))
@@ -1052,7 +1165,8 @@ class JaxRDDLCompiler:
             for (i, jax_case) in enumerate(jax_cases):
                 sample_cases[i], key, err_case = jax_case(x, params, key)
                 err |= err_case                
-            sample_cases = jnp.asarray(sample_cases, dtype=self._fix_dtype(sample_cases))
+            sample_cases = jnp.asarray(
+                sample_cases, dtype=self._fix_dtype(sample_cases))
             
             # predicate (enum) is an integer - use it to extract from case array
             param = params.get(jax_param, None)
@@ -1255,44 +1369,29 @@ class JaxRDDLCompiler:
         
         return _jax_wrapped_distribution_weibull
     
-    def _jax_bernoulli_helper(self):
-        
-        def _jax_wrapped_calc_bernoulli_exact(key, prob, param):
-            return random.bernoulli(key, prob)
-        
-        return _jax_wrapped_calc_bernoulli_exact
-        
     def _jax_bernoulli(self, expr, info):
         ERR = JaxRDDLCompiler.ERROR_CODES['INVALID_PARAM_BERNOULLI']
         JaxRDDLCompiler._check_num_args(expr, 1)
-        
         arg_prob, = expr.args
+        
+        # if probability is non-fluent, always use the exact operation
+        if self.traced.cached_is_fluent(arg_prob):
+            bern_op = self.BERNOULLI_HELPER
+        else:
+            bern_op = JaxRDDLCompiler.EXACT_RDDL_TO_JAX_BERNOULLI
+        jax_bern, jax_param = self._unwrap(bern_op, expr.id, info)
+        
+        # recursively compile arguments
         jax_prob = self._jax(arg_prob, info)
         
-        if self.traced.cached_is_fluent(arg_prob):            
-            jax_bern, jax_param = self._unwrap(
-                self._jax_bernoulli_helper(), expr.id, info)
-        
-            # probability is fluent: uses the implicit JAX subroutine
-            def _jax_wrapped_distribution_bernoulli(x, params, key):
-                prob, key, err = jax_prob(x, params, key)
-                key, subkey = random.split(key)
-                param = params.get(jax_param, None)
-                sample = jax_bern(subkey, prob, param)
-                out_of_bounds = jnp.logical_not(jnp.all((prob >= 0) & (prob <= 1)))
-                err |= (out_of_bounds * ERR)
-                return sample, key, err
-        
-        else:
-            
-            # probability is non-fluent: no need to reparameterize
-            def _jax_wrapped_distribution_bernoulli(x, params, key):
-                prob, key, err = jax_prob(x, params, key)
-                key, subkey = random.split(key)
-                sample = random.bernoulli(subkey, prob)
-                out_of_bounds = jnp.logical_not(jnp.all((prob >= 0) & (prob <= 1)))
-                err |= (out_of_bounds * ERR)
-                return sample, key, err
+        def _jax_wrapped_distribution_bernoulli(x, params, key):
+            prob, key, err = jax_prob(x, params, key)
+            key, subkey = random.split(key)
+            param = params.get(jax_param, None)
+            sample = jax_bern(subkey, prob, param)
+            out_of_bounds = jnp.logical_not(jnp.all((prob >= 0) & (prob <= 1)))
+            err |= (out_of_bounds * ERR)
+            return sample, key, err
         
         return _jax_wrapped_distribution_bernoulli
     
@@ -1406,8 +1505,7 @@ class JaxRDDLCompiler:
     
     def _jax_geometric(self, expr, info):
         ERR = JaxRDDLCompiler.ERROR_CODES['INVALID_PARAM_GEOMETRIC']
-        JaxRDDLCompiler._check_num_args(expr, 1)
-        
+        JaxRDDLCompiler._check_num_args(expr, 1)        
         arg_prob, = expr.args
         jax_prob = self._jax(arg_prob, info)
         
@@ -1611,25 +1709,19 @@ class JaxRDDLCompiler:
     # random variables with enum support
     # ===========================================================================
     
-    def _jax_discrete_helper(self):
-        
-        def _jax_wrapped_discrete_calc_exact(key, prob, param):
-            logits = jnp.log(prob)
-            sample = random.categorical(key=key, logits=logits, axis=-1)
-            out_of_bounds = jnp.logical_not(jnp.logical_and(
-                jnp.all(prob >= 0),
-                jnp.allclose(jnp.sum(prob, axis=-1), 1.0)))
-            return sample, out_of_bounds
-        
-        return _jax_wrapped_discrete_calc_exact
-            
     def _jax_discrete(self, expr, info, unnorm):
         NORMAL = JaxRDDLCompiler.ERROR_CODES['NORMAL']
         ERR = JaxRDDLCompiler.ERROR_CODES['INVALID_PARAM_DISCRETE']
-        jax_discrete, jax_param = self._unwrap(
-            self._jax_discrete_helper(), expr.id, info)
-        
         ordered_args = self.traced.cached_sim_info(expr)
+        
+        # if all probabilities are non-fluent, then always sample exact
+        if any(self.traced.cached_is_fluent(arg) for arg in ordered_args):
+            discrete_op = self.DISCRETE_HELPER
+        else:
+            discrete_op = JaxRDDLCompiler.EXACT_RDDL_TO_JAX_DISCRETE
+        jax_discrete, jax_param = self._unwrap(discrete_op, expr.id, info)
+        
+        # compile probability expressions
         jax_probs = [self._jax(arg, info) for arg in ordered_args]
         
         def _jax_wrapped_distribution_discrete(x, params, key):
@@ -1657,11 +1749,17 @@ class JaxRDDLCompiler:
     def _jax_discrete_pvar(self, expr, info, unnorm):
         ERR = JaxRDDLCompiler.ERROR_CODES['INVALID_PARAM_DISCRETE']
         JaxRDDLCompiler._check_num_args(expr, 2)
-        jax_discrete, jax_param = self._unwrap(
-            self._jax_discrete_helper(), expr.id, info)
-        
         _, args = expr.args
         arg, = args
+        
+        # if probabilities are non-fluent, then always sample exact
+        if self.traced.cached_is_fluent(arg):
+            discrete_op = self.DISCRETE_HELPER
+        else:
+            discrete_op = JaxRDDLCompiler.EXACT_RDDL_TO_JAX_DISCRETE
+        jax_discrete, jax_param = self._unwrap(discrete_op, expr.id, info)
+        
+        # compile probability function
         jax_probs = self._jax(arg, info)
 
         def _jax_wrapped_distribution_discrete_pvar(x, params, key):
