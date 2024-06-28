@@ -1838,6 +1838,7 @@ def cvar_utility(returns: jnp.ndarray, alpha: float) -> float:
 
 class JaxOfflineController(BaseAgent):
     '''A container class for a Jax policy trained offline.'''
+    
     use_tensor_obs = True
     
     def __init__(self, planner: JaxBackpropPlanner, 
@@ -1887,6 +1888,7 @@ class JaxOfflineController(BaseAgent):
 class JaxOnlineController(BaseAgent):
     '''A container class for a Jax controller continuously updated using state 
     feedback.'''
+    
     use_tensor_obs = True
     
     def __init__(self, planner: JaxBackpropPlanner, 
@@ -1901,6 +1903,8 @@ class JaxOnlineController(BaseAgent):
         :param key: the RNG key to seed randomness
         :param eval_hyperparams: policy hyperparameters to apply for evaluation
         or whenever sample_action is called
+        :param warm_start: whether to use the previous decision epoch final
+        policy parameters to warm the next decision epoch
         :param **train_kwargs: any keyword arguments to be passed to the planner
         for optimization
         '''
