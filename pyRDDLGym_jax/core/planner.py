@@ -1340,7 +1340,6 @@ class JaxBackpropPlanner:
         instead of the parameters
         :param key: JAX PRNG key   
         :param epochs: the maximum number of steps of gradient descent
-        :param the maximum number of steps of gradient descent     
         :param train_seconds: total time allocated for gradient descent
         :param plot_step: frequency to plot the plan and save result to disk
         :param model_params: optional model-parameters to override default
@@ -1380,7 +1379,6 @@ class JaxBackpropPlanner:
         
         :param key: JAX PRNG key   
         :param epochs: the maximum number of steps of gradient descent
-        :param the maximum number of steps of gradient descent     
         :param train_seconds: total time allocated for gradient descent
         :param plot_step: frequency to plot the plan and save result to disk
         :param model_params: optional model-parameters to override default
