@@ -50,6 +50,7 @@ from pyRDDLGym_jax.core.logic import FuzzyLogic
 # - instantiate planner
 #
 # ***********************************************************************
+
 def _parse_config_file(path: str):
     if not os.path.isfile(path):
         raise FileNotFoundError(f'File {path} does not exist.')
@@ -132,6 +133,20 @@ def load_config_from_string(value: str) -> Tuple[Dict[str, object], ...]:
 # - replace discrete ops in state dynamics/reward with differentiable ones
 #
 # ***********************************************************************
+
+def _function_discrete_approx_named(logic):
+    jax_discrete, jax_param = logic.discrete()
+
+    def _jax_wrapped_discrete_calc_approx(key, prob, params):
+        sample = jax_discrete(key, prob, params)
+        out_of_bounds = jnp.logical_not(jnp.logical_and(
+            jnp.all(prob >= 0),
+            jnp.allclose(jnp.sum(prob, axis=-1), 1.0)))
+        return sample, out_of_bounds
+    
+    return _jax_wrapped_discrete_calc_approx, jax_param
+
+
 class JaxRDDLCompilerWithGrad(JaxRDDLCompiler):
     '''Compiles a RDDL AST representation to an equivalent JAX representation. 
     Unlike its parent class, this class treats all fluents as real-valued, and
@@ -197,7 +212,11 @@ class JaxRDDLCompilerWithGrad(JaxRDDLCompiler):
         self.KNOWN_BINARY['div'] = logic.floorDiv()
         self.KNOWN_BINARY['mod'] = logic.mod()
         self.KNOWN_BINARY['fmod'] = logic.mod()
-    
+        self.IF_HELPER = logic.If()
+        self.SWITCH_HELPER = logic.Switch()
+        self.BERNOULLI_HELPER = logic.bernoulli()
+        self.DISCRETE_HELPER = _function_discrete_approx_named(logic)
+        
     def _jax_stop_grad(self, jax_expr):
         
         def _jax_wrapped_stop_grad(x, params, key):
@@ -219,35 +238,13 @@ class JaxRDDLCompilerWithGrad(JaxRDDLCompiler):
                     jax_cpfs[cpf] = self._jax_stop_grad(jax_cpfs[cpf])
         return jax_cpfs
     
-    def _jax_if_helper(self):
-        return self.logic.If()
-    
-    def _jax_switch_helper(self):
-        return self.logic.Switch()
-        
     def _jax_kron(self, expr, info):
         if self.logic.verbose:
             raise_warning('KronDelta will be ignored.')            
-                       
         arg, = expr.args
         arg = self._jax(arg, info)
         return arg
     
-    def _jax_bernoulli_helper(self):
-        return self.logic.bernoulli()
-    
-    def _jax_discrete_helper(self):
-        jax_discrete, jax_param = self.logic.discrete()
-
-        def _jax_wrapped_discrete_calc_approx(key, prob, params):
-            sample = jax_discrete(key, prob, params)
-            out_of_bounds = jnp.logical_not(jnp.logical_and(
-                jnp.all(prob >= 0),
-                jnp.allclose(jnp.sum(prob, axis=-1), 1.0)))
-            return sample, out_of_bounds
-        
-        return _jax_wrapped_discrete_calc_approx, jax_param
-
 
 # ***********************************************************************
 # ALL VERSIONS OF JAX PLANS
@@ -256,6 +253,7 @@ class JaxRDDLCompilerWithGrad(JaxRDDLCompiler):
 # - deep reactive policy
 #
 # ***********************************************************************
+
 class JaxPlan:
     '''Base class for all JAX policy representations.'''
     
@@ -942,6 +940,7 @@ class JaxDeepReactivePolicy(JaxPlan):
 # - more stable but slower line search based planner
 #
 # ***********************************************************************
+
 class RollingMean:
     
     def __init__(self, window_size: int) -> None:
@@ -1424,6 +1423,9 @@ class JaxBackpropPlanner:
                   f'    test_rolling_window={test_rolling_window}\n' 
                   f'    plot_frequency     ={plot_step}\n'
                   f'    verbose            ={verbose}\n')
+            if verbose >= 2:
+                print('EXPRESSION RELAXATION TABLE')
+                print(self.compiled.model_params_as_string())
             
         # compute a batched version of the initial values
         if subs is None:
@@ -1787,6 +1789,7 @@ class JaxLineSearchPlanner(JaxBackpropPlanner):
             
         return _jax_wrapped_plan_update
 
+
 # ***********************************************************************
 # ALL VERSIONS OF RISK FUNCTIONS
 # 
@@ -1826,6 +1829,7 @@ def cvar_utility(returns: jnp.ndarray, alpha: float) -> float:
 # - online controller is the replanning mode
 #
 # ***********************************************************************
+
 class JaxOfflineController(BaseAgent):
     '''A container class for a Jax policy trained offline.'''
     use_tensor_obs = True
