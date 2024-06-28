@@ -372,7 +372,7 @@ def objective_slp(params, kwargs, key, index):
     env = RDDLEnv(domain=kwargs['domain'],
                   instance=kwargs['instance'],
                   vectorized=True,
-                  enforce_action_constraints=True)
+                  enforce_action_constraints=False)
 
     # perform training
     average_reward = 0.0
@@ -503,7 +503,7 @@ def objective_replan(params, kwargs, key, index):
     env = RDDLEnv(domain=kwargs['domain'],
                   instance=kwargs['instance'],
                   vectorized=True,
-                  enforce_action_constraints=True)
+                  enforce_action_constraints=False)
 
     # perform training
     average_reward = 0.0
@@ -630,7 +630,7 @@ def objective_drp(params, kwargs, key, index):
     env = RDDLEnv(domain=kwargs['domain'],
                   instance=kwargs['instance'],
                   vectorized=True,
-                  enforce_action_constraints=True)
+                  enforce_action_constraints=False)
     
     # perform training
     average_reward = 0.0
