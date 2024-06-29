@@ -15,8 +15,7 @@ except Exception:
     raise_warning('Failed to import tensorflow-probability: '
                   'compilation of some complex distributions '
                   '(Binomial, Negative-Binomial, Multinomial) will fail. '
-                  'Please ensure this package is installed correctly.', 
-                  'red')
+                  'Please ensure this package is installed correctly.', 'red')
     traceback.print_exc()
     tfp = None
 
@@ -415,13 +414,17 @@ class JaxRDDLCompiler:
         '''Compiles the current RDDL model into a JAX transition function that 
         samples the next state.
         
-        The signature of the returned function is (key, actions, subs, 
-        model_params), where:
+        The arguments of the returned function is:
             - key is the PRNG key
             - actions is the dict of action tensors
             - subs is the dict of current pvar value tensors
             - model_params is a dict of parameters for the relaxed model.
-                    
+        
+        The returned value of the function is:
+            - subs is the returned next epoch fluent values
+            - log includes all the auxiliary information about constraints 
+              satisfied, errors, etc.
+            
         constraint_func provides the option to compile nonlinear constraints:
         
             1. f(s, a) ?? g(s, a)
@@ -540,14 +543,24 @@ class JaxRDDLCompiler:
         '''Compiles the current RDDL model into a JAX transition function that 
         samples trajectories with a fixed horizon from a policy.
         
-        The signature of the policy function is (key, params, hyperparams, 
-        step, states), where:
+        The arguments of the returned function is:
+            - key is the PRNG key (used by a stochastic policy)
+            - policy_params is a pytree of trainable policy weights
+            - hyperparams is a pytree of (optional) fixed policy hyper-parameters
+            - subs is the dictionary of current fluent tensor values
+            - model_params is a dict of model hyperparameters.
+        
+        The returned value of the returned function is:
+            - log is the dictionary of all trajectory information, including
+              constraints that were satisfied, errors, etc. 
+            
+        The arguments of the policy function is:
             - key is the PRNG key (used by a stochastic policy)
             - params is a pytree of trainable policy weights
             - hyperparams is a pytree of (optional) fixed policy hyper-parameters
             - step is the time index of the decision in the current rollout
             - states is a dict of tensors for the current observation.
-            
+        
         :param policy: a Jax compiled function for the policy as described above
         decision epoch, state dict, and an RNG key and returns an action dict
         :param n_steps: the rollout horizon
