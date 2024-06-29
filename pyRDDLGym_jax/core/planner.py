@@ -184,18 +184,18 @@ class JaxRDDLCompilerWithGrad(JaxRDDLCompiler):
         
         # overwrite basic operations with fuzzy ones
         self.RELATIONAL_OPS = {
-            '>=': logic.greaterEqual(),
-            '<=': logic.lessEqual(),
+            '>=': logic.greater_equal(),
+            '<=': logic.less_equal(),
             '<': logic.less(),
             '>': logic.greater(),
             '==': logic.equal(),
-            '~=': logic.notEqual()
+            '~=': logic.not_equal()
         }
-        self.LOGICAL_NOT = logic.Not()
+        self.LOGICAL_NOT = logic.logical_not()
         self.LOGICAL_OPS = {
-            '^': logic.And(),
-            '&': logic.And(),
-            '|': logic.Or(),
+            '^': logic.logical_and(),
+            '&': logic.logical_and(),
+            '|': logic.logical_or(),
             '~': logic.xor(),
             '=>': logic.implies(),
             '<=>': logic.equiv()
@@ -204,16 +204,16 @@ class JaxRDDLCompilerWithGrad(JaxRDDLCompiler):
         self.AGGREGATION_OPS['exists'] = logic.exists()
         self.AGGREGATION_OPS['argmin'] = logic.argmin()
         self.AGGREGATION_OPS['argmax'] = logic.argmax()
-        self.KNOWN_UNARY['sgn'] = logic.signum()
+        self.KNOWN_UNARY['sgn'] = logic.sgn()
         self.KNOWN_UNARY['floor'] = logic.floor()   
         self.KNOWN_UNARY['ceil'] = logic.ceil()   
         self.KNOWN_UNARY['round'] = logic.round()
         self.KNOWN_UNARY['sqrt'] = logic.sqrt()
-        self.KNOWN_BINARY['div'] = logic.floorDiv()
+        self.KNOWN_BINARY['div'] = logic.div()
         self.KNOWN_BINARY['mod'] = logic.mod()
         self.KNOWN_BINARY['fmod'] = logic.mod()
-        self.IF_HELPER = logic.If()
-        self.SWITCH_HELPER = logic.Switch()
+        self.IF_HELPER = logic.control_if()
+        self.SWITCH_HELPER = logic.control_switch()
         self.BERNOULLI_HELPER = logic.bernoulli()
         self.DISCRETE_HELPER = _function_discrete_approx_named(logic)
         
@@ -1429,9 +1429,9 @@ class JaxBackpropPlanner:
                   f'    test_rolling_window={test_rolling_window}\n' 
                   f'    plot_frequency     ={plot_step}\n'
                   f'    verbose            ={verbose}\n')
-            if verbose >= 2:
-                print('EXPRESSION RELAXATION TABLE')
-                print(self.compiled.model_params_as_string())
+            # if verbose >= 2:
+            #     print('EXPRESSION RELAXATION TABLE')
+            #     print(self.compiled.model_params_as_string())
             
         # compute a batched version of the initial values
         if subs is None:
