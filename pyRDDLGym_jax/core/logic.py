@@ -20,6 +20,32 @@ class StandardComplement(Complement):
         return 1.0 - x
 
 
+class Comparison:
+    '''Base class for approximate comparison operations.'''
+    
+    def greater_equal(self, x, y, param):
+        raise NotImplementedError
+    
+    def greater(self, x, y, param):
+        raise NotImplementedError
+    
+    def equal(self, x, y, param):
+        raise NotImplementedError
+    
+
+class SigmoidComparison(Comparison):
+    '''Comparison operations approximated using sigmoid functions.'''
+    
+    def greater_equal(self, x, y, param):
+        return jax.nn.sigmoid(param * (x - y))
+    
+    def greater(self, x, y, param):
+        return jax.nn.sigmoid(param * (x - y))
+    
+    def equal(self, x, y, param):
+        return 1.0 - jnp.square(jnp.tanh(param * (y - x)))
+        
+
 class TNorm:
     '''Base class for fuzzy differentiable t-norms.'''
     
@@ -71,6 +97,7 @@ class FuzzyLogic:
     
     def __init__(self, tnorm: TNorm=ProductTNorm(),
                  complement: Complement=StandardComplement(),
+                 comparison: Comparison=SigmoidComparison(),
                  weight: float=10.0,
                  debias: Optional[Set[str]]=None,
                  eps: float=1e-10,
@@ -80,7 +107,8 @@ class FuzzyLogic:
         
         :param tnorm: fuzzy operator for logical AND
         :param complement: fuzzy operator for logical NOT
-        :param weight: a concentration parameter (larger means better accuracy)
+        :param comparison: fuzzy operator for comparisons (>, >=, <, ==, ~=, ...)
+        :param weight: a sharpness parameter for sigmoid and softmax activations
         :param error: an error parameter (e.g. floor) (smaller means better accuracy)
         :param debias: which functions to de-bias approximate on forward pass
         :param eps: small positive float to mitigate underflow
@@ -89,6 +117,7 @@ class FuzzyLogic:
         '''
         self.tnorm = tnorm
         self.complement = complement
+        self.comparison = comparison
         self.weight = float(weight)
         if debias is None:
             debias = {}
@@ -112,6 +141,7 @@ class FuzzyLogic:
         print(f'model relaxation:\n'
               f'    tnorm         ={type(self.tnorm).__name__}\n'
               f'    complement    ={type(self.complement).__name__}\n'
+              f'    comparison    ={type(self.comparison).__name__}\n'
               f'    sigmoid_weight={self.weight}\n'
               f'    cpfs_to_debias={self.debias}\n'
               f'    underflow_tol ={self.eps}\n'
@@ -134,7 +164,7 @@ class FuzzyLogic:
     
     def logical_not(self):
         if self.verbose:
-            raise_warning('Using the replacement rule: ~a --> 1 - a')
+            raise_warning('Using the replacement rule: ~a --> complement(a)')
         
         _not = self.complement
         
@@ -158,7 +188,7 @@ class FuzzyLogic:
     def xor(self):
         if self.verbose:
             raise_warning('Using the replacement rule: '
-                          'a ~ b --> (a or b) ^ (a ^ b).')
+                          'a ~ b --> (a | b) ^ (a ^ b).')
         
         _not = self.complement
         _and = self.tnorm.norm
@@ -199,7 +229,7 @@ class FuzzyLogic:
     def forall(self):
         if self.verbose:
             raise_warning('Using the replacement rule: '
-                          'forall(a) --> a[1] ^ a[2] ^ ... ^ a[n]')
+                          'forall(a) --> a[1] ^ a[2] ^ ...')
         
         _forall = self.tnorm.norms
         
@@ -223,12 +253,14 @@ class FuzzyLogic:
      
     def greater_equal(self):
         if self.verbose:
-            raise_warning('Using the replacement rule: a >= b --> sigmoid(a - b)')
-            
+            raise_warning('Using the replacement rule: '
+                          'a >= b --> comparison.greater_equal(a, b)')
+        
+        greater_equal_op = self.comparison.greater_equal
         debias = 'greater_equal' in self.debias
         
         def _jax_wrapped_calc_geq_approx(a, b, param):
-            sample = jax.nn.sigmoid(param * (a - b))
+            sample = greater_equal_op(a, b, param)
             if debias:
                 hard_sample = jnp.greater_equal(a, b)
                 sample += jax.lax.stop_gradient(hard_sample - sample)
@@ -240,12 +272,14 @@ class FuzzyLogic:
     
     def greater(self):
         if self.verbose:
-            raise_warning('Using the replacement rule: a > b --> sigmoid(a - b)')
-            
+            raise_warning('Using the replacement rule: '
+                          'a > b --> comparison.greater(a, b)')
+        
+        greater_op = self.comparison.greater
         debias = 'greater' in self.debias
         
         def _jax_wrapped_calc_gre_approx(a, b, param):
-            sample = jax.nn.sigmoid(param * (a - b))
+            sample = greater_op(a, b, param)
             if debias:
                 hard_sample = jnp.greater(a, b)
                 sample += jax.lax.stop_gradient(hard_sample - sample)
@@ -273,12 +307,14 @@ class FuzzyLogic:
 
     def equal(self):
         if self.verbose:
-            raise_warning('Using the replacement rule: a == b --> sech^2(b - a)')
-            
+            raise_warning('Using the replacement rule: '
+                          'a == b --> comparison.equal(a, b)')
+        
+        equal_op = self.comparison.equal
         debias = 'equal' in self.debias
         
         def _jax_wrapped_calc_equal_approx(a, b, param):
-            sample = 1.0 - jnp.square(jnp.tanh(param * (b - a)))
+            sample = equal_op(a, b, param)
             if debias:
                 hard_sample = jnp.equal(a, b)
                 sample += jax.lax.stop_gradient(hard_sample - sample)
