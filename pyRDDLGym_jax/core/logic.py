@@ -121,7 +121,7 @@ class FuzzyLogic:
     # logical operators
     # ===========================================================================
      
-    def And(self):
+    def logical_and(self):
         if self.verbose:
             raise_warning('Using the replacement rule: a ^ b --> tnorm(a, b).')
         
@@ -132,7 +132,7 @@ class FuzzyLogic:
         
         return _jax_wrapped_calc_and_approx, None
     
-    def Not(self):
+    def logical_not(self):
         if self.verbose:
             raise_warning('Using the replacement rule: ~a --> 1 - a')
         
@@ -143,9 +143,9 @@ class FuzzyLogic:
         
         return _jax_wrapped_calc_not_approx, None
     
-    def Or(self):
+    def logical_or(self):
         if self.verbose:
-            raise_warning('Using the replacement rule: a or b --> tconorm(a, b).')
+            raise_warning('Using the replacement rule: a | b --> tconorm(a, b).')
             
         _not = self.complement
         _and = self.tnorm.norm
@@ -158,7 +158,7 @@ class FuzzyLogic:
     def xor(self):
         if self.verbose:
             raise_warning('Using the replacement rule: '
-                          'a xor b --> (a or b) ^ (a ^ b).')
+                          'a ~ b --> (a or b) ^ (a ^ b).')
         
         _not = self.complement
         _and = self.tnorm.norm
@@ -199,7 +199,7 @@ class FuzzyLogic:
     def forall(self):
         if self.verbose:
             raise_warning('Using the replacement rule: '
-                          'forall(a) --> tnorm(a[1], tnorm(a[2], ...))')
+                          'forall(a) --> a[1] ^ a[2] ^ ... ^ a[n]')
         
         _forall = self.tnorm.norms
         
@@ -221,11 +221,11 @@ class FuzzyLogic:
     # comparison operators
     # ===========================================================================
      
-    def greaterEqual(self):
+    def greater_equal(self):
         if self.verbose:
             raise_warning('Using the replacement rule: a >= b --> sigmoid(a - b)')
             
-        debias = 'greaterEqual' in self.debias
+        debias = 'greater_equal' in self.debias
         
         def _jax_wrapped_calc_geq_approx(a, b, param):
             sample = jax.nn.sigmoid(param * (a - b))
@@ -234,7 +234,7 @@ class FuzzyLogic:
                 sample += jax.lax.stop_gradient(hard_sample - sample)
             return sample
         
-        tags = ('weight', 'greaterEqual')
+        tags = ('weight', 'greater_equal')
         new_param = (tags, self.weight)
         return _jax_wrapped_calc_geq_approx, new_param
     
@@ -255,8 +255,8 @@ class FuzzyLogic:
         new_param = (tags, self.weight)
         return _jax_wrapped_calc_gre_approx, new_param
     
-    def lessEqual(self):
-        jax_geq, jax_param = self.greaterEqual()
+    def less_equal(self):
+        jax_geq, jax_param = self.greater_equal()
         
         def _jax_wrapped_calc_leq_approx(a, b, param):
             return jax_geq(-a, -b, param)
@@ -288,7 +288,7 @@ class FuzzyLogic:
         new_param = (tags, self.weight)
         return _jax_wrapped_calc_equal_approx, new_param
     
-    def notEqual(self):
+    def not_equal(self):
         _not = self.complement
         jax_eq, jax_param = self.equal()
         
@@ -301,22 +301,22 @@ class FuzzyLogic:
     # special functions
     # ===========================================================================
      
-    def signum(self):
+    def sgn(self):
         if self.verbose:
-            raise_warning('Using the replacement rule: signum(x) --> tanh(x)')
+            raise_warning('Using the replacement rule: sgn(x) --> tanh(x)')
             
-        debias = 'signum' in self.debias
+        debias = 'sgn' in self.debias
         
-        def _jax_wrapped_calc_signum_approx(x, param):
+        def _jax_wrapped_calc_sgn_approx(x, param):
             sample = jnp.tanh(param * x)
             if debias:
                 hard_sample = jnp.sign(x)
                 sample += jax.lax.stop_gradient(hard_sample - sample)
             return sample
         
-        tags = ('weight', 'signum')
+        tags = ('weight', 'sgn')
         new_param = (tags, self.weight)
-        return _jax_wrapped_calc_signum_approx, new_param
+        return _jax_wrapped_calc_sgn_approx, new_param
     
     def floor(self):
         if self.verbose:
@@ -366,13 +366,13 @@ class FuzzyLogic:
         
         return _jax_wrapped_calc_mod_approx, jax_param
     
-    def floorDiv(self):
+    def div(self):
         jax_floor, jax_param = self.floor()
         
-        def _jax_wrapped_calc_floordiv_approx(x, y, param):
+        def _jax_wrapped_calc_div_approx(x, y, param):
             return jax_floor(x / y, param)
         
-        return _jax_wrapped_calc_floordiv_approx, jax_param
+        return _jax_wrapped_calc_div_approx, jax_param
     
     def sqrt(self):
         if self.verbose:
@@ -427,12 +427,12 @@ class FuzzyLogic:
     # control flow
     # ===========================================================================
      
-    def If(self):
+    def control_if(self):
         if self.verbose:
             raise_warning('Using the replacement rule: '
                           'if c then a else b --> c * a + (1 - c) * b')
         
-        debias = 'If' in self.debias
+        debias = 'if' in self.debias
         
         def _jax_wrapped_calc_if_approx(c, a, b, param):
             sample = c * a + (1.0 - c) * b
@@ -443,12 +443,12 @@ class FuzzyLogic:
         
         return _jax_wrapped_calc_if_approx, None
     
-    def Switch(self):
+    def control_switch(self):
         if self.verbose:
             raise_warning('Using the replacement rule: '
                           'switch(pred) { cases } --> sum(cases[i] * (pred == i))')   
             
-        debias = 'Switch' in self.debias
+        debias = 'switch' in self.debias
         
         def _jax_wrapped_calc_switch_approx(pred, cases, param):
             pred = jnp.broadcast_to(pred[jnp.newaxis, ...], shape=cases.shape)
@@ -514,11 +514,11 @@ w = 100.0
 
 def _test_logical():
     print('testing logical')
-    _and, _ = logic.And()
-    _not, _ = logic.Not()
+    _and, _ = logic.logical_and()
+    _not, _ = logic.logical_not()
     _gre, _ = logic.greater()
-    _or, _ = logic.Or()
-    _if, _ = logic.If()
+    _or, _ = logic.logical_or()
+    _if, _ = logic.control_if()
     
     # https://towardsdatascience.com/emulating-logical-gates-with-a-neural-network-75c229ec4cc9
     def test_logic(x1, x2):
@@ -551,7 +551,7 @@ def _test_indexing():
 
 def _test_control():
     print('testing control')
-    _switch, _ = logic.Switch()
+    _switch, _ = logic.control_switch()
     
     pred = jnp.asarray(jnp.linspace(0, 2, 10))
     case1 = jnp.asarray([-10.] * 10)
