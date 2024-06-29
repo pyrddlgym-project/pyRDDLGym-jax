@@ -953,6 +953,8 @@ class JaxDeepReactivePolicy(JaxPlan):
 # ***********************************************************************
 
 class RollingMean:
+    '''Maintains an estimate of the rolling mean of a stream of real-valued 
+    observations.'''
     
     def __init__(self, window_size: int) -> None:
         self._window_size = window_size
@@ -969,6 +971,7 @@ class RollingMean:
 
 
 class JaxPlannerPlot:
+    '''Supports plotting and visualization of a JAX policy in real time.'''
     
     def __init__(self, rddl: RDDLPlanningModel, horizon: int) -> None:
         self._fig, axes = plt.subplots(1 + len(rddl.action_fluents))
@@ -1040,6 +1043,11 @@ class JaxPlannerPlot:
 
 
 class JaxPlannerStatus(Enum):
+    '''Represents the status of a policy update from the JAX planner, 
+    including whether the update resulted in nan gradient, 
+    whether progress was made, budget was reached, or other information that
+    can be used to monitor and act based on the planner's progress.'''
+    
     NORMAL = 0
     NO_PROGRESS = 1
     PRECONDITION_POSSIBLY_UNSATISFIED = 2
