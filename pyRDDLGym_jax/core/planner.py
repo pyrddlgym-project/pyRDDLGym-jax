@@ -1440,8 +1440,9 @@ class JaxBackpropPlanner:
                   f'    test_rolling_window={test_rolling_window}\n' 
                   f'    plot_frequency     ={plot_step}\n'
                   f'    verbose            ={verbose}\n')
-            if verbose >= 2:
-                print('EXPRESSION RELAXATION SUMMARY:')
+            if verbose >= 2 and self.compiled.relaxations:
+                print('Some RDDL operations are non-differentiable, '
+                      'replacing them with differentiable relaxations:')
                 print(self.compiled.summarize_model_relaxations())
             
         # compute a batched version of the initial values
