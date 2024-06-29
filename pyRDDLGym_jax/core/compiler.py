@@ -739,14 +739,14 @@ class JaxRDDLCompiler:
                 if name in model_params:
                     raise RuntimeError(f'Model parameter {name} is already defined.')
                 model_params[name] = (values, tags, expr_id, jax_op.__name__)
-            relaxed_list.append((expr_id, jax_op.__name__))
+            relaxed_list.append((param, expr_id, jax_op.__name__))
         return jax_op, name
     
     def summarize_model_relaxations(self) -> str:
         '''Returns a string of information about model relaxations in the
         compiled model.'''
         occurence_by_type = {}
-        for (expr_id, jax_op) in self.relaxations:
+        for (_, expr_id, jax_op) in self.relaxations:
             etype = self.traced.lookup(expr_id).etype
             source = f'{etype[1]} ({etype[0]})'
             sub = f'{source:<30} --> {jax_op}'
