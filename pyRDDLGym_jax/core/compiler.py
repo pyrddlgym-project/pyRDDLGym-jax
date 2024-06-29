@@ -298,14 +298,15 @@ class JaxRDDLCompiler:
         to the log file
         :param heading: the heading to print before compilation information
         '''
-        info = {}
+        info = ({}, [])
         self.invariants = self._compile_constraints(self.rddl.invariants, info)
         self.preconditions = self._compile_constraints(self.rddl.preconditions, info)
         self.terminations = self._compile_constraints(self.rddl.terminations, info)
         self.cpfs = self._compile_cpfs(info)
         self.reward = self._compile_reward(info)
-        self.model_params = {key: value for (key, (value, *_)) in info.items()}
-        self.relaxations = info
+        self.model_params = {key: value 
+                             for (key, (value, *_)) in info[0].items()}
+        self.relaxations = info[1]
         
         if log_jax_expr and self.logger is not None:
             printed = self.print_jax()
@@ -725,6 +726,7 @@ class JaxRDDLCompiler:
     def _unwrap(self, op, expr_id, info):
         sep = JaxRDDLCompiler.MODEL_PARAM_TAG_SEPARATOR
         jax_op, name = op, None
+        model_params, relaxed_list = info
         if isinstance(op, tuple):
             jax_op, param = op
             if param is not None:
@@ -734,9 +736,10 @@ class JaxRDDLCompiler:
                 else:
                     name = str(tags)
                 name = f'{name}{sep}{expr_id}'
-                if name in info:
+                if name in model_params:
                     raise RuntimeError(f'Model parameter {name} is already defined.')
-                info[name] = (values, tags, expr_id, jax_op.__name__)
+                model_params[name] = (values, tags, expr_id, jax_op.__name__)
+            relaxed_list.append((expr_id, jax_op.__name__))
         return jax_op, name
     
     def get_ids_of_parameterized_expressions(self) -> List[int]:
@@ -745,14 +748,19 @@ class JaxRDDLCompiler:
         ids = [int(key.split(sep)[-1]) for key in self.model_params] 
         return ids
     
-    def model_params_as_string(self) -> str:
-        '''Returns a string of information about model hyper-parameters in the
+    def summarize_model_relaxations(self) -> str:
+        '''Returns a string of information about model relaxations in the
         compiled model.'''
-        col = "{:<5} {:<20} {:<40} {:<30} {:<30}\n"
-        table = col.format('ID','RDDL Expr.','JAX Expr.', 'Parameter', 'Value')
-        for (name, (values, _, expr_id, jax_op)) in self.relaxations.items():
-            rddl_expr = self.traced.lookup(expr_id).etype[1]
-            table += col.format(expr_id, rddl_expr, jax_op, name, values)
+        occurence_by_type = {}
+        for (expr_id, jax_op) in self.relaxations:
+            etype = self.traced.lookup(expr_id).etype
+            source = f'{etype[1]} ({etype[0]})'
+            sub = f'{source:<30} --> {jax_op}'
+            occurence_by_type[sub] = occurence_by_type.get(sub, 0) + 1        
+        col = "{:<80} {:<10}\n"
+        table = col.format('Substitution', 'Count')
+        for (sub, occurs) in occurence_by_type.items():
+            table += col.format(sub, occurs)
         return table
         
     # ===========================================================================
