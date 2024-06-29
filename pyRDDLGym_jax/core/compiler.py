@@ -724,13 +724,13 @@ class JaxRDDLCompiler:
     # ===========================================================================
     
     def _unwrap(self, op, expr_id, info):
-        sep = JaxRDDLCompiler.MODEL_PARAM_TAG_SEPARATOR
         jax_op, name = op, None
         model_params, relaxed_list = info
         if isinstance(op, tuple):
             jax_op, param = op
             if param is not None:
                 tags, values = param
+                sep = JaxRDDLCompiler.MODEL_PARAM_TAG_SEPARATOR
                 if isinstance(tags, tuple):
                     name = sep.join(tags)
                 else:
