@@ -720,7 +720,8 @@ class JaxDeepReactivePolicy(JaxPlan):
     def __init__(self, topology: Sequence[int],
                  activation: Callable=jax.nn.relu,
                  initializer: hk.initializers.Initializer=hk.initializers.VarianceScaling(scale=2.0),
-                 normalize: bool=True,
+                 normalize: bool=True, 
+                 normalizer_kwargs: Optional[Dict]=None,
                  wrap_non_bool: bool=False) -> None:
         '''Creates a new deep reactive policy in JAX.
         
@@ -729,6 +730,8 @@ class JaxDeepReactivePolicy(JaxPlan):
         :param activation: function to apply after each layer of the policy
         :param initializer: weight initialization
         :param normalize: whether to apply layer norm to the inputs
+        :param normalizer_kwargs: if normalize is True, apply additional arguments
+        to layer norm
         :param wrap_non_bool: whether to wrap real or int action fluent parameters
         with non-linearity (e.g. sigmoid or ELU) to satisfy box constraints
         '''
@@ -738,6 +741,12 @@ class JaxDeepReactivePolicy(JaxPlan):
         self._initializer_base = initializer
         self._initializer = initializer
         self._normalize = normalize
+        if normalizer_kwargs is None:
+            normalizer_kwargs = {
+                'create_offset': True, 'create_scale': True, 
+                'name': 'input_norm'
+            }
+        self._normalizer_kwargs = normalizer_kwargs
         self._wrap_non_bool = wrap_non_bool
             
     def summarize_hyperparameters(self):
@@ -746,6 +755,7 @@ class JaxDeepReactivePolicy(JaxPlan):
               f'    activation_fn   ={self._activations[0].__name__}\n'
               f'    initializer     ={type(self._initializer_base).__name__}\n'
               f'    apply_layer_norm={self._normalize}\n'
+              f'    layer_norm_args ={self._normalizer_kwargs}\n'
               f'    wrap_non_bool   ={self._wrap_non_bool}')
     
     def compile(self, compiled: JaxRDDLCompilerWithGrad,
@@ -790,9 +800,7 @@ class JaxDeepReactivePolicy(JaxPlan):
             # apply layer norm
             if normalize:
                 normalizer = hk.LayerNorm(
-                    axis=-1, param_axis=-1,
-                    create_offset=True, create_scale=True,
-                    name='input_norm')
+                    axis=-1, param_axis=-1, **self._normalizer_kwargs)
                 state = normalizer(state)
             
             # feed state vector through hidden layers
