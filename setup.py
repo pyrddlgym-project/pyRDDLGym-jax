@@ -17,7 +17,7 @@ from setuptools import setup, find_packages
 
 setup(
       name='pyRDDLGym-jax',
-      version='0.1',
+      version='0.2',
       author="Michael Gimelfarb, Ayal Taitler, Scott Sanner",
       author_email="mike.gimelfarb@mail.utoronto.ca, ataitler@gmail.com, ssanner@mie.utoronto.ca",
       description="pyRDDLGym-jax: JAX compilation of RDDL description files, and a differentiable planner in JAX.",
