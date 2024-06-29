@@ -742,12 +742,6 @@ class JaxRDDLCompiler:
             relaxed_list.append((expr_id, jax_op.__name__))
         return jax_op, name
     
-    def get_ids_of_parameterized_expressions(self) -> List[int]:
-        '''Returns a list of expression IDs that have tuning parameters.'''
-        sep = JaxRDDLCompiler.MODEL_PARAM_TAG_SEPARATOR
-        ids = [int(key.split(sep)[-1]) for key in self.model_params] 
-        return ids
-    
     def summarize_model_relaxations(self) -> str:
         '''Returns a string of information about model relaxations in the
         compiled model.'''
