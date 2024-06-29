@@ -737,7 +737,8 @@ class JaxRDDLCompiler:
                     name = str(tags)
                 name = f'{name}{sep}{expr_id}'
                 if name in model_params:
-                    raise RuntimeError(f'Model parameter {name} is already defined.')
+                    raise RuntimeError(
+                        f'Internal error: model parameter {name} is already defined.')
                 model_params[name] = (values, tags, expr_id, jax_op.__name__)
             relaxed_list.append((param, expr_id, jax_op.__name__))
         return jax_op, name
