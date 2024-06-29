@@ -1440,9 +1440,9 @@ class JaxBackpropPlanner:
                   f'    test_rolling_window={test_rolling_window}\n' 
                   f'    plot_frequency     ={plot_step}\n'
                   f'    verbose            ={verbose}\n')
-            # if verbose >= 2:
-            #     print('EXPRESSION RELAXATION TABLE')
-            #     print(self.compiled.model_params_as_string())
+            if verbose >= 2:
+                print('EXPRESSION RELAXATION SUMMARY:')
+                print(self.compiled.summarize_model_relaxations())
             
         # compute a batched version of the initial values
         if subs is None:
