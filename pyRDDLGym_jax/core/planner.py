@@ -87,8 +87,11 @@ def _load_config(config, args):
     tnorm_kwargs = model_args.get('tnorm_kwargs', {})
     comp_name = model_args.get('complement', 'StandardComplement')
     comp_kwargs = model_args.get('complement_kwargs', {})
+    compare_name = model_args.get('comparison', 'SigmoidComparison')
+    compare_kwargs = model_args.get('comparison_kwargs', {})
     logic_kwargs['tnorm'] = getattr(logic, tnorm_name)(**tnorm_kwargs)
     logic_kwargs['complement'] = getattr(logic, comp_name)(**comp_kwargs)
+    logic_kwargs['comparison'] = getattr(logic, compare_name)(**compare_kwargs)
     
     # read the optimizer settings
     plan_method = planner_args.pop('method')
