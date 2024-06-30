@@ -1482,6 +1482,7 @@ class JaxBackpropPlanner:
                   '==============================================')
             self.summarize_hyperparameters()
             print(f'optimize() call hyper-parameters:\n'
+                  f'    PRNG key           ={key}\n'
                   f'    max_iterations     ={epochs}\n'
                   f'    max_seconds        ={train_seconds}\n'
                   f'    model_params       ={model_params}\n'
