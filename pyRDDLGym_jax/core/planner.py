@@ -1945,7 +1945,8 @@ class JaxOnlineController(BaseAgent):
             subs=state,
             **self.train_kwargs)
         self.key, subkey = random.split(self.key)
-        actions = planner.get_action(subkey, params, 0, state, self.eval_hyperparams)
+        actions = planner.get_action(
+            subkey, params, 0, state, self.eval_hyperparams)
         if self.warm_start:
             self.guess = planner.plan.guess_next_epoch(params)
         return actions
