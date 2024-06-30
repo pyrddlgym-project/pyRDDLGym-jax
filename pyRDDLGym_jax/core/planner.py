@@ -147,7 +147,7 @@ def _load_config(config, args):
             planner_args['optimizer'] = optimizer
         
     # read the optimize call settings
-    train_args['key'] = jax.random.PRNGKey(train_args['key'])
+    train_args['key'] = random.PRNGKey(train_args['key'])
     
     return planner_args, plan_kwargs, train_args
 
@@ -1179,8 +1179,7 @@ class JaxBackpropPlanner:
                 'Failed to inject hyperparameters into optax optimizer, '
                 'rolling back to safer method: please note that modification of '
                 'optimizer hyperparameters will not work, and it is '
-                'recommended to update your packages and Python distribution.',
-                'red')
+                'recommended to update optax and related packages.', 'red')
             optimizer = optimizer(**optimizer_kwargs)     
         if clip_grad is None:
             self.optimizer = optimizer
@@ -1786,9 +1785,9 @@ class JaxLineSearchPlanner(JaxBackpropPlanner):
         self.c = c
         self.step_max = step_max
         self.step_min = step_min
-        if kwargs.get('clip_grad', None) is not None:
+        if 'clip_grad' in kwargs:
             raise_warning('clip_grad parameter conflicts with '
-                          'line search planner and will be ignored.')
+                          'line search planner and will be ignored.', 'red')
             del kwargs['clip_grad']
         super(JaxLineSearchPlanner, self).__init__(
             *args,
@@ -1817,7 +1816,7 @@ class JaxLineSearchPlanner(JaxBackpropPlanner):
             gnorm2 = jax.tree_map(lambda x: jnp.sum(jnp.square(x)), grad)
             gnorm2 = jax.tree_util.tree_reduce(jnp.add, gnorm2)
             log['grad'] = grad
-            return (f, grad, gnorm2, log)
+            return f, grad, gnorm2, log
             
         # compute the next trial solution
         @jax.jit
@@ -1828,7 +1827,7 @@ class JaxLineSearchPlanner(JaxBackpropPlanner):
             new_params = optax.apply_updates(params, updates)
             new_params, _ = projection(new_params, hparams)
             f_step, _ = loss(key, new_params, hparams, subs, mparams)
-            return (f_step, new_params, new_state)
+            return f_step, new_params, new_state
         
         # main iteration of line search     
         def _jax_wrapped_plan_update(key, policy_params, hyperparams,
