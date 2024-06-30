@@ -1252,7 +1252,6 @@ class JaxBackpropPlanner:
         
         # losses
         train_loss = self._jax_loss(train_rollouts, use_symlog=self.use_symlog_reward)
-        self.train_loss = jax.jit(train_loss)
         self.test_loss = jax.jit(self._jax_loss(test_rollouts, use_symlog=False))
         
         # optimization
@@ -1310,14 +1309,15 @@ class JaxBackpropPlanner:
         # also perform a projection step to satisfy constraints on actions
         def _jax_wrapped_plan_update(key, policy_params, hyperparams,
                                      subs, model_params, opt_state, opt_aux):
-            grad_fn = jax.grad(loss, argnums=1, has_aux=True)
-            grad, log = grad_fn(key, policy_params, hyperparams, subs, model_params)  
+            grad_fn = jax.value_and_grad(loss, argnums=1, has_aux=True)
+            (loss_val, log), grad = grad_fn(
+                key, policy_params, hyperparams, subs, model_params)  
             updates, opt_state = optimizer.update(grad, opt_state) 
             policy_params = optax.apply_updates(policy_params, updates)
             policy_params, converged = projection(policy_params, hyperparams)
             log['grad'] = grad
             log['updates'] = updates
-            return policy_params, converged, opt_state, None, log
+            return policy_params, converged, opt_state, None, loss_val, log
         
         return jax.jit(_jax_wrapped_plan_update)
             
@@ -1508,9 +1508,10 @@ class JaxBackpropPlanner:
             status = JaxPlannerStatus.NORMAL
             
             # update the parameters of the plan
-            key, subkey1, subkey2, subkey3 = random.split(key, num=4)
-            policy_params, converged, opt_state, opt_aux, train_log = self.update(
-                subkey1, policy_params, policy_hyperparams,
+            key, subkey = random.split(key)
+            policy_params, converged, opt_state, opt_aux, train_loss, train_log = \
+            self.update(
+                subkey, policy_params, policy_hyperparams,
                 train_subs, model_params, opt_state, opt_aux)
             if not np.all(converged):
                 raise_warning(
@@ -1520,11 +1521,8 @@ class JaxBackpropPlanner:
                 status = JaxPlannerStatus.PRECONDITION_POSSIBLY_UNSATISFIED
             
             # evaluate losses
-            train_loss, _ = self.train_loss(
-                subkey2, policy_params, policy_hyperparams,
-                train_subs, model_params)
             test_loss, log = self.test_loss(
-                subkey3, policy_params, policy_hyperparams,
+                subkey, policy_params, policy_hyperparams,
                 test_subs, model_params_test)
             test_loss = rolling_test_loss.update(test_loss)
             
@@ -1811,7 +1809,7 @@ class JaxLineSearchPlanner(JaxBackpropPlanner):
             log['updates'] = None
             log['line_search_iters'] = trials
             log['learning_rate'] = best_step
-            return best_params, True, best_state, best_step, log
+            return best_params, True, best_state, best_step, best_f, log
             
         return _jax_wrapped_plan_update
 
