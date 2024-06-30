@@ -359,14 +359,9 @@ class FuzzyLogic:
             raise_warning('Using the replacement rule: '
                           'floor(x) --> x - atan(-1.0 / tan(pi * x)) / pi - 0.5')
         
-        debias = 'floor' in self.debias
-        
         def _jax_wrapped_calc_floor_approx(x, param):
             sawtooth_part = jnp.arctan(-1.0 / jnp.tan(x * jnp.pi)) / jnp.pi + 0.5
             sample = x - jax.lax.stop_gradient(sawtooth_part)
-            if debias:
-                hard_sample = jnp.floor(x)
-                sample += jax.lax.stop_gradient(hard_sample - sample)
             return sample
         
         return _jax_wrapped_calc_floor_approx, None
@@ -482,7 +477,8 @@ class FuzzyLogic:
     def control_switch(self):
         if self.verbose:
             raise_warning('Using the replacement rule: '
-                          'switch(pred) { cases } --> sum(cases[i] * (pred == i))')   
+                          'switch(pred) { cases } --> '
+                          'sum(cases[i] * softmax(-abs(pred - i)))')   
             
         debias = 'switch' in self.debias
         
@@ -508,7 +504,7 @@ class FuzzyLogic:
      
     def _gumbel_softmax(self, key, prob):
         Gumbel01 = random.gumbel(key=key, shape=prob.shape, dtype=self.REAL)
-        sample = Gumbel01 + jnp.log1p(prob + self.eps - 1.0)
+        sample = Gumbel01 + jnp.log(prob + self.eps)
         return sample
         
     def bernoulli(self):
