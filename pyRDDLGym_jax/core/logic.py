@@ -434,9 +434,9 @@ class FuzzyLogic:
         debias = 'argmax' in self.debias
         
         def _jax_wrapped_calc_argmax_approx(x, axis, param):
-            prob_max = jax.nn.softmax(param * x, axis=axis)
-            literals = FuzzyLogic._literals(prob_max.shape, axis=axis)
-            sample = jnp.sum(literals * prob_max, axis=axis)
+            literals = FuzzyLogic._literals(x.shape, axis=axis)
+            soft_max = jax.nn.softmax(param * x, axis=axis)
+            sample = jnp.sum(literals * soft_max, axis=axis)
             if debias:
                 hard_sample = jnp.argmax(x, axis=axis)
                 sample += jax.lax.stop_gradient(hard_sample - sample)
@@ -483,8 +483,8 @@ class FuzzyLogic:
         debias = 'switch' in self.debias
         
         def _jax_wrapped_calc_switch_approx(pred, cases, param):
-            pred = jnp.broadcast_to(pred[jnp.newaxis, ...], shape=cases.shape)
             literals = FuzzyLogic._literals(cases.shape, axis=0)
+            pred = jnp.broadcast_to(pred[jnp.newaxis, ...], shape=cases.shape)
             proximity = -jnp.abs(pred - literals)
             soft_case = jax.nn.softmax(param * proximity, axis=0)
             sample = jnp.sum(cases * soft_case, axis=0)
@@ -518,7 +518,7 @@ class FuzzyLogic:
         def _jax_wrapped_calc_bernoulli_approx(key, prob, param):
             prob = jnp.stack([1.0 - prob, prob], axis=-1)
             sample = jax_gs(key, prob)
-            sample = jax_argmax(sample, -1, param)
+            sample = jax_argmax(sample, axis=-1, param=param)
             return sample
         
         return _jax_wrapped_calc_bernoulli_approx, jax_param
@@ -533,7 +533,7 @@ class FuzzyLogic:
         
         def _jax_wrapped_calc_discrete_approx(key, prob, param):
             sample = jax_gs(key, prob) 
-            sample = jax_argmax(sample, -1, param)
+            sample = jax_argmax(sample, axis=-1, param=param)
             return sample
         
         return _jax_wrapped_calc_discrete_approx, jax_param
