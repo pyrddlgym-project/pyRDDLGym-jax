@@ -1391,7 +1391,7 @@ class JaxRDDLCompiler:
             scale, key, err2 = jax_scale(x, params, key)
             key, subkey = random.split(key)
             U = random.uniform(key=subkey, shape=jnp.shape(scale), dtype=self.REAL)
-            sample = scale * jnp.power(-jnp.log1p(-U), 1.0 / shape)
+            sample = scale * jnp.power(-jnp.log(U), 1.0 / shape)
             out_of_bounds = jnp.logical_not(jnp.all((shape > 0) & (scale > 0)))
             err = err1 | err2 | (out_of_bounds * ERR)
             return sample, key, err
@@ -1559,7 +1559,7 @@ class JaxRDDLCompiler:
                 key, subkey = random.split(key)
                 U = random.uniform(key=subkey, shape=jnp.shape(prob), dtype=self.REAL)
                 param = params.get(jax_param, None)
-                sample = floor_op(jnp.log1p(-U) / jnp.log1p(-prob), param) + 1
+                sample = floor_op(jnp.log(U) / jnp.log(1.0 - prob), param) + 1
                 out_of_bounds = jnp.logical_not(jnp.all((prob >= 0) & (prob <= 1)))
                 err |= (out_of_bounds * ERR)
                 return sample, key, err
@@ -1686,7 +1686,7 @@ class JaxRDDLCompiler:
             scale, key, err2 = jax_scale(x, params, key)
             key, subkey = random.split(key)
             U = random.uniform(key=subkey, shape=jnp.shape(scale), dtype=self.REAL)
-            sample = jnp.log(1.0 - jnp.log1p(-U) / shape) / scale
+            sample = jnp.log(1.0 - jnp.log(U) / shape) / scale
             out_of_bounds = jnp.logical_not(jnp.all((shape > 0) & (scale > 0)))
             err = err1 | err2 | (out_of_bounds * ERR)
             return sample, key, err
