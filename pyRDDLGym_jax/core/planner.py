@@ -310,7 +310,8 @@ class JaxPlan:
         self._projection = value
     
     def _calculate_action_info(self, compiled: JaxRDDLCompilerWithGrad,
-                               user_bounds: Dict[str, object], horizon: int):
+                               user_bounds: Dict[str, object], 
+                               horizon: int):
         shapes, bounds, bounds_safe, cond_lists = {}, {}, {}, {}
         for (name, prange) in compiled.rddl.variable_ranges.items():
             if compiled.rddl.variable_types[name] != 'action-fluent':
@@ -1078,6 +1079,7 @@ class JaxBackpropPlanner:
                  utility: Callable[[jnp.ndarray], float] | str=jnp.mean,
                  utility_kwargs: Optional[Dict[str, object]]=None,
                  cpfs_without_grad: Optional[Set]=None,
+                 compile_non_fluent_exact: bool=True,
                  logger: Optional[Logger]=None) -> None:
         '''Creates a new gradient-based algorithm for optimizing action sequences
         (plan) in the given RDDL. Some operations will be converted to their
@@ -1110,6 +1112,8 @@ class JaxBackpropPlanner:
         parameters to the utility function call
         :param cpfs_without_grad: which CPFs do not have gradients (use straight
         through gradient trick)
+        :param compile_non_fluent_exact: whether non-fluent expressions 
+        are always compiled using exact JAX expressions
         :param logger: to log information about compilation to file
         '''
         self.rddl = rddl
@@ -1179,19 +1183,21 @@ class JaxBackpropPlanner:
         if cpfs_without_grad is None:
             cpfs_without_grad = set()
         self.cpfs_without_grad = cpfs_without_grad
+        self.compile_non_fluent_exact = compile_non_fluent_exact
         self.logger = logger
         
         self._jax_compile_rddl()        
         self._jax_compile_optimizer()
         
     def summarize_hyperparameters(self):
-        print(f'objective and relaxations:\n'
+        print(f'objective hyper-parameters:\n'
               f'    utility_fn      ={self.utility.__name__}\n'
               f'    utility args    ={self.utility_kwargs}\n'
               f'    use_symlog      ={self.use_symlog_reward}\n'
               f'    lookahead       ={self.horizon}\n'
-              f'    model relaxation={type(self.logic).__name__}\n'
               f'    action_bounds   ={self._action_bounds}\n'
+              f'    fuzzy logic type={type(self.logic).__name__}\n'
+              f'    nonfluents exact={self.compile_non_fluent_exact}\n'
               f'    cpfs_no_gradient={self.cpfs_without_grad}\n'
               f'optimizer hyper-parameters:\n'
               f'    use_64_bit      ={self.use64bit}\n'
@@ -1216,7 +1222,8 @@ class JaxBackpropPlanner:
             logic=self.logic,
             logger=self.logger,
             use64bit=self.use64bit,
-            cpfs_without_grad=self.cpfs_without_grad)
+            cpfs_without_grad=self.cpfs_without_grad,
+            compile_non_fluent_exact=self.compile_non_fluent_exact)
         self.compiled.compile(log_jax_expr=True, heading='RELAXED MODEL')
         
         # Jax compilation of the exact RDDL for testing
@@ -1510,9 +1517,8 @@ class JaxBackpropPlanner:
             # update the parameters of the plan
             key, subkey = random.split(key)
             policy_params, converged, opt_state, opt_aux, train_loss, train_log = \
-            self.update(
-                subkey, policy_params, policy_hyperparams,
-                train_subs, model_params, opt_state, opt_aux)
+                self.update(subkey, policy_params, policy_hyperparams,
+                            train_subs, model_params, opt_state, opt_aux)
             if not np.all(converged):
                 raise_warning(
                     'Projected gradient method for satisfying action concurrency '

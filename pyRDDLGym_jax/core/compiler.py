@@ -221,7 +221,8 @@ class JaxRDDLCompiler:
     def __init__(self, rddl: RDDLLiftedModel,
                  allow_synchronous_state: bool=True,
                  logger: Optional[Logger]=None,
-                 use64bit: bool=False) -> None:
+                 use64bit: bool=False,
+                 compile_non_fluent_exact: bool=True) -> None:
         '''Creates a new RDDL to Jax compiler.
         
         :param rddl: the RDDL model to compile into Jax
@@ -229,6 +230,8 @@ class JaxRDDLCompiler:
         on each other
         :param logger: to log information about compilation to file
         :param use64bit: whether to use 64 bit arithmetic
+        :param compile_non_fluent_exact: whether non-fluent expressions 
+        are always compiled using exact JAX expressions.
         '''
         self.rddl = rddl
         self.logger = logger
@@ -273,6 +276,7 @@ class JaxRDDLCompiler:
         self.constraints = constraints
         
         # basic operations - these can be override in subclasses
+        self.compile_non_fluent_exact = compile_non_fluent_exact
         self.NEGATIVE = JaxRDDLCompiler.EXACT_RDDL_TO_JAX_NEGATIVE
         self.ARITHMETIC_OPS = JaxRDDLCompiler.EXACT_RDDL_TO_JAX_ARITHMETIC.copy()
         self.RELATIONAL_OPS = JaxRDDLCompiler.EXACT_RDDL_TO_JAX_RELATIONAL.copy()
@@ -976,12 +980,12 @@ class JaxRDDLCompiler:
         _, op = expr.etype
         
         # if expression is non-fluent, always use the exact operation
-        if self.traced.cached_is_fluent(expr):
-            valid_ops = self.ARITHMETIC_OPS
-            negative_op = self.NEGATIVE
-        else:
+        if self.compile_non_fluent_exact and not self.traced.cached_is_fluent(expr):
             valid_ops = JaxRDDLCompiler.EXACT_RDDL_TO_JAX_ARITHMETIC
             negative_op = JaxRDDLCompiler.EXACT_RDDL_TO_JAX_NEGATIVE
+        else:
+            valid_ops = self.ARITHMETIC_OPS
+            negative_op = self.NEGATIVE            
         JaxRDDLCompiler._check_valid_op(expr, valid_ops)
         
         # recursively compile arguments
@@ -1007,10 +1011,10 @@ class JaxRDDLCompiler:
         _, op = expr.etype
         
         # if expression is non-fluent, always use the exact operation
-        if self.traced.cached_is_fluent(expr):
-            valid_ops = self.RELATIONAL_OPS
-        else:
+        if self.compile_non_fluent_exact and not self.traced.cached_is_fluent(expr):
             valid_ops = JaxRDDLCompiler.EXACT_RDDL_TO_JAX_RELATIONAL
+        else:
+            valid_ops = self.RELATIONAL_OPS
         JaxRDDLCompiler._check_valid_op(expr, valid_ops)
         jax_op, jax_param = self._unwrap(valid_ops[op], expr.id, info)
         
@@ -1026,12 +1030,12 @@ class JaxRDDLCompiler:
         _, op = expr.etype
         
         # if expression is non-fluent, always use the exact operation
-        if self.traced.cached_is_fluent(expr):
-            valid_ops = self.LOGICAL_OPS 
-            logical_not_op = self.LOGICAL_NOT 
-        else:
+        if self.compile_non_fluent_exact and not self.traced.cached_is_fluent(expr):
             valid_ops = JaxRDDLCompiler.EXACT_RDDL_TO_JAX_LOGICAL  
             logical_not_op = JaxRDDLCompiler.EXACT_RDDL_TO_JAX_LOGICAL_NOT
+        else:
+            valid_ops = self.LOGICAL_OPS 
+            logical_not_op = self.LOGICAL_NOT 
         JaxRDDLCompiler._check_valid_op(expr, valid_ops)
                 
         # recursively compile arguments
@@ -1058,10 +1062,10 @@ class JaxRDDLCompiler:
         _, op = expr.etype
         
         # if expression is non-fluent, always use the exact operation
-        if self.traced.cached_is_fluent(expr):
-            valid_ops = self.AGGREGATION_OPS   
-        else:
+        if self.compile_non_fluent_exact and not self.traced.cached_is_fluent(expr):
             valid_ops = JaxRDDLCompiler.EXACT_RDDL_TO_JAX_AGGREGATION   
+        else:
+            valid_ops = self.AGGREGATION_OPS   
         JaxRDDLCompiler._check_valid_op(expr, valid_ops) 
         jax_op, jax_param = self._unwrap(valid_ops[op], expr.id, info)
         
@@ -1088,12 +1092,12 @@ class JaxRDDLCompiler:
         _, op = expr.etype
         
         # if expression is non-fluent, always use the exact operation
-        if self.traced.cached_is_fluent(expr):
-            unary_ops = self.KNOWN_UNARY
-            binary_ops = self.KNOWN_BINARY
-        else:
+        if self.compile_non_fluent_exact and not self.traced.cached_is_fluent(expr):            
             unary_ops = JaxRDDLCompiler.EXACT_RDDL_TO_JAX_UNARY
             binary_ops = JaxRDDLCompiler.EXACT_RDDL_TO_JAX_BINARY
+        else:
+            unary_ops = self.KNOWN_UNARY
+            binary_ops = self.KNOWN_BINARY
         
         # recursively compile arguments
         if op in unary_ops:
@@ -1133,17 +1137,17 @@ class JaxRDDLCompiler:
     
     def _jax_if(self, expr, info):
         ERR = JaxRDDLCompiler.ERROR_CODES['INVALID_CAST']
+        JaxRDDLCompiler._check_num_args(expr, 3)
+        pred, if_true, if_false = expr.args     
         
-        # if expression is non-fluent, always use the exact operation
-        if self.traced.cached_is_fluent(expr):
-            if_op = self.IF_HELPER
-        else:
+        # if predicate is non-fluent, always use the exact operation
+        if self.compile_non_fluent_exact and not self.traced.cached_is_fluent(pred):
             if_op = JaxRDDLCompiler.EXACT_RDDL_TO_JAX_IF
+        else:
+            if_op = self.IF_HELPER
         jax_if, jax_param = self._unwrap(if_op, expr.id, info)
         
-        # recursively compile arguments
-        JaxRDDLCompiler._check_num_args(expr, 3)
-        pred, if_true, if_false = expr.args        
+        # recursively compile arguments   
         jax_pred = self._jax(pred, info)
         jax_true = self._jax(if_true, info)
         jax_false = self._jax(if_false, info)
@@ -1164,10 +1168,10 @@ class JaxRDDLCompiler:
     def _jax_switch(self, expr, info):
              
         # if expression is non-fluent, always use the exact operation
-        if self.traced.cached_is_fluent(expr):
-            switch_op = self.SWITCH_HELPER
-        else:
+        if self.compile_non_fluent_exact and not self.traced.cached_is_fluent(expr):
             switch_op = JaxRDDLCompiler.EXACT_RDDL_TO_JAX_SWITCH
+        else:
+            switch_op = self.SWITCH_HELPER
         jax_switch, jax_param = self._unwrap(switch_op, expr.id, info)
         
         # recursively compile predicate
@@ -1400,10 +1404,10 @@ class JaxRDDLCompiler:
         arg_prob, = expr.args
         
         # if probability is non-fluent, always use the exact operation
-        if self.traced.cached_is_fluent(arg_prob):
-            bern_op = self.BERNOULLI_HELPER
-        else:
+        if self.compile_non_fluent_exact and not self.traced.cached_is_fluent(arg_prob):
             bern_op = JaxRDDLCompiler.EXACT_RDDL_TO_JAX_BERNOULLI
+        else:
+            bern_op = self.BERNOULLI_HELPER
         jax_bern, jax_param = self._unwrap(bern_op, expr.id, info)
         
         # recursively compile arguments
@@ -1534,7 +1538,18 @@ class JaxRDDLCompiler:
         arg_prob, = expr.args
         jax_prob = self._jax(arg_prob, info)
         
-        if self.traced.cached_is_fluent(arg_prob):            
+        if self.compile_non_fluent_exact and not self.traced.cached_is_fluent(arg_prob):            
+            
+            # prob is non-fluent: do not reparameterize
+            def _jax_wrapped_distribution_geometric(x, params, key):
+                prob, key, err = jax_prob(x, params, key)
+                key, subkey = random.split(key)
+                sample = random.geometric(key=subkey, p=prob, dtype=self.INT)
+                out_of_bounds = jnp.logical_not(jnp.all((prob >= 0) & (prob <= 1)))
+                err |= (out_of_bounds * ERR)
+                return sample, key, err
+        
+        else:    
             floor_op, jax_param = self._unwrap(
                 self.KNOWN_UNARY['floor'], expr.id, info)
             
@@ -1545,17 +1560,6 @@ class JaxRDDLCompiler:
                 U = random.uniform(key=subkey, shape=jnp.shape(prob), dtype=self.REAL)
                 param = params.get(jax_param, None)
                 sample = floor_op(jnp.log1p(-U) / jnp.log1p(-prob), param) + 1
-                out_of_bounds = jnp.logical_not(jnp.all((prob >= 0) & (prob <= 1)))
-                err |= (out_of_bounds * ERR)
-                return sample, key, err
-        
-        else:
-            
-            # prob is non-fluent: do not reparameterize
-            def _jax_wrapped_distribution_geometric(x, params, key):
-                prob, key, err = jax_prob(x, params, key)
-                key, subkey = random.split(key)
-                sample = random.geometric(key=subkey, p=prob, dtype=self.INT)
                 out_of_bounds = jnp.logical_not(jnp.all((prob >= 0) & (prob <= 1)))
                 err |= (out_of_bounds * ERR)
                 return sample, key, err
@@ -1740,10 +1744,12 @@ class JaxRDDLCompiler:
         ordered_args = self.traced.cached_sim_info(expr)
         
         # if all probabilities are non-fluent, then always sample exact
-        if any(self.traced.cached_is_fluent(arg) for arg in ordered_args):
-            discrete_op = self.DISCRETE_HELPER
-        else:
+        has_fluent_arg = any(self.traced.cached_is_fluent(arg) 
+                             for arg in ordered_args)
+        if self.compile_non_fluent_exact and not has_fluent_arg:
             discrete_op = JaxRDDLCompiler.EXACT_RDDL_TO_JAX_DISCRETE
+        else:
+            discrete_op = self.DISCRETE_HELPER
         jax_discrete, jax_param = self._unwrap(discrete_op, expr.id, info)
         
         # compile probability expressions
@@ -1778,10 +1784,10 @@ class JaxRDDLCompiler:
         arg, = args
         
         # if probabilities are non-fluent, then always sample exact
-        if self.traced.cached_is_fluent(arg):
-            discrete_op = self.DISCRETE_HELPER
-        else:
+        if self.compile_non_fluent_exact and not self.traced.cached_is_fluent(arg):
             discrete_op = JaxRDDLCompiler.EXACT_RDDL_TO_JAX_DISCRETE
+        else:
+            discrete_op = self.DISCRETE_HELPER
         jax_discrete, jax_param = self._unwrap(discrete_op, expr.id, info)
         
         # compile probability function
