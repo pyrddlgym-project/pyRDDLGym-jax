@@ -1743,6 +1743,10 @@ class JaxLineSearchPlanner(JaxBackpropPlanner):
         self.c = c
         self.step_max = step_max
         self.step_min = step_min
+        if kwargs.get('clip_grad', None) is not None:
+            raise_warning('clip_grad parameter conflicts with '
+                          'line search planner and will be ignored.')
+            del kwargs['clip_grad']
         super(JaxLineSearchPlanner, self).__init__(
             *args,
             optimizer=optimizer,
