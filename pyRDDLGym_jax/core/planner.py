@@ -73,12 +73,18 @@ def _parse_config_string(value: str):
     return config, args
 
 
+def _getattr_any(packages, item):
+    for package in packages:
+        loaded = getattr(package, item, None)
+        if loaded is not None:
+            return loaded
+    return None
+
+
 def _load_config(config, args):
     model_args = {k: args[k] for (k, _) in config.items('Model')}
     planner_args = {k: args[k] for (k, _) in config.items('Optimizer')}
     train_args = {k: args[k] for (k, _) in config.items('Training')}    
-    
-    train_args['key'] = jax.random.PRNGKey(train_args['key'])
     
     # read the model settings
     logic_name = model_args.get('logic', 'FuzzyLogic')
@@ -93,27 +99,55 @@ def _load_config(config, args):
     logic_kwargs['complement'] = getattr(logic, comp_name)(**comp_kwargs)
     logic_kwargs['comparison'] = getattr(logic, compare_name)(**compare_kwargs)
     
-    # read the optimizer settings
+    # read the policy settings
     plan_method = planner_args.pop('method')
     plan_kwargs = planner_args.pop('method_kwargs', {})  
     
-    if 'initializer' in plan_kwargs:  # weight initialization
-        init_name = plan_kwargs['initializer']
-        init_class = getattr(initializers, init_name)
-        init_kwargs = plan_kwargs.pop('initializer_kwargs', {})
-        try: 
-            plan_kwargs['initializer'] = init_class(**init_kwargs)
-        except Exception as _:
-            raise_warning(f'Ignoring invalid arguments for initializer <{init_name}>.')
-            plan_kwargs['initializer'] = init_class
-               
-    if 'activation' in plan_kwargs:  # activation function
-        plan_kwargs['activation'] = getattr(jax.nn, plan_kwargs['activation'])
+    # policy initialization
+    plan_initializer = plan_kwargs.get('initializer', None)
+    if plan_initializer is not None:
+        initializer = _getattr_any(packages=[initializers], item=plan_initializer)
+        if initializer is None:
+            raise_warning(
+                f'Ignoring invalid initializer <{plan_initializer}>.', 'red')
+            del plan_kwargs['initializer']
+        else:
+            init_kwargs = plan_kwargs.pop('initializer_kwargs', {})
+            try: 
+                plan_kwargs['initializer'] = initializer(**init_kwargs)
+            except Exception as _:
+                raise_warning(
+                    f'Ignoring invalid initializer_kwargs <{init_kwargs}>.', 'red')
+                plan_kwargs['initializer'] = initializer
     
+    # policy activation
+    plan_activation = plan_kwargs.get('activation', None)
+    if plan_activation is not None:
+        activation = _getattr_any(packages=[jax.nn, jax.numpy], item=plan_activation)
+        if activation is None:
+            raise_warning(
+                f'Ignoring invalid activation <{plan_activation}>.', 'red')
+            del plan_kwargs['activation']
+        else:
+            plan_kwargs['activation'] = activation
+    
+    # read the planner settings
     planner_args['logic'] = getattr(logic, logic_name)(**logic_kwargs)
     planner_args['plan'] = getattr(sys.modules[__name__], plan_method)(**plan_kwargs)
-    if 'optimizer' in planner_args:
-        planner_args['optimizer'] = getattr(optax, planner_args['optimizer'])
+    
+    # planner optimizer
+    planner_optimizer = planner_args.get('optimizer', None)
+    if planner_optimizer is not None:
+        optimizer = _getattr_any(packages=[optax], item=planner_optimizer)
+        if optimizer is None:
+            raise_warning(
+                f'Ignoring invalid optimizer <{planner_optimizer}>.', 'red')
+            del planner_args['optimizer']
+        else:
+            planner_args['optimizer'] = optimizer
+        
+    # read the optimize call settings
+    train_args['key'] = jax.random.PRNGKey(train_args['key'])
     
     return planner_args, plan_kwargs, train_args
 
@@ -718,8 +752,8 @@ class JaxStraightLinePlan(JaxPlan):
 class JaxDeepReactivePolicy(JaxPlan):
     '''A deep reactive policy network implementation in JAX.'''
     
-    def __init__(self, topology: Sequence[int],
-                 activation: Callable=jax.nn.relu,
+    def __init__(self, topology: Optional[Sequence[int]]=None,
+                 activation: Callable=jnp.tanh,
                  initializer: hk.initializers.Initializer=hk.initializers.VarianceScaling(scale=2.0),
                  normalize: bool=True, 
                  normalizer_kwargs: Optional[Dict]=None,
@@ -737,6 +771,8 @@ class JaxDeepReactivePolicy(JaxPlan):
         with non-linearity (e.g. sigmoid or ELU) to satisfy box constraints
         '''
         super(JaxDeepReactivePolicy, self).__init__()
+        if topology is None:
+            topology = [128, 64]
         self._topology = topology
         self._activations = [activation for _ in topology]
         self._initializer_base = initializer
