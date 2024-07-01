@@ -14,7 +14,7 @@ import sys
 import termcolor
 import time
 from tqdm import tqdm
-from typing import Any, Callable, Dict, Generator, Optional, Set, Sequence, Tuple
+from typing import Any, Callable, Dict, Generator, Optional, Set, Sequence, Tuple, Union
 
 Activation = Callable[[jnp.ndarray], jnp.ndarray]
 Bounds = Dict[str, Tuple[np.ndarray, np.ndarray]]
@@ -1121,7 +1121,7 @@ class JaxBackpropPlanner:
                  clip_grad: Optional[float]=None,
                  logic: FuzzyLogic=FuzzyLogic(),
                  use_symlog_reward: bool=False,
-                 utility: Callable[[jnp.ndarray], float] | str='mean',
+                 utility: Union[Callable[[jnp.ndarray], float], str]='mean',
                  utility_kwargs: Optional[Kwargs]=None,
                  cpfs_without_grad: Optional[Set[str]]=None,
                  compile_non_fluent_exact: bool=True,
