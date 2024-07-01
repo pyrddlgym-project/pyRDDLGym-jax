@@ -152,7 +152,9 @@ def _load_config(config, args):
             planner_args['optimizer'] = optimizer
         
     # read the optimize call settings
-    train_args['key'] = random.PRNGKey(train_args['key'])
+    planner_key = train_args.get('key', None)
+    if planner_key is not None:
+        train_args['key'] = random.PRNGKey(planner_key)
     
     return planner_args, plan_kwargs, train_args
 
@@ -1403,7 +1405,7 @@ class JaxBackpropPlanner:
     def optimize(self, *args, **kwargs) -> Dict[str, Any]:
         ''' Compute an optimal policy or plan. Return the callback from training.
         
-        :param key: JAX PRNG key   
+        :param key: JAX PRNG key (derived from clock if not provided)
         :param epochs: the maximum number of steps of gradient descent
         :param train_seconds: total time allocated for gradient descent
         :param plot_step: frequency to plot the plan and save result to disk
@@ -1424,7 +1426,7 @@ class JaxBackpropPlanner:
         callback = deque(it, maxlen=1).pop()
         return callback
     
-    def optimize_generator(self, key: random.PRNGKey,
+    def optimize_generator(self, key: Optional[random.PRNGKey]=None,
                            epochs: int=999999,
                            train_seconds: float=120.,
                            plot_step: Optional[int]=None,
@@ -1439,7 +1441,7 @@ class JaxBackpropPlanner:
         Generator can be iterated over to lazily optimize the plan, yielding
         a dictionary of intermediate computations.
         
-        :param key: JAX PRNG key   
+        :param key: JAX PRNG key (derived from clock if not provided)
         :param epochs: the maximum number of steps of gradient descent
         :param train_seconds: total time allocated for gradient descent
         :param plot_step: frequency to plot the plan and save result to disk
@@ -1460,6 +1462,10 @@ class JaxBackpropPlanner:
         start_time = time.time()
         elapsed_outside_loop = 0
         
+        # if PRNG key is not provided
+        if key is None:
+            key = random.PRNGKey(round(time.time() * 1000))
+            
         # if policy_hyperparams is not provided
         if policy_hyperparams is None:
             raise_warning('policy_hyperparams is not set, setting 1.0 for '
@@ -1907,7 +1913,7 @@ class JaxOfflineController(BaseAgent):
     use_tensor_obs = True
     
     def __init__(self, planner: JaxBackpropPlanner, 
-                 key: random.PRNGKey,
+                 key: Optional[random.PRNGKey]=None,
                  eval_hyperparams: Optional[Dict[str, Any]]=None,
                  params: Optional[Pytree]=None,
                  train_on_reset: bool=False,
@@ -1916,7 +1922,8 @@ class JaxOfflineController(BaseAgent):
         deployed later.
         
         :param planner: underlying planning algorithm for optimizing actions
-        :param key: the RNG key to seed randomness
+        :param key: the RNG key to seed randomness (derives from clock if not
+        provided)
         :param eval_hyperparams: policy hyperparameters to apply for evaluation
         or whenever sample_action is called
         :param params: use the specified policy parameters instead of calling
@@ -1926,6 +1933,8 @@ class JaxOfflineController(BaseAgent):
         for optimization
         '''
         self.planner = planner
+        if key is None:
+            key = random.PRNGKey(round(time.time() * 1000))
         self.key = key
         self.eval_hyperparams = eval_hyperparams
         self.train_on_reset = train_on_reset
@@ -1958,7 +1967,7 @@ class JaxOnlineController(BaseAgent):
     use_tensor_obs = True
     
     def __init__(self, planner: JaxBackpropPlanner, 
-                 key: random.PRNGKey,
+                 key: Optional[random.PRNGKey]=None,
                  eval_hyperparams: Optional[Dict[str, Any]]=None,
                  warm_start: bool=True,
                  **train_kwargs) -> None:
@@ -1966,7 +1975,8 @@ class JaxOnlineController(BaseAgent):
         loop fashion.
         
         :param planner: underlying planning algorithm for optimizing actions
-        :param key: the RNG key to seed randomness
+        :param key: the RNG key to seed randomness (derives from clock if not
+        provided)
         :param eval_hyperparams: policy hyperparameters to apply for evaluation
         or whenever sample_action is called
         :param warm_start: whether to use the previous decision epoch final
@@ -1975,6 +1985,8 @@ class JaxOnlineController(BaseAgent):
         for optimization
         '''
         self.planner = planner
+        if key is None:
+            key = random.PRNGKey(round(time.time() * 1000))
         self.key = key
         self.eval_hyperparams = eval_hyperparams
         self.warm_start = warm_start
