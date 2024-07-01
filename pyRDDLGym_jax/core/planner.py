@@ -14,7 +14,12 @@ import sys
 import termcolor
 import time
 from tqdm import tqdm
-from typing import Callable, Dict, Generator, Optional, Set, Sequence, Tuple
+from typing import Any, Callable, Dict, Generator, Optional, Set, Sequence, Tuple
+
+Activation = Callable[[jnp.ndarray], jnp.ndarray]
+Bounds = Dict[str, Tuple[np.ndarray, np.ndarray]]
+Kwargs = Dict[str, Any]
+Pytree = Any
 
 from pyRDDLGym.core.debug.exception import raise_warning
 
@@ -152,13 +157,13 @@ def _load_config(config, args):
     return planner_args, plan_kwargs, train_args
 
 
-def load_config(path: str) -> Tuple[Dict[str, object], ...]:
+def load_config(path: str) -> Tuple[Kwargs, ...]:
     '''Loads a config file at the specified file path.'''
     config, args = _parse_config_file(path)
     return _load_config(config, args)
 
 
-def load_config_from_string(value: str) -> Tuple[Dict[str, object], ...]:
+def load_config_from_string(value: str) -> Tuple[Kwargs, ...]:
     '''Loads config file contents specified explicitly as a string value.'''
     config, args = _parse_config_string(value)
     return _load_config(config, args)
@@ -193,7 +198,7 @@ class JaxRDDLCompilerWithGrad(JaxRDDLCompiler):
     
     def __init__(self, *args,
                  logic: FuzzyLogic=FuzzyLogic(),
-                 cpfs_without_grad: Optional[set]=None,
+                 cpfs_without_grad: Optional[Set[str]]=None,
                  **kwargs) -> None:
         '''Creates a new RDDL to Jax compiler, where operations that are not
         differentiable are converted to approximate forms that have defined 
@@ -300,15 +305,15 @@ class JaxPlan:
         self._test_policy = None
         self._projection = None
     
-    def summarize_hyperparameters(self):
+    def summarize_hyperparameters(self) -> None:
         pass
         
     def compile(self, compiled: JaxRDDLCompilerWithGrad,
-                _bounds: Dict,
+                _bounds: Bounds,
                 horizon: int) -> None:
         raise NotImplementedError
     
-    def guess_next_epoch(self, params: Dict) -> Dict:
+    def guess_next_epoch(self, params: Pytree) -> Pytree:
         raise NotImplementedError
     
     @property
@@ -344,7 +349,7 @@ class JaxPlan:
         self._projection = value
     
     def _calculate_action_info(self, compiled: JaxRDDLCompilerWithGrad,
-                               user_bounds: Dict[str, object], 
+                               user_bounds: Bounds, 
                                horizon: int):
         shapes, bounds, bounds_safe, cond_lists = {}, {}, {}, {}
         for (name, prange) in compiled.rddl.variable_ranges.items():
@@ -427,7 +432,7 @@ class JaxStraightLinePlan(JaxPlan):
         self._use_new_projection = use_new_projection
         self._max_constraint_iter = max_constraint_iter
         
-    def summarize_hyperparameters(self):
+    def summarize_hyperparameters(self) -> None:
         print(f'policy hyper-parameters:\n'
               f'    initializer          ={type(self._initializer_base).__name__}\n'
               f'constraint-sat strategy (simple):\n'
@@ -439,7 +444,8 @@ class JaxStraightLinePlan(JaxPlan):
               f'    use_new_projection   ={self._use_new_projection}')
     
     def compile(self, compiled: JaxRDDLCompilerWithGrad,
-                _bounds: Dict, horizon: int) -> None:
+                _bounds: Bounds, 
+                horizon: int) -> None:
         rddl = compiled.rddl
         
         # calculate the correct action box bounds
@@ -744,7 +750,7 @@ class JaxStraightLinePlan(JaxPlan):
         # "progress" the plan one step forward and set last action to second-last
         return jnp.append(param[1:, ...], param[-1:, ...], axis=0)
 
-    def guess_next_epoch(self, params: Dict) -> Dict:
+    def guess_next_epoch(self, params: Pytree) -> Pytree:
         next_fn = JaxStraightLinePlan._guess_next_epoch
         return jax.tree_map(next_fn, params)
 
@@ -753,10 +759,10 @@ class JaxDeepReactivePolicy(JaxPlan):
     '''A deep reactive policy network implementation in JAX.'''
     
     def __init__(self, topology: Optional[Sequence[int]]=None,
-                 activation: Callable=jnp.tanh,
+                 activation: Activation=jnp.tanh,
                  initializer: hk.initializers.Initializer=hk.initializers.VarianceScaling(scale=2.0),
                  normalize: bool=True, 
-                 normalizer_kwargs: Optional[Dict]=None,
+                 normalizer_kwargs: Optional[Kwargs]=None,
                  wrap_non_bool: bool=False) -> None:
         '''Creates a new deep reactive policy in JAX.
         
@@ -786,7 +792,7 @@ class JaxDeepReactivePolicy(JaxPlan):
         self._normalizer_kwargs = normalizer_kwargs
         self._wrap_non_bool = wrap_non_bool
             
-    def summarize_hyperparameters(self):
+    def summarize_hyperparameters(self) -> None:
         print(f'policy hyper-parameters:\n'
               f'    topology        ={self._topology}\n'
               f'    activation_fn   ={self._activations[0].__name__}\n'
@@ -796,7 +802,8 @@ class JaxDeepReactivePolicy(JaxPlan):
               f'    wrap_non_bool   ={self._wrap_non_bool}')
     
     def compile(self, compiled: JaxRDDLCompilerWithGrad,
-                _bounds: Dict, horizon: int) -> None:
+                _bounds: Bounds, 
+                horizon: int) -> None:
         rddl = compiled.rddl
         
         # calculate the correct action box bounds
@@ -977,7 +984,7 @@ class JaxDeepReactivePolicy(JaxPlan):
         
         self.initializer = _jax_wrapped_drp_init
         
-    def guess_next_epoch(self, params: Dict) -> Dict:
+    def guess_next_epoch(self, params: Pytree) -> Pytree:
         return params
 
     
@@ -1092,7 +1099,7 @@ class JaxPlannerStatus(Enum):
     ITER_BUDGET_REACHED = 4
     INVALID_GRADIENT = 5
     
-    def is_failure(self):
+    def is_failure(self) -> bool:
         return self.value >= 3
 
 
@@ -1106,15 +1113,15 @@ class JaxBackpropPlanner:
                  batch_size_test: Optional[int]=None,
                  rollout_horizon: Optional[int]=None,
                  use64bit: bool=False,
-                 action_bounds: Optional[Dict[str, Tuple[np.ndarray, np.ndarray]]]=None,
+                 action_bounds: Optional[Bounds]=None,
                  optimizer: Callable[..., optax.GradientTransformation]=optax.rmsprop,
-                 optimizer_kwargs: Optional[Dict[str, object]]=None,
+                 optimizer_kwargs: Optional[Kwargs]=None,
                  clip_grad: Optional[float]=None,
                  logic: FuzzyLogic=FuzzyLogic(),
                  use_symlog_reward: bool=False,
-                 utility: Callable[[jnp.ndarray], float] | str=jnp.mean,
-                 utility_kwargs: Optional[Dict[str, object]]=None,
-                 cpfs_without_grad: Optional[Set]=None,
+                 utility: Callable[[jnp.ndarray], float] | str='mean',
+                 utility_kwargs: Optional[Kwargs]=None,
+                 cpfs_without_grad: Optional[Set[str]]=None,
                  compile_non_fluent_exact: bool=True,
                  logger: Optional[Logger]=None) -> None:
         '''Creates a new gradient-based algorithm for optimizing action sequences
@@ -1224,7 +1231,7 @@ class JaxBackpropPlanner:
         self._jax_compile_rddl()        
         self._jax_compile_optimizer()
         
-    def summarize_hyperparameters(self):
+    def summarize_hyperparameters(self) -> None:
         print(f'objective hyper-parameters:\n'
               f'    utility_fn      ={self.utility.__name__}\n'
               f'    utility args    ={self.utility_kwargs}\n'
@@ -1393,12 +1400,9 @@ class JaxBackpropPlanner:
     # OPTIMIZE API
     # ===========================================================================
 
-    def optimize(self, *args, return_callback: bool=False, **kwargs) -> Dict[str, object]:
-        ''' Compute an optimal straight-line plan. Returns the parameters
-        for the optimized policy.
+    def optimize(self, *args, **kwargs) -> Dict[str, Any]:
+        ''' Compute an optimal policy or plan. Return the callback from training.
         
-        :param return_callback: whether to return the callback from training
-        instead of the parameters
         :param key: JAX PRNG key   
         :param epochs: the maximum number of steps of gradient descent
         :param train_seconds: total time allocated for gradient descent
@@ -1418,23 +1422,20 @@ class JaxBackpropPlanner:
         '''
         it = self.optimize_generator(*args, **kwargs)
         callback = deque(it, maxlen=1).pop()
-        if return_callback:
-            return callback
-        else:
-            return callback['best_params']
+        return callback
     
     def optimize_generator(self, key: random.PRNGKey,
                            epochs: int=999999,
                            train_seconds: float=120.,
                            plot_step: Optional[int]=None,
-                           model_params: Optional[Dict[str, object]]=None,
-                           policy_hyperparams: Optional[Dict[str, object]]=None,
-                           subs: Optional[Dict[str, object]]=None,
-                           guess: Optional[Dict[str, object]]=None,
+                           model_params: Optional[Dict[str, Any]]=None,
+                           policy_hyperparams: Optional[Dict[str, Any]]=None,
+                           subs: Optional[Dict[str, Any]]=None,
+                           guess: Optional[Pytree]=None,
                            verbose: int=2,
                            test_rolling_window: int=10,
-                           tqdm_position: Optional[int]=None) -> Generator[Dict[str, object], None, None]:
-        '''Returns a generator for computing an optimal straight-line plan. 
+                           tqdm_position: Optional[int]=None) -> Generator[Dict[str, Any], None, None]:
+        '''Returns a generator for computing an optimal policy or plan. 
         Generator can be iterated over to lazily optimize the plan, yielding
         a dictionary of intermediate computations.
         
@@ -1588,8 +1589,8 @@ class JaxBackpropPlanner:
             if verbose >= 2:
                 iters.n = int(100 * min(1, max(elapsed / train_seconds, it / epochs)))
                 iters.set_description(
-                    f'[{tqdm_position}] {it:6} it / {-train_loss:14.4f} train / '
-                    f'{-test_loss:14.4f} test / {-best_loss:14.4f} best')
+                    f'[{tqdm_position}] {it:6} it / {-train_loss:14.6f} train / '
+                    f'{-test_loss:14.6f} test / {-best_loss:14.6f} best')
                         
             # reached computation budget
             if elapsed >= train_seconds:
@@ -1648,7 +1649,7 @@ class JaxBackpropPlanner:
             if messages:
                 messages = '\n'.join(messages)
                 raise_warning('The JAX compiler encountered the following '
-                              'problems in the original RDDL '
+                              'error(s) in the original RDDL formulation '
                               f'during test evaluation:\n{messages}', 'red')                               
         
         # summarize and test for convergence
@@ -1718,10 +1719,10 @@ class JaxBackpropPlanner:
             '(note: not all potential problems can be ruled out).', 'green')
         
     def get_action(self, key: random.PRNGKey,
-                   params: Dict,
+                   params: Pytree,
                    step: int,
-                   subs: Dict,
-                   policy_hyperparams: Optional[Dict[str, object]]=None) -> Dict[str, object]:
+                   subs: Dict[str, Any],
+                   policy_hyperparams: Optional[Dict[str, Any]]=None) -> Dict[str, Any]:
         '''Returns an action dictionary from the policy or plan with the given
         parameters.
         
@@ -1766,7 +1767,7 @@ class JaxLineSearchPlanner(JaxBackpropPlanner):
     
     def __init__(self, *args,
                  optimizer: Callable[..., optax.GradientTransformation]=optax.sgd,
-                 optimizer_kwargs: Dict[str, object]={'learning_rate': 1.0},
+                 optimizer_kwargs: Kwargs={'learning_rate': 1.0},
                  decay: float=0.8,
                  c: float=0.1,
                  step_max: float=1.0,
@@ -1795,7 +1796,7 @@ class JaxLineSearchPlanner(JaxBackpropPlanner):
             optimizer_kwargs=optimizer_kwargs,
             **kwargs)
         
-    def summarize_hyperparameters(self):
+    def summarize_hyperparameters(self) -> None:
         super(JaxLineSearchPlanner, self).summarize_hyperparameters()
         print(f'linesearch hyper-parameters:\n'
               f'    decay   ={self.decay}\n'
@@ -1907,8 +1908,8 @@ class JaxOfflineController(BaseAgent):
     
     def __init__(self, planner: JaxBackpropPlanner, 
                  key: random.PRNGKey,
-                 eval_hyperparams: Optional[Dict[str, object]]=None,
-                 params: Optional[Dict[str, object]]=None,
+                 eval_hyperparams: Optional[Dict[str, Any]]=None,
+                 params: Optional[Pytree]=None,
                  train_on_reset: bool=False,
                  **train_kwargs) -> None:
         '''Creates a new JAX offline control policy that is trained once, then
@@ -1933,17 +1934,18 @@ class JaxOfflineController(BaseAgent):
         
         self.step = 0
         if not self.train_on_reset and not self.params_given:
-            params = self.planner.optimize(key=self.key, **self.train_kwargs) 
+            callback = self.planner.optimize(key=self.key, **self.train_kwargs)
+            params = callback['best_params'] 
         self.params = params  
         
-    def sample_action(self, state):
+    def sample_action(self, state: Dict[str, Any]) -> Dict[str, Any]:
         self.key, subkey = random.split(self.key)
         actions = self.planner.get_action(
             subkey, self.params, self.step, state, self.eval_hyperparams)
         self.step += 1
         return actions
         
-    def reset(self):
+    def reset(self) -> None:
         self.step = 0
         if self.train_on_reset and not self.params_given:
             self.params = self.planner.optimize(key=self.key, **self.train_kwargs)
@@ -1957,7 +1959,7 @@ class JaxOnlineController(BaseAgent):
     
     def __init__(self, planner: JaxBackpropPlanner, 
                  key: random.PRNGKey,
-                 eval_hyperparams: Optional[Dict[str, object]]=None,
+                 eval_hyperparams: Optional[Dict[str, Any]]=None,
                  warm_start: bool=True,
                  **train_kwargs) -> None:
         '''Creates a new JAX control policy that is trained online in a closed-
@@ -1979,13 +1981,14 @@ class JaxOnlineController(BaseAgent):
         self.train_kwargs = train_kwargs
         self.reset()
      
-    def sample_action(self, state):
+    def sample_action(self, state: Dict[str, Any]) -> Dict[str, Any]:
         planner = self.planner
-        params = planner.optimize(
+        callback = planner.optimize(
             key=self.key,
             guess=self.guess,
             subs=state,
             **self.train_kwargs)
+        params = callback['best_params']
         self.key, subkey = random.split(self.key)
         actions = planner.get_action(
             subkey, params, 0, state, self.eval_hyperparams)
@@ -1993,6 +1996,6 @@ class JaxOnlineController(BaseAgent):
             self.guess = planner.plan.guess_next_epoch(params)
         return actions
         
-    def reset(self):
+    def reset(self) -> None:
         self.guess = None
     

@@ -4,7 +4,7 @@ import jax.numpy as jnp
 import jax.random as random
 import jax.scipy as scipy 
 import traceback
-from typing import Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from pyRDDLGym.core.debug.exception import raise_warning
 
@@ -623,7 +623,7 @@ class JaxRDDLCompiler:
     # error checks
     # ===========================================================================
     
-    def print_jax(self) -> Dict[str, object]:
+    def print_jax(self) -> Dict[str, Any]:
         '''Returns a dictionary containing the string representations of all 
         Jax compiled expressions from the RDDL file.
         '''
@@ -720,7 +720,7 @@ class JaxRDDLCompiler:
     }
     
     @staticmethod
-    def get_error_codes(error):
+    def get_error_codes(error: int) -> List[int]:
         '''Given a compacted integer error flag from the execution of Jax, and 
         decomposes it into individual error codes.
         '''
@@ -729,7 +729,7 @@ class JaxRDDLCompiler:
         return errors
     
     @staticmethod
-    def get_error_messages(error):
+    def get_error_messages(error: int) -> List[str]:
         '''Given a compacted integer error flag from the execution of Jax, and 
         decomposes it into error strings.
         '''
