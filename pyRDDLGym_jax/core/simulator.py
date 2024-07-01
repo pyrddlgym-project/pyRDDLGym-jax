@@ -94,7 +94,7 @@ class JaxRDDLSimulator(RDDLSimulator):
         self.precond_names = [f'Precondition {i}' for i in range(len(rddl.preconditions))]
         self.terminal_names = [f'Termination {i}' for i in range(len(rddl.terminations))]
         
-    def handle_error_code(self, error, msg) -> None:
+    def handle_error_code(self, error: int, msg: str) -> None:
         if self.raise_error:
             errors = JaxRDDLCompiler.get_error_messages(error)
             if errors:

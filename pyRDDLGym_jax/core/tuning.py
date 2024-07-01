@@ -8,7 +8,9 @@ from multiprocessing import get_context
 import numpy as np
 import os
 import time
-from typing import Callable, Dict, Optional, Tuple
+from typing import Any, Callable, Dict, Optional, Tuple
+
+Kwargs = Dict[str, Any]
 
 import warnings
 warnings.filterwarnings("ignore")
@@ -45,15 +47,15 @@ class JaxParameterTuning:
                  timeout_tuning: float=np.inf,
                  eval_trials: int=5,
                  verbose: bool=True,
-                 planner_kwargs: Optional[Dict]=None,
-                 plan_kwargs: Optional[Dict]=None,
+                 planner_kwargs: Optional[Kwargs]=None,
+                 plan_kwargs: Optional[Kwargs]=None,
                  pool_context: str='spawn',
                  num_workers: int=1,
                  poll_frequency: float=0.2,
                  gp_iters: int=25,
-                 acquisition=None,
-                 gp_init_kwargs: Optional[Dict]=None,
-                 gp_params: Optional[Dict]=None) -> None:
+                 acquisition: Optional[UtilityFunction]=None,
+                 gp_init_kwargs: Optional[Kwargs]=None,
+                 gp_params: Optional[Kwargs]=None) -> None:
         '''Creates a new instance for tuning hyper-parameters for Jax planners
         on the given RDDL domain and instance.
         
@@ -117,7 +119,7 @@ class JaxParameterTuning:
             acquisition, self.acq_args = JaxParameterTuning._annealing_utility(num_samples)
         self.acquisition = acquisition
     
-    def summarize_hyperparameters(self):
+    def summarize_hyperparameters(self) -> None:
         print(f'hyperparameter optimizer parameters:\n'
               f'    tuned_hyper_parameters    ={self.hyperparams_dict}\n'
               f'    initialization_args       ={self.gp_init_kwargs}\n'
@@ -158,8 +160,9 @@ class JaxParameterTuning:
         pid = os.getpid()
         return index, pid, params, target
 
-    def tune(self, key: jax.random.PRNGKey, filename: str,
-             save_plot: bool=False) -> Dict[str, object]:
+    def tune(self, key: jax.random.PRNGKey, 
+             filename: str,
+             save_plot: bool=False) -> Dict[str, Any]:
         '''Tunes the hyper-parameters for Jax planner, returns the best found.'''
         self.summarize_hyperparameters()
         

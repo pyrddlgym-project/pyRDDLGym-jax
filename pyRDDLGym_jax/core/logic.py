@@ -102,7 +102,7 @@ class FuzzyLogic:
                  debias: Optional[Set[str]]=None,
                  eps: float=1e-10,
                  verbose: bool=False,
-                 use64bit: bool=False):
+                 use64bit: bool=False) -> None:
         '''Creates a new fuzzy logic in Jax.
         
         :param tnorm: fuzzy operator for logical AND
@@ -120,7 +120,7 @@ class FuzzyLogic:
         self.comparison = comparison
         self.weight = float(weight)
         if debias is None:
-            debias = {}
+            debias = set()
         self.debias = debias
         self.eps = eps
         self.verbose = verbose
@@ -137,7 +137,7 @@ class FuzzyLogic:
             self.INT = jnp.int32
             jax.config.update('jax_enable_x64', False)
         
-    def summarize_hyperparameters(self):
+    def summarize_hyperparameters(self) -> None:
         print(f'model relaxation:\n'
               f'    tnorm         ={type(self.tnorm).__name__}\n'
               f'    complement    ={type(self.complement).__name__}\n'
