@@ -1423,7 +1423,19 @@ class JaxBackpropPlanner:
         :param tqdm_position: position of tqdm progress bar (for multiprocessing)
         '''
         it = self.optimize_generator(*args, **kwargs)
-        callback = deque(it, maxlen=1).pop()
+        
+        # if the python is C-compiled then the deque is native C and much faster
+        # than naively exhausting iterator, but not if the python is some other
+        # version (e.g. PyPi); for details, see
+        # https://stackoverflow.com/questions/50937966/fastest-most-pythonic-way-to-consume-an-iterator
+        callback = None
+        if sys.implementation.name == 'cpython':
+            last_callback = deque(it, maxlen=1)
+            if last_callback:
+                callback = last_callback.pop()
+        else:
+            for callback in it:
+                pass
         return callback
     
     def optimize_generator(self, key: Optional[random.PRNGKey]=None,
