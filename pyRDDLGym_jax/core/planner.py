@@ -1719,20 +1719,20 @@ class JaxBackpropPlanner:
             if grad_is_zero:
                 return termcolor.colored(
                     '[FAILURE] no progress was made, '
-                    f'and max grad norm = {max_grad_norm}, '
-                    'likely stuck in a plateau.', 'red')
+                    f'and max grad norm {max_grad_norm:.6f} is zero: '
+                    'solver likely stuck in a plateau.', 'red')
             else:
                 return termcolor.colored(
                     '[FAILURE] no progress was made, '
-                    f'but max grad norm = {max_grad_norm} > 0, '
-                    'likely due to bad l.r. or other hyper-parameter.', 'red')
+                    f'but max grad norm {max_grad_norm:.6f} is non-zero: '
+                    'likely poor learning rate or other hyper-parameter.', 'red')
         
         # model is likely poor IF:
         # 1. the train and test return disagree
         if not (validation_error < 20):
             return termcolor.colored(
                 '[WARNING] progress was made, '
-                f'but relative train test error = {validation_error} is high, '
+                f'but relative train-test error {validation_error:.6f} is high: '
                 'likely poor model relaxation around the solution, '
                 'or the batch size is too small.', 'yellow')
         
@@ -1743,14 +1743,14 @@ class JaxBackpropPlanner:
             if not (return_to_grad_norm > 1):
                 return termcolor.colored(
                     '[WARNING] progress was made, '
-                    f'but max grad norm = {max_grad_norm} is high, '
-                    'likely indicates the solution is not locally optimal, '
-                    'or the model is not smooth around the solution, '
+                    f'but max grad norm {max_grad_norm:.6f} is high: '
+                    'likely the solution is not locally optimal, '
+                    'or the relaxed model is not smooth around the solution, '
                     'or the batch size is too small.', 'yellow')
         
         # likely successful
         return termcolor.colored(
-            '[SUCCESS] planner appears to have converged successfully '
+            '[SUCCESS] planner has converged successfully '
             '(note: not all potential problems can be ruled out).', 'green')
         
     def get_action(self, key: random.PRNGKey,
