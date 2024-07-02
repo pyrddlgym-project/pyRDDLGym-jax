@@ -1,3 +1,5 @@
+__version__ = '0.2'
+
 from ast import literal_eval
 from collections import deque
 import configparser
@@ -1232,6 +1234,23 @@ class JaxBackpropPlanner:
         
         self._jax_compile_rddl()        
         self._jax_compile_optimizer()
+    
+    def _summarize_system(self) -> None:
+        try:
+            jaxlib_version = jax._src.lib.version_str
+        except Exception as _:
+            jaxlib_version = 'N/A'
+        try:
+            devices_short = ', '.join(
+                map(str, jax._src.xla_bridge.devices())).replace('\n', '')
+        except Exception as _:
+            devices_short = 'N/A'
+        print('\n'
+              f'JAX Planner version {__version__}\n' 
+              f'Python {sys.version}\n'
+              f'jax {jax.version.__version__}, jaxlib {jaxlib_version}, '
+              f'numpy {np.__version__}\n'
+              f'devices: {devices_short}\n')
         
     def summarize_hyperparameters(self) -> None:
         print(f'objective hyper-parameters:\n'
@@ -1495,9 +1514,7 @@ class JaxBackpropPlanner:
             
         # print summary of parameters:
         if verbose >= 1:
-            print('==============================================\n'
-                  'JAX PLANNER PARAMETER SUMMARY\n'
-                  '==============================================')
+            self._summarize_system()
             self.summarize_hyperparameters()
             print(f'optimize() call hyper-parameters:\n'
                   f'    PRNG key           ={key}\n'
