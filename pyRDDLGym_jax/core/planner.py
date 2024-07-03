@@ -1440,7 +1440,9 @@ class JaxBackpropPlanner:
         their values: if None initializes all variables from the RDDL instance
         :param guess: initial policy parameters: if None will use the initializer
         specified in this instance
-        :param verbose: not print (0), print summary (1), print progress (2)
+        :param print_summary: whether to print planner header, parameter 
+        summary, and diagnosis
+        :param print_progress: whether to print the progress bar during training
         :param test_rolling_window: the test return is averaged on a rolling 
         window of the past test_rolling_window returns when updating the best
         parameters found so far
@@ -1470,7 +1472,8 @@ class JaxBackpropPlanner:
                            policy_hyperparams: Optional[Dict[str, Any]]=None,
                            subs: Optional[Dict[str, Any]]=None,
                            guess: Optional[Pytree]=None,
-                           verbose: int=2,
+                           print_summary: bool=True,
+                           print_progress: bool=True,
                            test_rolling_window: int=10,
                            tqdm_position: Optional[int]=None) -> Generator[Dict[str, Any], None, None]:
         '''Returns a generator for computing an optimal policy or plan. 
@@ -1487,14 +1490,15 @@ class JaxBackpropPlanner:
         :param subs: dictionary mapping initial state and non-fluents to 
         their values: if None initializes all variables from the RDDL instance
         :param guess: initial policy parameters: if None will use the initializer
-        specified in this instance
-        :param verbose: not print (0), print summary (1), print progress (2)
+        specified in this instance        
+        :param print_summary: whether to print planner header, parameter 
+        summary, and diagnosis
+        :param print_progress: whether to print the progress bar during training
         :param test_rolling_window: the test return is averaged on a rolling 
         window of the past test_rolling_window returns when updating the best
         parameters found so far
         :param tqdm_position: position of tqdm progress bar (for multiprocessing)
         '''
-        verbose = int(verbose)
         start_time = time.time()
         elapsed_outside_loop = 0
         
@@ -1518,7 +1522,7 @@ class JaxBackpropPlanner:
                                   for action in self.rddl.action_fluents}
             
         # print summary of parameters:
-        if verbose >= 1:
+        if print_summary:
             self._summarize_system()
             self.summarize_hyperparameters()
             print(f'optimize() call hyper-parameters:\n'
@@ -1531,8 +1535,9 @@ class JaxBackpropPlanner:
                   f'    provide_param_guess={guess is not None}\n'
                   f'    test_rolling_window={test_rolling_window}\n' 
                   f'    plot_frequency     ={plot_step}\n'
-                  f'    verbose            ={verbose}\n')
-            if verbose >= 2 and self.compiled.relaxations:
+                  f'    print_summary      ={print_summary}\n'
+                  f'    print_progress     ={print_progress}\n')
+            if self.compiled.relaxations:
                 print('Some RDDL operations are non-differentiable, '
                       'replacing them with differentiable relaxations:')
                 print(self.compiled.summarize_model_relaxations())
@@ -1585,7 +1590,7 @@ class JaxBackpropPlanner:
         
         # training loop
         iters = range(epochs)
-        if verbose >= 2:
+        if print_progress:
             iters = tqdm(iters, total=100, position=tqdm_position)
         
         for it in iters:
@@ -1626,7 +1631,7 @@ class JaxBackpropPlanner:
             
             # if the progress bar is used
             elapsed = time.time() - start_time - elapsed_outside_loop
-            if verbose >= 2:
+            if print_progress:
                 iters.n = int(100 * min(1, max(elapsed / train_seconds, it / epochs)))
                 iters.set_description(
                     f'[{tqdm_position}] {it:6} it / {-train_loss:14.6f} train / '
@@ -1676,7 +1681,7 @@ class JaxBackpropPlanner:
                 break
                         
         # release resources
-        if verbose >= 2:
+        if print_progress:
             iters.close()
         if plot is not None:
             plot.close()
@@ -1693,7 +1698,7 @@ class JaxBackpropPlanner:
                               f'during test evaluation:\n{messages}', 'red')                               
         
         # summarize and test for convergence
-        if verbose >= 1:
+        if print_summary:
             grad_norm = jax.tree_map(lambda x: np.linalg.norm(x).item(), best_grad)
             diagnosis = self._perform_diagnosis(
                 last_iter_improve, -train_loss, -test_loss, -best_loss, grad_norm)
