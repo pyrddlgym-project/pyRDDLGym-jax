@@ -765,7 +765,7 @@ class JaxDeepReactivePolicy(JaxPlan):
     def __init__(self, topology: Optional[Sequence[int]]=None,
                  activation: Activation=jnp.tanh,
                  initializer: hk.initializers.Initializer=hk.initializers.VarianceScaling(scale=2.0),
-                 normalize: bool=True, 
+                 normalize: bool=False, 
                  normalizer_kwargs: Optional[Kwargs]=None,
                  wrap_non_bool: bool=False) -> None:
         '''Creates a new deep reactive policy in JAX.
@@ -789,10 +789,7 @@ class JaxDeepReactivePolicy(JaxPlan):
         self._initializer = initializer
         self._normalize = normalize
         if normalizer_kwargs is None:
-            normalizer_kwargs = {
-                'create_offset': True, 'create_scale': True, 
-                'name': 'input_norm'
-            }
+            normalizer_kwargs = {'create_offset': True, 'create_scale': True}
         self._normalizer_kwargs = normalizer_kwargs
         self._wrap_non_bool = wrap_non_bool
             
@@ -821,7 +818,7 @@ class JaxDeepReactivePolicy(JaxPlan):
         if 1 < allowed_actions < bool_action_count:
             raise RDDLNotImplementedError(
                 f'Deep reactive policies currently do not support '
-                f'max-nondef-actions = {allowed_actions} > 1.')
+                f'max-nondef-actions {allowed_actions} > 1.')
         use_constraint_satisfaction = allowed_actions < bool_action_count
             
         noop = {var: (values[0] if isinstance(values, list) else values)
@@ -842,14 +839,39 @@ class JaxDeepReactivePolicy(JaxPlan):
                        for (var, shape) in shapes.items()}
         layer_names = {var: f'output_{var}'.replace('-', '_') for var in shapes}
         
-        # predict actions from the policy network for current state
-        def _jax_wrapped_policy_network_predict(state):
+        if rddl.observ_fluents:
+            observed_vars = rddl.observ_fluents
+        else:
+            observed_vars = rddl.state_fluents
+
+        # convert subs dictionary into a state vector to feed to the MLP
+        def _jax_wrapped_policy_input(subs):
             
-            # apply layer norm
-            if normalize:
+            # concatenate all state variables into a single vector
+            states_bool, states_non_bool = [], []
+            non_bool_dims = 0
+            for (var, value) in subs.items():
+                if var in observed_vars:
+                    state = jnp.ravel(value)
+                    if ranges[var] == 'bool':
+                        states_bool.append(state)
+                    else:
+                        states_non_bool.append(state)
+                        non_bool_dims += state.size
+            state = jnp.concatenate(states_non_bool + states_bool)
+            
+            # optionally perform layer normalization on the non-bool inputs
+            if normalize and non_bool_dims:
                 normalizer = hk.LayerNorm(
-                    axis=-1, param_axis=-1, **self._normalizer_kwargs)
-                state = normalizer(state)
+                    axis=-1, param_axis=-1, name='input_norm', 
+                    **self._normalizer_kwargs)
+                normalized = normalizer(state[:non_bool_dims])
+                state = state.at[:non_bool_dims].set(normalized)
+            return state
+            
+        # predict actions from the policy network for current state
+        def _jax_wrapped_policy_network_predict(subs):
+            state = _jax_wrapped_policy_input(subs)
             
             # feed state vector through hidden layers
             hidden = state
@@ -913,25 +935,9 @@ class JaxDeepReactivePolicy(JaxPlan):
                     start += size
             return actions
         
-        if rddl.observ_fluents:
-            observed_vars = rddl.observ_fluents
-        else:
-            observed_vars = rddl.state_fluents
-             
-        # state is concatenated into single tensor
-        def _jax_wrapped_subs_to_state(subs):
-            subs = {var: value
-                    for (var, value) in subs.items()
-                    if var in observed_vars}
-            flat_subs = jax.tree_map(jnp.ravel, subs)
-            states = list(flat_subs.values())
-            state = jnp.concatenate(states)
-            return state
-        
         # train action prediction
         def _jax_wrapped_drp_predict_train(key, params, hyperparams, step, subs):
-            state = _jax_wrapped_subs_to_state(subs)
-            actions = predict_fn.apply(params, state)
+            actions = predict_fn.apply(params, subs)
             if not wrap_non_bool:
                 for (var, action) in actions.items():
                     if var != bool_key and ranges[var] != 'bool':
@@ -982,8 +988,7 @@ class JaxDeepReactivePolicy(JaxPlan):
             subs = {var: value[0, ...] 
                     for (var, value) in subs.items()
                     if var in observed_vars}
-            state = _jax_wrapped_subs_to_state(subs)
-            params = predict_fn.init(key, state)
+            params = predict_fn.init(key, subs)
             return params
         
         self.initializer = _jax_wrapped_drp_init
