@@ -1026,12 +1026,26 @@ class RollingMean:
 class JaxPlannerPlot:
     '''Supports plotting and visualization of a JAX policy in real time.'''
     
-    def __init__(self, rddl: RDDLPlanningModel, horizon: int) -> None:
-        self._fig, axes = plt.subplots(2 + len(rddl.action_fluents))
+    def __init__(self, rddl: RDDLPlanningModel, horizon: int, 
+                 show_violin: bool=True, show_action: bool=True) -> None:
+        '''Creates a new planner visualizer.
+        
+        :param rddl: the planning model to optimize
+        :param horizon: the lookahead or planning horizon
+        :param show_violin: whether to show the distribution of batch losses
+        :param show_action: whether to show heatmaps of the action fluents
+        '''
+        num_plots = 1
+        if show_violin:
+            num_plots += 1
+        if show_action:
+            num_plots += len(rddl.action_fluents)
+        self._fig, axes = plt.subplots(num_plots)
+        if num_plots == 1:
+            axes = [axes]
         
         # prepare the loss plot
         self._loss_ax = axes[0]
-        self._hist_ax = axes[1]
         self._loss_ax.autoscale(enable=True)
         self._loss_ax.set_xlabel('training time')
         self._loss_ax.set_ylabel('loss value')
@@ -1039,30 +1053,41 @@ class JaxPlannerPlot:
             [], [], linestyle=':', marker='o', markersize=2)[0]
         self._loss_back = self._fig.canvas.copy_from_bbox(self._loss_ax.bbox)
         
+        # prepare the violin plot
+        if show_violin:
+            self._hist_ax = axes[1]
+        else:
+            self._hist_ax = None
+            
         # prepare the action plots
-        self._action_ax = {name: axes[idx + 2]
-                           for (idx, name) in enumerate(rddl.action_fluents)}
-        self._action_plots = {}
-        for name in rddl.action_fluents:
-            ax = self._action_ax[name]
-            if rddl.variable_ranges[name] == 'bool':
-                vmin, vmax = 0.0, 1.0
-            else:
-                vmin, vmax = None, None  
-            action_dim = 1
-            for dim in rddl.object_counts(rddl.variable_params[name]):
-                action_dim *= dim     
-            action_plot = ax.pcolormesh(
-                np.zeros((action_dim, horizon)), 
-                cmap='seismic', vmin=vmin, vmax=vmax)
-            ax.set_aspect('auto')        
-            ax.set_xlabel('decision epoch')
-            ax.set_ylabel(name)
-            plt.colorbar(action_plot, ax=ax)
-            self._action_plots[name] = action_plot
-        self._action_back = {name: self._fig.canvas.copy_from_bbox(ax.bbox)
-                             for (name, ax) in self._action_ax.items()}
-        
+        if show_action:
+            self._action_ax = {name: axes[idx + (2 if show_violin else 1)]
+                               for (idx, name) in enumerate(rddl.action_fluents)}
+            self._action_plots = {}
+            for name in rddl.action_fluents:
+                ax = self._action_ax[name]
+                if rddl.variable_ranges[name] == 'bool':
+                    vmin, vmax = 0.0, 1.0
+                else:
+                    vmin, vmax = None, None  
+                action_dim = 1
+                for dim in rddl.object_counts(rddl.variable_params[name]):
+                    action_dim *= dim     
+                action_plot = ax.pcolormesh(
+                    np.zeros((action_dim, horizon)), 
+                    cmap='seismic', vmin=vmin, vmax=vmax)
+                ax.set_aspect('auto')        
+                ax.set_xlabel('decision epoch')
+                ax.set_ylabel(name)
+                plt.colorbar(action_plot, ax=ax)
+                self._action_plots[name] = action_plot
+            self._action_back = {name: self._fig.canvas.copy_from_bbox(ax.bbox)
+                                 for (name, ax) in self._action_ax.items()}
+        else:
+            self._action_ax = None
+            self._action_plots = None
+            self._action_back = None
+            
         plt.tight_layout()
         plt.show(block=False)
         
@@ -1075,21 +1100,26 @@ class JaxPlannerPlot:
         self._loss_ax.set_xlim([0, len(xticks)])
         self._loss_ax.set_ylim([np.min(losses), np.max(losses)])
         self._loss_ax.draw_artist(self._loss_plot)
-        self._hist_ax.clear()
-        self._hist_ax.set_xlabel('loss value')
-        self._hist_ax.set_ylabel('density')
-        self._hist_ax.violinplot(returns, vert=False, showmeans=True)
         self._fig.canvas.blit(self._loss_ax.bbox)
         
+        # draw the violin plot
+        if self._hist_ax is not None:
+            self._hist_ax.clear()
+            self._hist_ax.set_xlabel('loss value')
+            self._hist_ax.set_ylabel('density')
+            self._hist_ax.violinplot(returns, vert=False, showmeans=True)
+        
         # draw the actions
-        for (name, values) in actions.items():
-            values = np.mean(values, axis=0, dtype=float)
-            values = np.reshape(values, newshape=(values.shape[0], -1)).T
-            self._fig.canvas.restore_region(self._action_back[name])
-            self._action_plots[name].set_array(values)
-            self._action_ax[name].draw_artist(self._action_plots[name])
-            self._fig.canvas.blit(self._action_ax[name].bbox)
-            self._action_plots[name].set_clim([np.min(values), np.max(values)])
+        if self._action_ax is not None:
+            for (name, values) in actions.items():
+                values = np.mean(values, axis=0, dtype=float)
+                values = np.reshape(values, newshape=(values.shape[0], -1)).T
+                self._fig.canvas.restore_region(self._action_back[name])
+                self._action_plots[name].set_array(values)
+                self._action_ax[name].draw_artist(self._action_plots[name])
+                self._fig.canvas.blit(self._action_ax[name].bbox)
+                self._action_plots[name].set_clim([np.min(values), np.max(values)])
+                
         self._fig.canvas.draw()
         self._fig.canvas.flush_events()
         
@@ -1438,6 +1468,7 @@ class JaxBackpropPlanner:
         :param epochs: the maximum number of steps of gradient descent
         :param train_seconds: total time allocated for gradient descent
         :param plot_step: frequency to plot the plan and save result to disk
+        :param plot_kwargs: additional arguments to pass to the plotter
         :param model_params: optional model-parameters to override default
         :param policy_hyperparams: hyper-parameters for the policy/plan, such as
         weights for sigmoid wrapping boolean actions
@@ -1473,6 +1504,7 @@ class JaxBackpropPlanner:
                            epochs: int=999999,
                            train_seconds: float=120.,
                            plot_step: Optional[int]=None,
+                           plot_kwargs: Optional[Dict[str, Any]]=None,
                            model_params: Optional[Dict[str, Any]]=None,
                            policy_hyperparams: Optional[Dict[str, Any]]=None,
                            subs: Optional[Dict[str, Any]]=None,
@@ -1489,6 +1521,7 @@ class JaxBackpropPlanner:
         :param epochs: the maximum number of steps of gradient descent
         :param train_seconds: total time allocated for gradient descent
         :param plot_step: frequency to plot the plan and save result to disk
+        :param plot_kwargs: additional arguments to pass to the plotter
         :param model_params: optional model-parameters to override default
         :param policy_hyperparams: hyper-parameters for the policy/plan, such as
         weights for sigmoid wrapping boolean actions
@@ -1540,6 +1573,7 @@ class JaxBackpropPlanner:
                   f'    provide_param_guess={guess is not None}\n'
                   f'    test_rolling_window={test_rolling_window}\n' 
                   f'    plot_frequency     ={plot_step}\n'
+                  f'    plot_kwargs        ={plot_kwargs}\n'
                   f'    print_summary      ={print_summary}\n'
                   f'    print_progress     ={print_progress}\n')
             if self.compiled.relaxations:
@@ -1590,7 +1624,9 @@ class JaxBackpropPlanner:
         if plot_step is None or plot_step <= 0 or plt is None:
             plot = None
         else:
-            plot = JaxPlannerPlot(self.rddl, self.horizon)
+            if plot_kwargs is None:
+                plot_kwargs = {}
+            plot = JaxPlannerPlot(self.rddl, self.horizon, **plot_kwargs)
         xticks, loss_values = [], []
         
         # training loop
