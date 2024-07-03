@@ -1027,19 +1027,20 @@ class JaxPlannerPlot:
     '''Supports plotting and visualization of a JAX policy in real time.'''
     
     def __init__(self, rddl: RDDLPlanningModel, horizon: int) -> None:
-        self._fig, axes = plt.subplots(1 + len(rddl.action_fluents))
+        self._fig, axes = plt.subplots(2 + len(rddl.action_fluents))
         
         # prepare the loss plot
         self._loss_ax = axes[0]
+        self._hist_ax = axes[1]
         self._loss_ax.autoscale(enable=True)
-        self._loss_ax.set_xlabel('decision epoch')
+        self._loss_ax.set_xlabel('training time')
         self._loss_ax.set_ylabel('loss value')
         self._loss_plot = self._loss_ax.plot(
             [], [], linestyle=':', marker='o', markersize=2)[0]
         self._loss_back = self._fig.canvas.copy_from_bbox(self._loss_ax.bbox)
         
         # prepare the action plots
-        self._action_ax = {name: axes[idx + 1]
+        self._action_ax = {name: axes[idx + 2]
                            for (idx, name) in enumerate(rddl.action_fluents)}
         self._action_plots = {}
         for name in rddl.action_fluents:
@@ -1065,7 +1066,7 @@ class JaxPlannerPlot:
         plt.tight_layout()
         plt.show(block=False)
         
-    def redraw(self, xticks, losses, actions) -> None:
+    def redraw(self, xticks, losses, actions, returns) -> None:
         
         # draw the loss curve
         self._fig.canvas.restore_region(self._loss_back)
@@ -1074,6 +1075,10 @@ class JaxPlannerPlot:
         self._loss_ax.set_xlim([0, len(xticks)])
         self._loss_ax.set_ylim([np.min(losses), np.max(losses)])
         self._loss_ax.draw_artist(self._loss_plot)
+        self._hist_ax.clear()
+        self._hist_ax.set_xlabel('loss value')
+        self._hist_ax.set_ylabel('density')
+        self._hist_ax.violinplot(returns, vert=False, showmeans=True)
         self._fig.canvas.blit(self._loss_ax.bbox)
         
         # draw the actions
@@ -1090,7 +1095,7 @@ class JaxPlannerPlot:
         
     def close(self) -> None:
         plt.close(self._fig)
-        del self._loss_ax, self._action_ax, \
+        del self._loss_ax, self._hist_ax, self._action_ax, \
             self._loss_plot, self._action_plots, self._fig, \
             self._loss_back, self._action_back
 
@@ -1627,7 +1632,8 @@ class JaxBackpropPlanner:
                 action_values = {name: values 
                                  for (name, values) in log['fluents'].items()
                                  if name in self.rddl.action_fluents}
-                plot.redraw(xticks, loss_values, action_values)
+                returns = -np.sum(np.asarray(log['reward']), axis=1)
+                plot.redraw(xticks, loss_values, action_values, returns)
             
             # if the progress bar is used
             elapsed = time.time() - start_time - elapsed_outside_loop
