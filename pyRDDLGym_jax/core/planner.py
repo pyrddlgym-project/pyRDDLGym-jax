@@ -1139,9 +1139,9 @@ class JaxPlannerStatus(Enum):
     NORMAL = 0
     NO_PROGRESS = 1
     PRECONDITION_POSSIBLY_UNSATISFIED = 2
-    TIME_BUDGET_REACHED = 3
-    ITER_BUDGET_REACHED = 4
-    INVALID_GRADIENT = 5
+    INVALID_GRADIENT = 3
+    TIME_BUDGET_REACHED = 4
+    ITER_BUDGET_REACHED = 5
     
     def is_failure(self) -> bool:
         return self.value >= 3
@@ -1639,9 +1639,18 @@ class JaxBackpropPlanner:
             
             # update the parameters of the plan
             key, subkey = random.split(key)
-            policy_params, converged, opt_state, opt_aux, train_loss, train_log = \
+            policy_params, converged, opt_state, opt_aux, \
+            train_loss, train_log = \
                 self.update(subkey, policy_params, policy_hyperparams,
                             train_subs, model_params, opt_state, opt_aux)
+            
+            # no progress
+            grad_norm_zero, _ = jax.tree_util.tree_flatten(
+                jax.tree_map(lambda x: np.allclose(x, 0), train_log['grad']))
+            if np.all(grad_norm_zero):
+                status = JaxPlannerStatus.NO_PROGRESS
+             
+            # constraint satisfaction problem
             if not np.all(converged):
                 raise_warning(
                     'Projected gradient method for satisfying action concurrency '
@@ -1649,13 +1658,18 @@ class JaxBackpropPlanner:
                     'invalid for the current instance.', 'red')
                 status = JaxPlannerStatus.PRECONDITION_POSSIBLY_UNSATISFIED
             
-            # evaluate losses
+            # numerical error
+            if not np.isfinite(train_loss):
+                raise_warning(
+                    f'Aborting JAX planner due to invalid train loss {train_loss}.',
+                    'red')
+                status = JaxPlannerStatus.INVALID_GRADIENT
+              
+            # evaluate test losses and record best plan so far
             test_loss, log = self.test_loss(
                 subkey, policy_params, policy_hyperparams,
                 test_subs, model_params_test)
             test_loss = rolling_test_loss.update(test_loss)
-            
-            # record the best plan so far
             if test_loss < best_loss:
                 best_params, best_loss, best_grad = \
                     policy_params, test_loss, train_log['grad']
@@ -1684,19 +1698,6 @@ class JaxBackpropPlanner:
                 status = JaxPlannerStatus.TIME_BUDGET_REACHED
             if it >= epochs - 1:
                 status = JaxPlannerStatus.ITER_BUDGET_REACHED
-            
-            # numerical error
-            if not np.isfinite(train_loss):
-                raise_warning(
-                    f'Aborting JAX planner due to invalid train loss {train_loss}.',
-                    'red')
-                status = JaxPlannerStatus.INVALID_GRADIENT
-            
-            # no progress
-            grad_norm_zero, _ = jax.tree_util.tree_flatten(
-                jax.tree_map(lambda x: np.allclose(x, 0), train_log['grad']))
-            if np.all(grad_norm_zero):
-                status = JaxPlannerStatus.NO_PROGRESS
             
             # return a callback
             start_time_outside = time.time()
