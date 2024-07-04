@@ -1971,7 +1971,7 @@ def entropic_utility(returns: jnp.ndarray, beta: float) -> float:
 
 @jax.jit
 def mean_variance_utility(returns: jnp.ndarray, beta: float) -> float:
-    return jnp.mean(returns) - (beta / 2.0) * jnp.var(returns)
+    return jnp.mean(returns) - 0.5 * beta * jnp.var(returns)
     
 
 @jax.jit
