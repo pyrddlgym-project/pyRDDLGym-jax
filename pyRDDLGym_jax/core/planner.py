@@ -1854,8 +1854,6 @@ class JaxLineSearchPlanner(JaxBackpropPlanner):
     linear search gradient descent, with the Armijo condition.'''
     
     def __init__(self, *args,
-                 optimizer: Callable[..., optax.GradientTransformation]=optax.sgd,
-                 optimizer_kwargs: Kwargs={'learning_rate': 1.0},
                  decay: float=0.8,
                  c: float=0.1,
                  step_max: float=1.0,
@@ -1878,11 +1876,7 @@ class JaxLineSearchPlanner(JaxBackpropPlanner):
             raise_warning('clip_grad parameter conflicts with '
                           'line search planner and will be ignored.', 'red')
             del kwargs['clip_grad']
-        super(JaxLineSearchPlanner, self).__init__(
-            *args,
-            optimizer=optimizer,
-            optimizer_kwargs=optimizer_kwargs,
-            **kwargs)
+        super(JaxLineSearchPlanner, self).__init__(*args, **kwargs)
         
     def summarize_hyperparameters(self) -> None:
         super(JaxLineSearchPlanner, self).summarize_hyperparameters()
