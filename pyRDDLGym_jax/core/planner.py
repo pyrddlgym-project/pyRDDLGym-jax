@@ -1891,17 +1891,19 @@ class JaxBackpropPlanner:
                 raise ValueError(f'State dictionary passed to the JAX policy is '
                                  f'grounded, since it contains the key <{var}>, '
                                  f'but a vectorized environment is required: '
-                                 f'please make sure vectorized=True in the RDDLEnv.')
+                                 f'make sure vectorized = True in the RDDLEnv.')
             
             # must be numeric array
             # exception is for POMDPs at 1st epoch when observ-fluents are None
-            if not jnp.issubdtype(values.dtype, jnp.number) \
-            and not jnp.issubdtype(values.dtype, jnp.bool_):
+            dtype = np.atleast_1d(values).dtype
+            if not jnp.issubdtype(dtype, jnp.number) \
+            and not jnp.issubdtype(dtype, jnp.bool_):
                 if step == 0 and var in self.rddl.observ_fluents:
                     subs[var] = self.test_compiled.init_values[var]
                 else:
-                    raise ValueError(f'Values assigned to pvariable <{var}> are '
-                                     f'non-numeric of type {values.dtype}: {values}.')
+                    raise ValueError(
+                        f'Values {values} assigned to p-variable <{var}> are '
+                        f'non-numeric of type {dtype}.')
             
         # cast device arrays to numpy
         actions = self.test_policy(key, params, policy_hyperparams, step, subs)
