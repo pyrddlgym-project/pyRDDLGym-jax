@@ -219,6 +219,7 @@ class JaxRDDLCompilerWithGrad(JaxRDDLCompiler):
         :param *kwargs: keyword arguments to pass to base compiler
         '''
         super(JaxRDDLCompilerWithGrad, self).__init__(*args, **kwargs)
+        
         self.logic = logic
         self.logic.set_use64bit(self.use64bit)
         if cpfs_without_grad is None:
@@ -226,9 +227,14 @@ class JaxRDDLCompilerWithGrad(JaxRDDLCompiler):
         self.cpfs_without_grad = cpfs_without_grad
         
         # actions and CPFs must be continuous
-        raise_warning('Initial values of pvariables will be cast to real.')   
+        pvars_cast = set()
         for (var, values) in self.init_values.items():
             self.init_values[var] = np.asarray(values, dtype=self.REAL) 
+            if not np.issubdtype(np.atleast_1d(values).dtype, np.floating):
+                pvars_cast.add(var)
+        if pvars_cast:
+            raise_warning(f'JAX gradient compiler requires that initial values '
+                          f'of p-variables {pvars_cast} be cast to float.')   
         
         # overwrite basic operations with fuzzy ones
         self.RELATIONAL_OPS = {
@@ -275,20 +281,29 @@ class JaxRDDLCompilerWithGrad(JaxRDDLCompiler):
         return _jax_wrapped_stop_grad
         
     def _compile_cpfs(self, info):
-        raise_warning('CPFs outputs will be cast to real.')      
+        cpfs_cast = set()   
         jax_cpfs = {}
         for (_, cpfs) in self.levels.items():
             for cpf in cpfs:
                 _, expr = self.rddl.cpfs[cpf]
                 jax_cpfs[cpf] = self._jax(expr, info, dtype=self.REAL)
+                if self.rddl.variable_ranges[cpf] != 'real':
+                    cpfs_cast.add(cpf)
                 if cpf in self.cpfs_without_grad:
-                    raise_warning(f'CPF <{cpf}> stops gradient.')      
                     jax_cpfs[cpf] = self._jax_stop_grad(jax_cpfs[cpf])
+                    
+        if cpfs_cast:
+            raise_warning(f'JAX gradient compiler requires that outputs of CPFs '
+                          f'{cpfs_cast} be cast to float.') 
+        if self.cpfs_without_grad:
+            raise_warning(f'User requested that gradients not flow '
+                          f'through CPFs {self.cpfs_without_grad}.')      
         return jax_cpfs
     
     def _jax_kron(self, expr, info):
         if self.logic.verbose:
-            raise_warning('KronDelta will be ignored.')            
+            raise_warning('JAX gradient compiler ignores KronDelta '
+                          'during compilation.')            
         arg, = expr.args
         arg = self._jax(arg, info)
         return arg
