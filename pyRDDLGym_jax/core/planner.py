@@ -364,7 +364,7 @@ class JaxPlan:
             # check invalid type
             if prange not in compiled.JAX_TYPES:
                 raise RDDLTypeError(
-                    f'Invalid range <{prange}. of action-fluent <{name}>, '
+                    f'Invalid range <{prange}> of action-fluent <{name}>, '
                     f'must be one of {set(compiled.JAX_TYPES.keys())}.')
                 
             # clip boolean to (0, 1), otherwise use the RDDL action bounds
@@ -607,7 +607,7 @@ class JaxStraightLinePlan(JaxPlan):
             if 1 < allowed_actions < bool_action_count:
                 raise RDDLNotImplementedError(
                     f'Straight-line plans with wrap_softmax currently '
-                    f'do not support max-nondef-actions = {allowed_actions} > 1.')
+                    f'do not support max-nondef-actions {allowed_actions} > 1.')
                 
             # potentially apply projection but to non-bool actions only
             self.projection = _jax_wrapped_slp_project_to_box
@@ -852,14 +852,33 @@ class JaxDeepReactivePolicy(JaxPlan):
         layer_sizes = {var: np.prod(shape, dtype=int) 
                        for (var, shape) in shapes.items()}
         layer_names = {var: f'output_{var}'.replace('-', '_') for var in shapes}
-        input_names = {var: f'{var}'.replace('-', '_') 
-                       for var in compiled.rddl.state_fluents}
         
+        # inputs for the policy network
         if rddl.observ_fluents:
             observed_vars = rddl.observ_fluents
         else:
             observed_vars = rddl.state_fluents
-
+        input_names = {var: f'{var}'.replace('-', '_') for var in observed_vars}
+        
+        # catch if input norm is applied to size 1 tensor
+        if normalize:
+            non_bool_dims = 0
+            for (var, values) in observed_vars.items():
+                if ranges[var] != 'bool':
+                    value_size = np.atleast_1d(values).size
+                    if normalize_per_layer and value_size == 1:
+                        raise_warning(
+                            f'Cannot apply layer norm to state fluent <{var}> '
+                            f'of size 1: setting normalize_per_layer = False.', 
+                            'red')
+                        normalize_per_layer = False
+                    non_bool_dims += value_size
+            if not normalize_per_layer and non_bool_dims == 1:
+                raise_warning(
+                    'Cannot apply layer norm to state fluents of total size 1: '
+                    'setting normalize = False.', 'red')
+                normalize = False
+        
         # convert subs dictionary into a state vector to feed to the MLP
         def _jax_wrapped_policy_input(subs):
             
@@ -1864,7 +1883,7 @@ class JaxBackpropPlanner:
                 if step == 0 and var in self.rddl.observ_fluents:
                     subs[var] = self.test_compiled.init_values[var]
                 else:
-                    raise ValueError(f'Values assigned to pvariable {var} are '
+                    raise ValueError(f'Values assigned to pvariable <{var}> are '
                                      f'non-numeric of type {values.dtype}: {values}.')
             
         # cast device arrays to numpy
