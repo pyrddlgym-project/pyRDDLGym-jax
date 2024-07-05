@@ -13,6 +13,7 @@ where:
     <domain> is the name of a domain located in the /Examples directory
     <instance> is the instance number
     <method> is either slp, drp, or replan
+    <episodes> is the optional number of evaluation rollouts
 '''
 import os
 import sys
