@@ -308,7 +308,8 @@ class JaxPlan:
         self._train_policy = None
         self._test_policy = None
         self._projection = None
-    
+        self.bounds = None
+        
     def summarize_hyperparameters(self) -> None:
         pass
         
@@ -440,6 +441,7 @@ class JaxStraightLinePlan(JaxPlan):
         print(f'policy hyper-parameters:\n'
               f'    initializer          ={type(self._initializer_base).__name__}\n'
               f'constraint-sat strategy (simple):\n'
+              f'    parsed_action_bounds ={self.bounds}\n'
               f'    wrap_sigmoid         ={self._wrap_sigmoid}\n'
               f'    wrap_sigmoid_min_prob={self._min_action_prob}\n'
               f'    wrap_non_bool        ={self._wrap_non_bool}\n'
@@ -795,12 +797,14 @@ class JaxDeepReactivePolicy(JaxPlan):
             
     def summarize_hyperparameters(self) -> None:
         print(f'policy hyper-parameters:\n'
-              f'    topology        ={self._topology}\n'
-              f'    activation_fn   ={self._activations[0].__name__}\n'
-              f'    initializer     ={type(self._initializer_base).__name__}\n'
-              f'    apply_layer_norm={self._normalize}\n'
-              f'    layer_norm_args ={self._normalizer_kwargs}\n'
-              f'    wrap_non_bool   ={self._wrap_non_bool}')
+              f'    topology            ={self._topology}\n'
+              f'    activation_fn       ={self._activations[0].__name__}\n'
+              f'    initializer         ={type(self._initializer_base).__name__}\n'
+              f'    apply_layer_norm    ={self._normalize}\n'
+              f'    layer_norm_args     ={self._normalizer_kwargs}\n'
+              f'constraint-sat strategy:\n'
+              f'    parsed_action_bounds={self.bounds}\n'
+              f'    wrap_non_bool       ={self._wrap_non_bool}')
     
     def compile(self, compiled: JaxRDDLCompilerWithGrad,
                 _bounds: Bounds, 
@@ -1294,21 +1298,21 @@ class JaxBackpropPlanner:
         
     def summarize_hyperparameters(self) -> None:
         print(f'objective hyper-parameters:\n'
-              f'    utility_fn      ={self.utility.__name__}\n'
-              f'    utility args    ={self.utility_kwargs}\n'
-              f'    use_symlog      ={self.use_symlog_reward}\n'
-              f'    lookahead       ={self.horizon}\n'
-              f'    action_bounds   ={self._action_bounds}\n'
-              f'    fuzzy logic type={type(self.logic).__name__}\n'
-              f'    nonfluents exact={self.compile_non_fluent_exact}\n'
-              f'    cpfs_no_gradient={self.cpfs_without_grad}\n'
+              f'    utility_fn        ={self.utility.__name__}\n'
+              f'    utility args      ={self.utility_kwargs}\n'
+              f'    use_symlog        ={self.use_symlog_reward}\n'
+              f'    lookahead         ={self.horizon}\n'
+              f'    user_action_bounds={self._action_bounds}\n'
+              f'    fuzzy logic type  ={type(self.logic).__name__}\n'
+              f'    nonfluents exact  ={self.compile_non_fluent_exact}\n'
+              f'    cpfs_no_gradient  ={self.cpfs_without_grad}\n'
               f'optimizer hyper-parameters:\n'
-              f'    use_64_bit      ={self.use64bit}\n'
-              f'    optimizer       ={self._optimizer_name.__name__}\n'
-              f'    optimizer args  ={self._optimizer_kwargs}\n'
-              f'    clip_gradient   ={self.clip_grad}\n'
-              f'    batch_size_train={self.batch_size_train}\n'
-              f'    batch_size_test ={self.batch_size_test}')
+              f'    use_64_bit        ={self.use64bit}\n'
+              f'    optimizer         ={self._optimizer_name.__name__}\n'
+              f'    optimizer args    ={self._optimizer_kwargs}\n'
+              f'    clip_gradient     ={self.clip_grad}\n'
+              f'    batch_size_train  ={self.batch_size_train}\n'
+              f'    batch_size_test   ={self.batch_size_test}')
         self.plan.summarize_hyperparameters()
         self.logic.summarize_hyperparameters()
         
@@ -1350,6 +1354,7 @@ class JaxBackpropPlanner:
             policy=self.plan.train_policy,
             n_steps=self.horizon,
             n_batch=self.batch_size_train)
+        self.train_rollouts = train_rollouts
         
         test_rollouts = self.test_compiled.compile_rollouts(
             policy=self.plan.test_policy,
@@ -1462,7 +1467,7 @@ class JaxBackpropPlanner:
     # ===========================================================================
 
     def optimize(self, *args, **kwargs) -> Dict[str, Any]:
-        ''' Compute an optimal policy or plan. Return the callback from training.
+        '''Compute an optimal policy or plan. Return the callback from training.
         
         :param key: JAX PRNG key (derived from clock if not provided)
         :param epochs: the maximum number of steps of gradient descent
@@ -1598,7 +1603,7 @@ class JaxBackpropPlanner:
                               'from the RDDL files.')
         train_subs, test_subs = self._batched_init_subs(subs)
         
-        # initialize, model parameters
+        # initialize model parameters
         if model_params is None:
             model_params = self.compiled.model_params
         model_params_test = self.test_compiled.model_params
@@ -1925,7 +1930,8 @@ class JaxLineSearchPlanner(JaxBackpropPlanner):
             step = lrmax / decay
             f_step = np.inf
             best_f, best_step, best_params, best_state = np.inf, None, None, None
-            while f_step > f - c * step * gnorm2 and step * decay >= lrmin:
+            while (f_step > f - c * step * gnorm2 and step * decay >= lrmin) \
+            or not trials:
                 trials += 1
                 step *= decay
                 f_step, new_params, new_state = _jax_wrapped_line_search_trial(
