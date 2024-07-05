@@ -438,10 +438,12 @@ class JaxStraightLinePlan(JaxPlan):
         self._max_constraint_iter = max_constraint_iter
         
     def summarize_hyperparameters(self) -> None:
+        bounds = '\n        '.join(
+            map(lambda kv: f'{kv[0]}: {kv[1]}', self.bounds.items()))
         print(f'policy hyper-parameters:\n'
               f'    initializer          ={type(self._initializer_base).__name__}\n'
               f'constraint-sat strategy (simple):\n'
-              f'    parsed_action_bounds ={self.bounds}\n'
+              f'    parsed_action_bounds =\n        {bounds}\n'
               f'    wrap_sigmoid         ={self._wrap_sigmoid}\n'
               f'    wrap_sigmoid_min_prob={self._min_action_prob}\n'
               f'    wrap_non_bool        ={self._wrap_non_bool}\n'
@@ -768,6 +770,7 @@ class JaxDeepReactivePolicy(JaxPlan):
                  activation: Activation=jnp.tanh,
                  initializer: hk.initializers.Initializer=hk.initializers.VarianceScaling(scale=2.0),
                  normalize: bool=False, 
+                 normalize_per_layer: bool=False,
                  normalizer_kwargs: Optional[Kwargs]=None,
                  wrap_non_bool: bool=False) -> None:
         '''Creates a new deep reactive policy in JAX.
@@ -777,6 +780,8 @@ class JaxDeepReactivePolicy(JaxPlan):
         :param activation: function to apply after each layer of the policy
         :param initializer: weight initialization
         :param normalize: whether to apply layer norm to the inputs
+        :param normalize_per_layer: whether to apply layer norm to each input
+        individually (only active if normalize is True)
         :param normalizer_kwargs: if normalize is True, apply additional arguments
         to layer norm
         :param wrap_non_bool: whether to wrap real or int action fluent parameters
@@ -790,20 +795,24 @@ class JaxDeepReactivePolicy(JaxPlan):
         self._initializer_base = initializer
         self._initializer = initializer
         self._normalize = normalize
+        self._normalize_per_layer = normalize_per_layer
         if normalizer_kwargs is None:
             normalizer_kwargs = {'create_offset': True, 'create_scale': True}
         self._normalizer_kwargs = normalizer_kwargs
         self._wrap_non_bool = wrap_non_bool
             
     def summarize_hyperparameters(self) -> None:
+        bounds = '\n        '.join(
+            map(lambda kv: f'{kv[0]}: {kv[1]}', self.bounds.items()))
         print(f'policy hyper-parameters:\n'
               f'    topology            ={self._topology}\n'
               f'    activation_fn       ={self._activations[0].__name__}\n'
               f'    initializer         ={type(self._initializer_base).__name__}\n'
-              f'    apply_layer_norm    ={self._normalize}\n'
-              f'    layer_norm_args     ={self._normalizer_kwargs}\n'
+              f'    apply_input_norm    ={self._normalize}\n'
+              f'    input_norm_layerwise={self._normalize_per_layer}\n'
+              f'    input_norm_args     ={self._normalizer_kwargs}\n'
               f'constraint-sat strategy:\n'
-              f'    parsed_action_bounds={self.bounds}\n'
+              f'    parsed_action_bounds=\n        {bounds}\n'
               f'    wrap_non_bool       ={self._wrap_non_bool}')
     
     def compile(self, compiled: JaxRDDLCompilerWithGrad,
@@ -836,12 +845,15 @@ class JaxDeepReactivePolicy(JaxPlan):
                    
         ranges = rddl.variable_ranges
         normalize = self._normalize
+        normalize_per_layer = self._normalize_per_layer
         wrap_non_bool = self._wrap_non_bool
         init = self._initializer
         layers = list(enumerate(zip(self._topology, self._activations)))
         layer_sizes = {var: np.prod(shape, dtype=int) 
                        for (var, shape) in shapes.items()}
         layer_names = {var: f'output_{var}'.replace('-', '_') for var in shapes}
+        input_names = {var: f'{var}'.replace('-', '_') 
+                       for var in compiled.rddl.state_fluents}
         
         if rddl.observ_fluents:
             observed_vars = rddl.observ_fluents
@@ -852,6 +864,7 @@ class JaxDeepReactivePolicy(JaxPlan):
         def _jax_wrapped_policy_input(subs):
             
             # concatenate all state variables into a single vector
+            # optionally apply layer norm to each input tensor
             states_bool, states_non_bool = [], []
             non_bool_dims = 0
             for (var, value) in subs.items():
@@ -860,12 +873,18 @@ class JaxDeepReactivePolicy(JaxPlan):
                     if ranges[var] == 'bool':
                         states_bool.append(state)
                     else:
+                        if normalize and normalize_per_layer:
+                            normalizer = hk.LayerNorm(
+                                axis=-1, param_axis=-1, 
+                                name=f'input_norm_{input_names[var]}', 
+                                **self._normalizer_kwargs)
+                            state = normalizer(state)
                         states_non_bool.append(state)
                         non_bool_dims += state.size
             state = jnp.concatenate(states_non_bool + states_bool)
             
             # optionally perform layer normalization on the non-bool inputs
-            if normalize and non_bool_dims:
+            if normalize and not normalize_per_layer and non_bool_dims:
                 normalizer = hk.LayerNorm(
                     axis=-1, param_axis=-1, name='input_norm', 
                     **self._normalizer_kwargs)
