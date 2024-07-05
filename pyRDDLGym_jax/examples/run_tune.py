@@ -31,15 +31,14 @@ from pyRDDLGym_jax.core.planner import load_config
 def main(domain, instance, method, trials=5, iters=20, workers=4):
     
     # set up the environment   
-    env = pyRDDLGym.make(domain, instance, vectorized=True, enforce_action_constraints=True)
+    env = pyRDDLGym.make(domain, instance, vectorized=True)
     
     # load the config file with planner settings
     abs_path = os.path.dirname(os.path.abspath(__file__))
     config_path = os.path.join(abs_path, 'configs', f'{domain}_{method}.cfg')
     if not os.path.isfile(config_path):
-        raise_warning(f'Config file {domain}_{method}.cfg was not found, '
-                      f'using default config (parameters could be suboptimal).', 
-                      'red')
+        raise_warning(f'Config file {config_path} was not found, '
+                      f'using default_{method}.cfg.', 'red')
         config_path = os.path.join(abs_path, 'configs', f'default_{method}.cfg') 
     planner_args, plan_args, train_args = load_config(config_path)
     
@@ -49,8 +48,7 @@ def main(domain, instance, method, trials=5, iters=20, workers=4):
     elif method == 'drp':
         tuning_class = JaxParameterTuningDRP    
     elif method == 'replan':
-        tuning_class = JaxParameterTuningSLPReplan
-    
+        tuning_class = JaxParameterTuningSLPReplan    
     tuning = tuning_class(env=env,
                           train_epochs=train_args['epochs'],
                           timeout_training=train_args['train_seconds'],
@@ -60,6 +58,7 @@ def main(domain, instance, method, trials=5, iters=20, workers=4):
                           num_workers=workers,
                           gp_iters=iters)
     
+    # perform tuning and report best parameters
     best = tuning.tune(key=train_args['key'], filename=f'gp_{method}', 
                        save_plot=True)
     print(f'best parameters found: {best}')

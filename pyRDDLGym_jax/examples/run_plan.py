@@ -29,29 +29,26 @@ from pyRDDLGym_jax.core.planner import (
 def main(domain, instance, method, episodes=1):
     
     # set up the environment
-    env = pyRDDLGym.make(domain, instance, vectorized=True, enforce_action_constraints=True)
+    env = pyRDDLGym.make(domain, instance, vectorized=True)
     
     # load the config file with planner settings
     abs_path = os.path.dirname(os.path.abspath(__file__))
     config_path = os.path.join(abs_path, 'configs', f'{domain}_{method}.cfg') 
     if not os.path.isfile(config_path):
-        raise_warning(f'Config file {domain}_{method}.cfg was not found, '
-                      f'using default config (parameters could be suboptimal).', 
-                      'red')
+        raise_warning(f'Config file {config_path} was not found, '
+                      f'using default_{method}.cfg.', 'red')
         config_path = os.path.join(abs_path, 'configs', f'default_{method}.cfg') 
     planner_args, _, train_args = load_config(config_path)
     
     # create the planning algorithm
     planner = JaxBackpropPlanner(rddl=env.model, **planner_args)
     
-    # create the controller   
+    # evaluate the controller   
     if method == 'replan':
         controller = JaxOnlineController(planner, **train_args)
     else:
-        controller = JaxOfflineController(planner, **train_args)
-    
+        controller = JaxOfflineController(planner, **train_args)    
     controller.evaluate(env, episodes=episodes, verbose=True, render=True)
-    
     env.close()
         
         
