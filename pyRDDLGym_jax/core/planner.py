@@ -1,5 +1,3 @@
-__version__ = '0.2'
-
 from ast import literal_eval
 from collections import deque
 import configparser
@@ -25,6 +23,8 @@ Kwargs = Dict[str, Any]
 Pytree = Any
 
 from pyRDDLGym.core.debug.exception import raise_warning
+
+from pyRDDLGym_jax import __version__
 
 # try to import matplotlib, if failed then skip plotting
 try:
@@ -1352,6 +1352,7 @@ class JaxBackpropPlanner:
               f'JAX Planner version {__version__}\n' 
               f'Python {sys.version}\n'
               f'jax {jax.version.__version__}, jaxlib {jaxlib_version}, '
+              f'optax {optax.__version__}, haiku {hk.__version__}, '
               f'numpy {np.__version__}\n'
               f'devices: {devices_short}\n')
         
