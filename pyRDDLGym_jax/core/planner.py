@@ -1522,6 +1522,94 @@ class JaxBackpropPlanner:
         
         return init_train, init_test
     
+    def as_optimization_problem(
+            self, key: Optional[random.PRNGKey]=None, 
+            policy_hyperparams: Optional[Pytree]=None,
+            loss_function_updates_key: bool=True,
+            grad_function_updates_key: bool=False) -> Tuple[Callable, Callable, np.ndarray, Callable]:
+        '''Returns a function that computes the loss and a function that 
+        computes gradient of the return as a 1D vector given a 1D representation 
+        of policy parameters. These functions are designed to be compatible with 
+        off-the-shelf optimizers such as scipy. 
+        
+        Also returns the initial parameter vector to seed an optimizer, 
+        as well as a mapping that recovers the parameter pytree from the vector.
+        The PRNG key is updated internally starting from the optional given key.
+        
+        Constraints on actions, if they are required, cannot be constructed 
+        automatically in the general case. The user should build constraints
+        for each problem in the format required by the downstream optimizer.
+        
+        :param key: JAX PRNG key (derived from clock if not provided)
+        :param policy_hyperparameters: hyper-parameters for the policy/plan, 
+        such as weights for sigmoid wrapping boolean actions (defaults to 1
+        for all action-fluents if not provided)
+        :param loss_function_updates_key: if True, the loss function 
+        updates the PRNG key internally independently of the grad function
+        :param grad_function_updates_key: if True, the gradient function
+        updates the PRNG key internally independently of the loss function.
+        '''
+        
+        # if PRNG key is not provided
+        if key is None:
+            key = random.PRNGKey(round(time.time() * 1000))
+            
+        # initialize the initial fluents, model parameters, policy hyper-params
+        subs = self.test_compiled.init_values
+        train_subs, _ = self._batched_init_subs(subs)
+        model_params = self.compiled.model_params
+        if policy_hyperparams is None:
+            raise_warning('policy_hyperparams is not set, setting 1.0 for '
+                          'all action-fluents which could be suboptimal.')
+            policy_hyperparams = {action: 1.0 
+                                  for action in self.rddl.action_fluents}
+                
+        # initialize the policy parameters
+        params_guess, *_ = self.initialize(key, policy_hyperparams, train_subs)
+        guess_1d, unravel_fn = jax.flatten_util.ravel_pytree(params_guess)  
+        guess_1d = np.asarray(guess_1d)      
+        
+        # computes the training loss function and its 1D gradient
+        loss_fn = self._jax_loss(self.train_rollouts)
+        
+        @jax.jit
+        def _loss_with_key(key, params_1d):
+            policy_params = unravel_fn(params_1d)
+            loss_val, _ = loss_fn(key, policy_params, policy_hyperparams, 
+                                  train_subs, model_params)
+            return loss_val
+        
+        @jax.jit
+        def _grad_with_key(key, params_1d):
+            policy_params = unravel_fn(params_1d)
+            grad_fn = jax.grad(loss_fn, argnums=1, has_aux=True)
+            grad_val, _ = grad_fn(key, policy_params, policy_hyperparams, 
+                                  train_subs, model_params)
+            grad_1d = jax.flatten_util.ravel_pytree(grad_val)[0]
+            return grad_1d
+        
+        def _loss_function(params_1d):
+            nonlocal key
+            if loss_function_updates_key:
+                key, subkey = random.split(key)
+            else:
+                subkey = key
+            loss_val = _loss_with_key(subkey, params_1d)
+            loss_val = float(loss_val)
+            return loss_val
+        
+        def _grad_function(params_1d):
+            nonlocal key
+            if grad_function_updates_key:
+                key, subkey = random.split(key)
+            else:
+                subkey = key
+            grad = _grad_with_key(subkey, params_1d)
+            grad = np.asarray(grad)
+            return grad
+        
+        return _loss_function, _grad_function, guess_1d, jax.jit(unravel_fn)
+        
     # ===========================================================================
     # OPTIMIZE API
     # ===========================================================================
