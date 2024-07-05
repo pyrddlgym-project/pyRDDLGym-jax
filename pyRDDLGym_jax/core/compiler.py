@@ -14,8 +14,7 @@ try:
 except Exception:
     raise_warning('Failed to import tensorflow-probability: '
                   'compilation of some complex distributions '
-                  '(Binomial, Negative-Binomial, Multinomial) will fail. '
-                  'Please ensure this package is installed correctly.', 'red')
+                  '(Binomial, Negative-Binomial, Multinomial) will fail.', 'red')
     traceback.print_exc()
     tfp = None
 
