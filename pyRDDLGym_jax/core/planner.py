@@ -115,7 +115,8 @@ def _load_config(config, args):
     # policy initialization
     plan_initializer = plan_kwargs.get('initializer', None)
     if plan_initializer is not None:
-        initializer = _getattr_any(packages=[initializers], item=plan_initializer)
+        initializer = _getattr_any(
+            packages=[initializers, hk.initializers], item=plan_initializer)
         if initializer is None:
             raise_warning(
                 f'Ignoring invalid initializer <{plan_initializer}>.', 'red')
@@ -132,7 +133,8 @@ def _load_config(config, args):
     # policy activation
     plan_activation = plan_kwargs.get('activation', None)
     if plan_activation is not None:
-        activation = _getattr_any(packages=[jax.nn, jax.numpy], item=plan_activation)
+        activation = _getattr_any(
+            packages=[jax.nn, jax.numpy], item=plan_activation)
         if activation is None:
             raise_warning(
                 f'Ignoring invalid activation <{plan_activation}>.', 'red')
@@ -445,6 +447,7 @@ class JaxStraightLinePlan(JaxPlan):
         use_new_projection = True
         '''
         super(JaxStraightLinePlan, self).__init__()
+        
         self._initializer_base = initializer
         self._initializer = initializer
         self._wrap_sigmoid = wrap_sigmoid
@@ -458,7 +461,7 @@ class JaxStraightLinePlan(JaxPlan):
         bounds = '\n        '.join(
             map(lambda kv: f'{kv[0]}: {kv[1]}', self.bounds.items()))
         print(f'policy hyper-parameters:\n'
-              f'    initializer          ={type(self._initializer_base).__name__}\n'
+              f'    initializer          ={self._initializer_base}\n'
               f'constraint-sat strategy (simple):\n'
               f'    parsed_action_bounds =\n        {bounds}\n'
               f'    wrap_sigmoid         ={self._wrap_sigmoid}\n'
@@ -755,14 +758,14 @@ class JaxStraightLinePlan(JaxPlan):
             for (var, shape) in shapes.items():
                 if ranges[var] != 'bool' or not stack_bool_params: 
                     key, subkey = random.split(key)
-                    param = init(subkey, shape, dtype=compiled.REAL)
+                    param = init(key=subkey, shape=shape, dtype=compiled.REAL)
                     if ranges[var] == 'bool':
                         param += bool_threshold
                     params[var] = param
             if stack_bool_params:
                 key, subkey = random.split(key)
                 bool_shape = (horizon, bool_action_count)
-                bool_param = init(subkey, bool_shape, dtype=compiled.REAL)
+                bool_param = init(key=subkey, shape=bool_shape, dtype=compiled.REAL)
                 params[bool_key] = bool_param
             params, _ = _jax_wrapped_slp_project_to_box(params, hyperparams)
             return params
@@ -805,6 +808,7 @@ class JaxDeepReactivePolicy(JaxPlan):
         with non-linearity (e.g. sigmoid or ELU) to satisfy box constraints
         '''
         super(JaxDeepReactivePolicy, self).__init__()
+        
         if topology is None:
             topology = [128, 64]
         self._topology = topology
