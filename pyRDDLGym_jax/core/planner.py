@@ -15,6 +15,7 @@ import os
 import sys
 import termcolor
 import time
+import traceback
 from tqdm import tqdm
 from typing import Any, Callable, Dict, Generator, Optional, Set, Sequence, Tuple, Union
 
@@ -31,8 +32,9 @@ try:
     import matplotlib.pyplot as plt
     matplotlib.use('TkAgg')
 except Exception:
-    raise_warning('matplotlib is not installed, '
-                  'plotting functionality is disabled.', 'red')
+    raise_warning('failed to import matplotlib: '
+                  'plotting functionality will be disabled.', 'red')
+    traceback.print_exc()
     plt = None
             
 from pyRDDLGym.core.compiler.model import RDDLPlanningModel, RDDLLiftedModel
