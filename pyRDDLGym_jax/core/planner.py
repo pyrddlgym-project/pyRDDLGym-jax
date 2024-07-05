@@ -403,7 +403,7 @@ class JaxPlan:
                                     ~lower_finite & upper_finite,
                                     ~lower_finite & ~upper_finite]
             bounds[name] = (lower, upper)
-            raise_warning(f'Bounds of action fluent <{name}> set to {bounds[name]}.')
+            raise_warning(f'Bounds of action-fluent <{name}> set to {bounds[name]}.')
         return shapes, bounds, bounds_safe, cond_lists
     
     def _count_bool_actions(self, rddl: RDDLLiftedModel):
@@ -885,14 +885,14 @@ class JaxDeepReactivePolicy(JaxPlan):
                     value_size = np.atleast_1d(values).size
                     if normalize_per_layer and value_size == 1:
                         raise_warning(
-                            f'Cannot apply layer norm to state fluent <{var}> '
+                            f'Cannot apply layer norm to state-fluent <{var}> '
                             f'of size 1: setting normalize_per_layer = False.', 
                             'red')
                         normalize_per_layer = False
                     non_bool_dims += value_size
             if not normalize_per_layer and non_bool_dims == 1:
                 raise_warning(
-                    'Cannot apply layer norm to state fluents of total size 1: '
+                    'Cannot apply layer norm to state-fluents of total size 1: '
                     'setting normalize = False.', 'red')
                 normalize = False
         
