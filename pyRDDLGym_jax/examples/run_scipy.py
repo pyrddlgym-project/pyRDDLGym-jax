@@ -25,15 +25,14 @@ from pyRDDLGym_jax.core.planner import load_config, JaxBackpropPlanner, JaxOffli
 def main(domain, instance, method, episodes=1):
     
     # set up the environment
-    env = pyRDDLGym.make(domain, instance, vectorized=True, enforce_action_constraints=True)
+    env = pyRDDLGym.make(domain, instance, vectorized=True)
     
     # load the config file with planner settings
     abs_path = os.path.dirname(os.path.abspath(__file__))
     config_path = os.path.join(abs_path, 'configs', f'{domain}_slp.cfg') 
     if not os.path.isfile(config_path):
-        raise_warning(f'Config file {domain}_slp.cfg was not found, '
-                      f'using default config (parameters could be suboptimal).', 
-                      'red')
+        raise_warning(f'Config file {config_path} was not found, '
+                      f'using default_slp.cfg.', 'red')
         config_path = os.path.join(abs_path, 'configs', 'default_slp.cfg') 
     planner_args, _, train_args = load_config(config_path)
 
@@ -47,8 +46,7 @@ def main(domain, instance, method, episodes=1):
     
     # evaluate the optimal plan
     controller = JaxOfflineController(planner, params=params, **train_args)
-    controller.evaluate(env, episodes=episodes, verbose=True, render=True)
-    
+    controller.evaluate(env, episodes=episodes, verbose=True, render=True)    
     env.close()
         
         
