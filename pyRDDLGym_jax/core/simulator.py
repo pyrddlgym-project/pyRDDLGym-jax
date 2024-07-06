@@ -1,6 +1,7 @@
-import jax
 import time
 from typing import Dict, Optional
+
+import jax
 
 from pyRDDLGym.core.compiler.model import RDDLLiftedModel
 from pyRDDLGym.core.debug.exception import (
