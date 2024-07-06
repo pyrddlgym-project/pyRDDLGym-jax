@@ -469,7 +469,8 @@ class JaxStraightLinePlan(JaxPlan):
               f'    wrap_non_bool        ={self._wrap_non_bool}\n'
               f'constraint-sat strategy (complex):\n'
               f'    wrap_softmax         ={self._wrap_softmax}\n'
-              f'    use_new_projection   ={self._use_new_projection}')
+              f'    use_new_projection   ={self._use_new_projection}\n'
+              f'    max_projection_iters ={self._max_constraint_iter}')
     
     def compile(self, compiled: JaxRDDLCompilerWithGrad,
                 _bounds: Bounds, 
