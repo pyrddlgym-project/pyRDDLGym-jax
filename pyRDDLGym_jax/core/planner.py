@@ -2117,7 +2117,7 @@ class JaxLineSearchPlanner(JaxBackpropPlanner):
 @jax.jit
 def entropic_utility(returns: jnp.ndarray, beta: float) -> float:
     return (-1.0 / beta) * jax.scipy.special.logsumexp(
-            -beta * returns, b=1.0 / returns.size)
+        -beta * returns, b=1.0 / returns.size)
 
 
 @jax.jit
