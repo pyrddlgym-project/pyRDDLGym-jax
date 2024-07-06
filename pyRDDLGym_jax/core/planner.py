@@ -1916,7 +1916,7 @@ class JaxBackpropPlanner:
                   f'    iterations    ={it}\n'
                   f'    best_objective={-best_loss}\n'
                   f'    best_grad_norm={grad_norm}\n'
-                  f'diagnosis: {diagnosis}\n')
+                  f'    diagnosis: {diagnosis}\n')
     
     def _perform_diagnosis(self, last_iter_improve, 
                            train_return, test_return, best_return, grad_norm):
