@@ -109,7 +109,6 @@ class FuzzyLogic:
         :param complement: fuzzy operator for logical NOT
         :param comparison: fuzzy operator for comparisons (>, >=, <, ==, ~=, ...)
         :param weight: a sharpness parameter for sigmoid and softmax activations
-        :param error: an error parameter (e.g. floor) (smaller means better accuracy)
         :param debias: which functions to de-bias approximate on forward pass
         :param eps: small positive float to mitigate underflow
         :param verbose: whether to dump replacements and other info to console
@@ -507,22 +506,6 @@ class FuzzyLogic:
         sample = Gumbel01 + jnp.log(prob + self.eps)
         return sample
         
-    def bernoulli(self):
-        if self.verbose:
-            raise_warning('Using the replacement rule: '
-                          'Bernoulli(p) --> Gumbel-softmax(p)')
-        
-        jax_gs = self._gumbel_softmax
-        jax_argmax, jax_param = self.argmax()
-        
-        def _jax_wrapped_calc_bernoulli_approx(key, prob, param):
-            prob = jnp.stack([1.0 - prob, prob], axis=-1)
-            sample = jax_gs(key, prob)
-            sample = jax_argmax(sample, axis=-1, param=param)
-            return sample
-        
-        return _jax_wrapped_calc_bernoulli_approx, jax_param
-    
     def discrete(self):
         if self.verbose:
             raise_warning('Using the replacement rule: '
@@ -537,6 +520,16 @@ class FuzzyLogic:
             return sample
         
         return _jax_wrapped_calc_discrete_approx, jax_param
+    
+    def bernoulli(self):
+        jax_discrete, jax_param = self.discrete()
+        
+        def _jax_wrapped_calc_bernoulli_approx(key, prob, param):
+            prob = jnp.stack([1.0 - prob, prob], axis=-1)
+            sample = jax_discrete(key, prob, param)
+            return sample
+        
+        return _jax_wrapped_calc_bernoulli_approx, jax_param
         
 
 # UNIT TESTS

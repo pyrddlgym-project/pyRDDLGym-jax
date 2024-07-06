@@ -1165,16 +1165,17 @@ class JaxRDDLCompiler:
         return _jax_wrapped_if_then_else
     
     def _jax_switch(self, expr, info):
+        pred, *_ = expr.args
              
-        # if expression is non-fluent, always use the exact operation
-        if self.compile_non_fluent_exact and not self.traced.cached_is_fluent(expr):
+        # if predicate is non-fluent, always use the exact operation
+        # case conditions are currently only literals so they are non-fluent
+        if self.compile_non_fluent_exact and not self.traced.cached_is_fluent(pred):
             switch_op = JaxRDDLCompiler.EXACT_RDDL_TO_JAX_SWITCH
         else:
             switch_op = self.SWITCH_HELPER
         jax_switch, jax_param = self._unwrap(switch_op, expr.id, info)
         
         # recursively compile predicate
-        pred, *_ = expr.args  
         jax_pred = self._jax(pred, info)
         
         # recursively compile cases
