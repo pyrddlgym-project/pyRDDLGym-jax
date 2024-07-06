@@ -1,7 +1,8 @@
+from typing import Optional, Set
+
 import jax
 import jax.numpy as jnp
 import jax.random as random
-from typing import Optional, Set
 
 from pyRDDLGym.core.debug.exception import raise_warning
 

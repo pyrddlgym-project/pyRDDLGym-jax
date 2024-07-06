@@ -2,29 +2,36 @@ from ast import literal_eval
 from collections import deque
 import configparser
 from enum import Enum
-import haiku as hk
-import jax
-import jax.numpy as jnp
-import jax.random as random
-import jax.nn.initializers as initializers
-import numpy as np
-import optax
 import os
 import sys
-import termcolor
 import time
 import traceback
-from tqdm import tqdm
 from typing import Any, Callable, Dict, Generator, Optional, Set, Sequence, Tuple, Union
 
-Activation = Callable[[jnp.ndarray], jnp.ndarray]
-Bounds = Dict[str, Tuple[np.ndarray, np.ndarray]]
-Kwargs = Dict[str, Any]
-Pytree = Any
+import haiku as hk
+import jax
+import jax.nn.initializers as initializers
+import jax.numpy as jnp
+import jax.random as random
+import numpy as np
+import optax
+import termcolor
+from tqdm import tqdm
 
-from pyRDDLGym.core.debug.exception import raise_warning
+from pyRDDLGym.core.compiler.model import RDDLPlanningModel, RDDLLiftedModel
+from pyRDDLGym.core.debug.logger import Logger
+from pyRDDLGym.core.debug.exception import (
+    raise_warning,
+    RDDLNotImplementedError,
+    RDDLUndefinedVariableError,
+    RDDLTypeError
+)
+from pyRDDLGym.core.policy import BaseAgent
 
 from pyRDDLGym_jax import __version__
+from pyRDDLGym_jax.core import logic
+from pyRDDLGym_jax.core.compiler import JaxRDDLCompiler
+from pyRDDLGym_jax.core.logic import FuzzyLogic
 
 # try to import matplotlib, if failed then skip plotting
 try:
@@ -36,19 +43,11 @@ except Exception:
                   'plotting functionality will be disabled.', 'red')
     traceback.print_exc()
     plt = None
-            
-from pyRDDLGym.core.compiler.model import RDDLPlanningModel, RDDLLiftedModel
-from pyRDDLGym.core.debug.logger import Logger
-from pyRDDLGym.core.debug.exception import (
-    RDDLNotImplementedError,
-    RDDLUndefinedVariableError,
-    RDDLTypeError
-)
-from pyRDDLGym.core.policy import BaseAgent
-
-from pyRDDLGym_jax.core.compiler import JaxRDDLCompiler
-from pyRDDLGym_jax.core import logic
-from pyRDDLGym_jax.core.logic import FuzzyLogic
+    
+Activation = Callable[[jnp.ndarray], jnp.ndarray]
+Bounds = Dict[str, Tuple[np.ndarray, np.ndarray]]
+Kwargs = Dict[str, Any]
+Pytree = Any
 
 
 # ***********************************************************************
@@ -1349,8 +1348,18 @@ class JaxBackpropPlanner:
                 map(str, jax._src.xla_bridge.devices())).replace('\n', '')
         except Exception as _:
             devices_short = 'N/A'
+        LOGO = \
+"""
+   __     ______     __  __     ______   __         ______     __   __    
+  /\ \   /\  __ \   /\_\_\_\   /\  == \ /\ \       /\  __ \   /\ "-.\ \   
+ _\_\ \  \ \  __ \  \/_/\_\/_  \ \  _-/ \ \ \____  \ \  __ \  \ \ \-.  \  
+/\_____\  \ \_\ \_\   /\_\/\_\  \ \_\    \ \_____\  \ \_\ \_\  \ \_\\"\_\ 
+\/_____/   \/_/\/_/   \/_/\/_/   \/_/     \/_____/   \/_/\/_/   \/_/ \/_/ 
+"""
+                                                       
         print('\n'
-              f'JAX Planner version {__version__}\n' 
+              f'{LOGO}\n'
+              f'Version {__version__}\n' 
               f'Python {sys.version}\n'
               f'jax {jax.version.__version__}, jaxlib {jaxlib_version}, '
               f'optax {optax.__version__}, haiku {hk.__version__}, '

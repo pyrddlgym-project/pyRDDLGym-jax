@@ -1,12 +1,25 @@
 from functools import partial
+import traceback
+from typing import Any, Callable, Dict, List, Optional
+
 import jax
 import jax.numpy as jnp
 import jax.random as random
 import jax.scipy as scipy 
-import traceback
-from typing import Any, Callable, Dict, List, Optional
 
-from pyRDDLGym.core.debug.exception import raise_warning
+from pyRDDLGym.core.compiler.initializer import RDDLValueInitializer
+from pyRDDLGym.core.compiler.levels import RDDLLevelAnalysis
+from pyRDDLGym.core.compiler.model import RDDLLiftedModel
+from pyRDDLGym.core.compiler.tracer import RDDLObjectsTracer
+from pyRDDLGym.core.constraints import RDDLConstraints
+from pyRDDLGym.core.debug.exception import (
+    print_stack_trace, 
+    raise_warning,
+    RDDLInvalidNumberOfArgumentsError, 
+    RDDLNotImplementedError
+)
+from pyRDDLGym.core.debug.logger import Logger
+from pyRDDLGym.core.simulator import RDDLSimulatorPrecompiled
 
 # more robust approach - if user does not have this or broken try to continue
 try:
@@ -17,19 +30,6 @@ except Exception:
                   '(Binomial, Negative-Binomial, Multinomial) will fail.', 'red')
     traceback.print_exc()
     tfp = None
-
-from pyRDDLGym.core.compiler.initializer import RDDLValueInitializer
-from pyRDDLGym.core.compiler.levels import RDDLLevelAnalysis
-from pyRDDLGym.core.compiler.model import RDDLLiftedModel
-from pyRDDLGym.core.compiler.tracer import RDDLObjectsTracer
-from pyRDDLGym.core.constraints import RDDLConstraints
-from pyRDDLGym.core.debug.exception import (
-    print_stack_trace, 
-    RDDLInvalidNumberOfArgumentsError, 
-    RDDLNotImplementedError
-)
-from pyRDDLGym.core.debug.logger import Logger
-from pyRDDLGym.core.simulator import RDDLSimulatorPrecompiled
 
 
 # ===========================================================================

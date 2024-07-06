@@ -1,19 +1,17 @@
-from bayes_opt import BayesianOptimization
-from bayes_opt.util import UtilityFunction
 from copy import deepcopy
 import csv
 import datetime
-import jax
 from multiprocessing import get_context
-import numpy as np
 import os
 import time
 from typing import Any, Callable, Dict, Optional, Tuple
-
-Kwargs = Dict[str, Any]
-
 import warnings
 warnings.filterwarnings("ignore")
+
+from bayes_opt import BayesianOptimization
+from bayes_opt.util import UtilityFunction
+import jax
+import numpy as np
 
 from pyRDDLGym.core.debug.exception import raise_warning
 from pyRDDLGym.core.env import RDDLEnv
@@ -25,6 +23,8 @@ from pyRDDLGym_jax.core.planner import (
     JaxOfflineController,
     JaxOnlineController
 )
+
+Kwargs = Dict[str, Any]
 
 
 # ===============================================================================
