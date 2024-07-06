@@ -1350,11 +1350,11 @@ class JaxBackpropPlanner:
             devices_short = 'N/A'
         LOGO = \
 """
-   __     ______     __  __     ______   __         ______     __   __    
-  /\ \   /\  __ \   /\_\_\_\   /\  == \ /\ \       /\  __ \   /\ "-.\ \   
- _\_\ \  \ \  __ \  \/_/\_\/_  \ \  _-/ \ \ \____  \ \  __ \  \ \ \-.  \  
-/\_____\  \ \_\ \_\   /\_\/\_\  \ \_\    \ \_____\  \ \_\ \_\  \ \_\\"\_\ 
-\/_____/   \/_/\/_/   \/_/\/_/   \/_/     \/_____/   \/_/\/_/   \/_/ \/_/ 
+   __    ______    __  __    ______  __        ______    __   __    
+  /\ \  /\  __ \  /\_\_\_\  /\  == \/\ \      /\  __ \  /\ "-.\ \   
+ _\_\ \ \ \  __ \ \/_/\_\/_ \ \  _-/\ \ \____ \ \  __ \ \ \ \-.  \  
+/\_____\ \ \_\ \_\  /\_\/\_\ \ \_\   \ \_____\ \ \_\ \_\ \ \_\\"\_\ 
+\/_____/  \/_/\/_/  \/_/\/_/  \/_/    \/_____/  \/_/\/_/  \/_/ \/_/ 
 """
                                                        
         print('\n'
@@ -1796,6 +1796,7 @@ class JaxBackpropPlanner:
         iters = range(epochs)
         if print_progress:
             iters = tqdm(iters, total=100, position=tqdm_position)
+        position_str = '' if tqdm_position is None else f'[{tqdm_position}]'
         
         for it in iters:
             status = JaxPlannerStatus.NORMAL
@@ -1853,8 +1854,9 @@ class JaxBackpropPlanner:
             if print_progress:
                 iters.n = int(100 * min(1, max(elapsed / train_seconds, it / epochs)))
                 iters.set_description(
-                    f'[{tqdm_position}] {it:6} it / {-train_loss:14.6f} train / '
-                    f'{-test_loss:14.6f} test / {-best_loss:14.6f} best')
+                    f'{position_str} {it:6} it / {-train_loss:14.6f} train / '
+                    f'{-test_loss:14.6f} test / {-best_loss:14.6f} best / '
+                    f'{status.value} status')
                         
             # reached computation budget
             if elapsed >= train_seconds:
