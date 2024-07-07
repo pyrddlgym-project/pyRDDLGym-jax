@@ -502,21 +502,16 @@ class FuzzyLogic:
     # random variables
     # ===========================================================================
      
-    def _gumbel_softmax(self, key, prob):
-        Gumbel01 = random.gumbel(key=key, shape=prob.shape, dtype=self.REAL)
-        sample = Gumbel01 + jnp.log(prob + self.eps)
-        return sample
-        
     def discrete(self):
         if self.verbose:
             raise_warning('Using the replacement rule: '
                           'Discrete(p) --> Gumbel-softmax(p)')
         
-        jax_gs = self._gumbel_softmax
         jax_argmax, jax_param = self.argmax()
         
         def _jax_wrapped_calc_discrete_approx(key, prob, param):
-            sample = jax_gs(key, prob) 
+            Gumbel01 = random.gumbel(key=key, shape=prob.shape, dtype=self.REAL)
+            sample = Gumbel01 + jnp.log(prob + self.eps)
             sample = jax_argmax(sample, axis=-1, param=param)
             return sample
         
@@ -535,7 +530,7 @@ class FuzzyLogic:
     def poisson(self):
         
         def _jax_wrapped_calc_poisson_exact(key, rate, param):
-            return random.poisson(key=key, lam=rate, dtype=jnp.int64)
+            return random.poisson(key=key, lam=rate, dtype=self.INT)
         
         return _jax_wrapped_calc_poisson_exact, None
 
