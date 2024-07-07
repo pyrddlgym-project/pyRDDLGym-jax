@@ -119,6 +119,14 @@ def _function_discrete_exact_named():
     return _jax_wrapped_discrete_exact
 
 
+def _function_poisson_exact_named():
+    
+    def _jax_wrapped_poisson_exact(key, rate, param):
+        return random.poisson(key=key, lam=rate, dtype=jnp.int64)
+    
+    return _jax_wrapped_poisson_exact
+
+
 class JaxRDDLCompiler:
     '''Compiles a RDDL AST representation into an equivalent JAX representation.
     All operations are identical to their numpy equivalents.
@@ -205,12 +213,11 @@ class JaxRDDLCompiler:
     }
     
     EXACT_RDDL_TO_JAX_IF = _function_if_exact_named()
-    
     EXACT_RDDL_TO_JAX_SWITCH = _function_switch_exact_named()
     
     EXACT_RDDL_TO_JAX_BERNOULLI = _function_bernoulli_exact_named()
-    
     EXACT_RDDL_TO_JAX_DISCRETE = _function_discrete_exact_named()
+    EXACT_RDDL_TO_JAX_POISSON = _function_poisson_exact_named()
 
     def __init__(self, rddl: RDDLLiftedModel,
                  allow_synchronous_state: bool=True,
@@ -284,6 +291,7 @@ class JaxRDDLCompiler:
         self.SWITCH_HELPER = JaxRDDLCompiler.EXACT_RDDL_TO_JAX_SWITCH
         self.BERNOULLI_HELPER = JaxRDDLCompiler.EXACT_RDDL_TO_JAX_BERNOULLI
         self.DISCRETE_HELPER = JaxRDDLCompiler.EXACT_RDDL_TO_JAX_DISCRETE
+        self.POISSON_HELPER = JaxRDDLCompiler.EXACT_RDDL_TO_JAX_POISSON
     
     # ===========================================================================
     # main compilation subroutines
@@ -1422,15 +1430,24 @@ class JaxRDDLCompiler:
     def _jax_poisson(self, expr, info):
         ERR = JaxRDDLCompiler.ERROR_CODES['INVALID_PARAM_POISSON']
         JaxRDDLCompiler._check_num_args(expr, 1)
-        
         arg_rate, = expr.args
+        
+        # if rate is non-fluent, always use the exact operation
+        if self.compile_non_fluent_exact and not self.traced.cached_is_fluent(arg_rate):
+            poisson_op = JaxRDDLCompiler.EXACT_RDDL_TO_JAX_POISSON
+        else:
+            poisson_op = self.POISSON_HELPER
+        jax_poisson, jax_param = self._unwrap(poisson_op, expr.id, info)
+        
+        # recursively compile arguments
         jax_rate = self._jax(arg_rate, info)
         
         # uses the implicit JAX subroutine
         def _jax_wrapped_distribution_poisson(x, params, key):
             rate, key, err = jax_rate(x, params, key)
             key, subkey = random.split(key)
-            sample = random.poisson(key=subkey, lam=rate, dtype=self.INT)
+            param = params.get(jax_param, None)
+            sample = jax_poisson(subkey, rate, param).astype(self.INT)
             out_of_bounds = jnp.logical_not(jnp.all(rate >= 0))
             err |= (out_of_bounds * ERR)
             return sample, key, err
