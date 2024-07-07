@@ -531,7 +531,14 @@ class FuzzyLogic:
             return sample
         
         return _jax_wrapped_calc_bernoulli_approx, jax_param
+    
+    def poisson(self):
         
+        def _jax_wrapped_calc_poisson_exact(key, rate, param):
+            return random.poisson(key=key, lam=rate, dtype=jnp.int64)
+        
+        return _jax_wrapped_calc_poisson_exact, None
+
 
 # UNIT TESTS
 logic = FuzzyLogic()
