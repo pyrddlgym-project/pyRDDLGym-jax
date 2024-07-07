@@ -116,6 +116,7 @@ class LukasiewiczTNorm(TNorm):
 # RANDOM SAMPLING
 # - abstract sampler
 # - Gumbel-softmax sampler
+# - determinization
 #
 # ===========================================================================
 
