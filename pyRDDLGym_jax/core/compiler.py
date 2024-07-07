@@ -114,12 +114,7 @@ def _function_bernoulli_exact_named():
 def _function_discrete_exact_named():
         
     def _jax_wrapped_discrete_exact(key, prob, param):
-        logits = jnp.log(prob)
-        sample = random.categorical(key=key, logits=logits, axis=-1)
-        out_of_bounds = jnp.logical_not(jnp.logical_and(
-            jnp.all(prob >= 0),
-            jnp.allclose(jnp.sum(prob, axis=-1), 1.0)))
-        return sample, out_of_bounds
+        return random.categorical(key=key, logits=jnp.log(prob), axis=-1)
         
     return _jax_wrapped_discrete_exact
 
@@ -1771,7 +1766,10 @@ class JaxRDDLCompiler:
             # dispatch to sampling subroutine
             key, subkey = random.split(key)
             param = params.get(jax_param, None)
-            sample, out_of_bounds = jax_discrete(subkey, prob, param)
+            sample = jax_discrete(subkey, prob, param)
+            out_of_bounds = jnp.logical_not(jnp.logical_and(
+                jnp.all(prob >= 0),
+                jnp.allclose(jnp.sum(prob, axis=-1), 1.0)))
             error |= (out_of_bounds * ERR)
             return sample, key, error
         
@@ -1804,7 +1802,10 @@ class JaxRDDLCompiler:
             # dispatch to sampling subroutine
             key, subkey = random.split(key)
             param = params.get(jax_param, None)
-            sample, out_of_bounds = jax_discrete(subkey, prob, param)
+            sample = jax_discrete(subkey, prob, param)
+            out_of_bounds = jnp.logical_not(jnp.logical_and(
+                jnp.all(prob >= 0),
+                jnp.allclose(jnp.sum(prob, axis=-1), 1.0)))
             error |= (out_of_bounds * ERR)
             return sample, key, error
         

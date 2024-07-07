@@ -183,18 +183,6 @@ def load_config_from_string(value: str) -> Tuple[Kwargs, ...]:
 #
 # ***********************************************************************
 
-def _function_discrete_approx_named(logic):
-    jax_discrete, jax_param = logic.discrete()
-
-    def _jax_wrapped_discrete_calc_approx(key, prob, params):
-        sample = jax_discrete(key, prob, params)
-        out_of_bounds = jnp.logical_not(jnp.logical_and(
-            jnp.all(prob >= 0),
-            jnp.allclose(jnp.sum(prob, axis=-1), 1.0)))
-        return sample, out_of_bounds
-    
-    return _jax_wrapped_discrete_calc_approx, jax_param
-
 
 class JaxRDDLCompilerWithGrad(JaxRDDLCompiler):
     '''Compiles a RDDL AST representation to an equivalent JAX representation. 
@@ -270,7 +258,7 @@ class JaxRDDLCompilerWithGrad(JaxRDDLCompiler):
         self.IF_HELPER = logic.control_if()
         self.SWITCH_HELPER = logic.control_switch()
         self.BERNOULLI_HELPER = logic.bernoulli()
-        self.DISCRETE_HELPER = _function_discrete_approx_named(logic)
+        self.DISCRETE_HELPER = logic.discrete()
         
     def _jax_stop_grad(self, jax_expr):
         
