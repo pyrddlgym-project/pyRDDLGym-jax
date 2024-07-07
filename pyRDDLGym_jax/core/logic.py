@@ -127,41 +127,14 @@ class RandomSampling:
         raise NotImplementedError
     
     def bernoulli(self, logic):
-        raise NotImplementedError
-    
-    def poisson(self, logic):
-        raise NotImplementedError
-    
-    def geometric(self, logic):
-        raise NotImplementedError
-
-
-class GumbelSoftmax(RandomSampling):
-    
-    def discrete(self, logic):
-        if logic.verbose:
-            raise_warning('Using the replacement rule: '
-                          'Discrete(p) --> Gumbel-softmax(p)')
-        
-        jax_argmax, jax_param = logic.argmax()
-        
-        def _jax_wrapped_calc_discrete_gumbel_softmax(key, prob, param):
-            Gumbel01 = random.gumbel(key=key, shape=prob.shape, dtype=logic.REAL)
-            sample = Gumbel01 + jnp.log(prob + logic.eps)
-            sample = jax_argmax(sample, axis=-1, param=param)
-            return sample
-        
-        return _jax_wrapped_calc_discrete_gumbel_softmax, jax_param
-    
-    def bernoulli(self, logic):
         jax_discrete, jax_param = self.discrete(logic)
         
-        def _jax_wrapped_calc_bernoulli_gumbel_softmax(key, prob, param):
+        def _jax_wrapped_calc_bernoulli_approx(key, prob, param):
             prob = jnp.stack([1.0 - prob, prob], axis=-1)
             sample = jax_discrete(key, prob, param)
             return sample
         
-        return _jax_wrapped_calc_bernoulli_gumbel_softmax, jax_param
+        return _jax_wrapped_calc_bernoulli_approx, jax_param
     
     def poisson(self, logic):
         
@@ -183,6 +156,60 @@ class GumbelSoftmax(RandomSampling):
             return sample
         
         return _jax_wrapped_calc_geometric_approx, jax_param
+
+
+class GumbelSoftmax(RandomSampling):
+    '''Random sampling of discrete variables using Gumbel-softmax trick.'''
+    
+    def discrete(self, logic):
+        if logic.verbose:
+            raise_warning('Using the replacement rule: '
+                          'Discrete(p) --> Gumbel-softmax(p)')
+        
+        jax_argmax, jax_param = logic.argmax()
+        
+        def _jax_wrapped_calc_discrete_gumbel_softmax(key, prob, param):
+            Gumbel01 = random.gumbel(key=key, shape=prob.shape, dtype=logic.REAL)
+            sample = Gumbel01 + jnp.log(prob + logic.eps)
+            sample = jax_argmax(sample, axis=-1, param=param)
+            return sample
+        
+        return _jax_wrapped_calc_discrete_gumbel_softmax, jax_param
+    
+
+class Determinization(RandomSampling):
+    '''Random sampling of variables using their deterministic mean estimate.'''
+    
+    def discrete(self, logic):
+        if logic.verbose:
+            raise_warning('Using the replacement rule: '
+                          'Discrete(p) --> sum(i * p[i])')
+        
+        def _jax_wrapped_calc_discrete_determinized(key, prob, param):
+            literals = FuzzyLogic.enumerate_literals(prob.shape, axis=-1)
+            sample = jnp.sum(literals * prob, axis=-1)
+            return sample
+        
+        return _jax_wrapped_calc_discrete_determinized, None
+    
+    def poisson(self, logic):
+        if logic.verbose:
+            raise_warning('Using the replacement rule: Poisson(rate) --> rate')
+            
+        def _jax_wrapped_calc_poisson_determinized(key, rate, param):
+            return rate
+        
+        return _jax_wrapped_calc_poisson_determinized, None
+    
+    def geometric(self, logic):
+        if logic.verbose:
+            raise_warning('Using the replacement rule: Geometric(p) --> 1 / p')
+            
+        def _jax_wrapped_calc_geometric_determinized(key, prob, param):
+            sample = 1.0 / prob
+            return sample
+        
+        return _jax_wrapped_calc_geometric_determinized, None
 
 
 # ===========================================================================
@@ -524,7 +551,7 @@ class FuzzyLogic:
     # ===========================================================================
      
     @staticmethod
-    def _literals(shape, axis):
+    def enumerate_literals(shape, axis):
         literals = jnp.arange(shape[axis])
         literals = literals[(...,) + (jnp.newaxis,) * (len(shape) - 1)]
         literals = jnp.moveaxis(literals, source=0, destination=axis)
@@ -539,7 +566,7 @@ class FuzzyLogic:
         debias = 'argmax' in self.debias
         
         def _jax_wrapped_calc_argmax_approx(x, axis, param):
-            literals = FuzzyLogic._literals(x.shape, axis=axis)
+            literals = FuzzyLogic.enumerate_literals(x.shape, axis=axis)
             soft_max = jax.nn.softmax(param * x, axis=axis)
             sample = jnp.sum(literals * soft_max, axis=axis)
             if debias:
@@ -588,7 +615,7 @@ class FuzzyLogic:
         debias = 'switch' in self.debias
         
         def _jax_wrapped_calc_switch_approx(pred, cases, param):
-            literals = FuzzyLogic._literals(cases.shape, axis=0)
+            literals = FuzzyLogic.enumerate_literals(cases.shape, axis=0)
             pred = jnp.broadcast_to(pred[jnp.newaxis, ...], shape=cases.shape)
             proximity = -jnp.abs(pred - literals)
             soft_case = jax.nn.softmax(param * proximity, axis=0)
