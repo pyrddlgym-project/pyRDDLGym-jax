@@ -101,7 +101,7 @@ class FuzzyLogic:
                  comparison: Comparison=SigmoidComparison(),
                  weight: float=10.0,
                  debias: Optional[Set[str]]=None,
-                 eps: float=1e-10,
+                 eps: float=1e-15,
                  verbose: bool=False,
                  use64bit: bool=False) -> None:
         '''Creates a new fuzzy logic in Jax.
@@ -145,7 +145,7 @@ class FuzzyLogic:
               f'    sigmoid_weight={self.weight}\n'
               f'    cpfs_to_debias={self.debias}\n'
               f'    underflow_tol ={self.eps}\n'
-              f'    use64bit      ={self.use64bit}')
+              f'    use_64_bit    ={self.use64bit}')
         
     # ===========================================================================
     # logical operators
@@ -533,6 +533,20 @@ class FuzzyLogic:
             return random.poisson(key=key, lam=rate, dtype=self.INT)
         
         return _jax_wrapped_calc_poisson_exact, None
+    
+    def geometric(self):
+        if self.verbose:
+            raise_warning('Using the replacement rule: '
+                          'Geometric(p) --> floor(log(U) / log(1 - p)) + 1')
+            
+        jax_floor, jax_param = self.floor()
+            
+        def _jax_wrapped_calc_geometric_approx(key, prob, param):
+            U = random.uniform(key=key, shape=jnp.shape(prob), dtype=self.REAL)
+            sample = jax_floor(jnp.log(U) / jnp.log(1.0 - prob), param) + 1
+            return sample
+        
+        return _jax_wrapped_calc_geometric_approx, jax_param
 
 
 # UNIT TESTS
@@ -594,13 +608,14 @@ def _test_random():
     key = random.PRNGKey(42)
     _bernoulli, _ = logic.bernoulli()
     _discrete, _ = logic.discrete()
+    _geometric, _ = logic.geometric()
     
     def bern(n):
         prob = jnp.asarray([0.3] * n)
         sample = _bernoulli(key, prob, w)
         return sample
     
-    samples = bern(5000)
+    samples = bern(50000)
     print(jnp.mean(samples))
     
     def disc(n):
@@ -609,10 +624,18 @@ def _test_random():
         sample = _discrete(key, prob, w)
         return sample
         
-    samples = disc(5000)
+    samples = disc(50000)
     samples = jnp.round(samples)
     print([jnp.mean(samples == i) for i in range(3)])
-
+    
+    def geom(n):
+        prob = jnp.asarray([0.3] * n)
+        sample = _geometric(key, prob, w)
+        return sample
+    
+    samples = geom(50000)
+    print(jnp.mean(samples))
+    
 
 def _test_rounding():
     print('testing rounding')
