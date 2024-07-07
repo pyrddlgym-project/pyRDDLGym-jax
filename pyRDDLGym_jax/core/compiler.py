@@ -127,6 +127,14 @@ def _function_poisson_exact_named():
     return _jax_wrapped_poisson_exact
 
 
+def _function_geometric_exact_named():
+    
+    def _jax_wrapped_geometric_exact(key, prob, param):
+        return random.geometric(key=key, p=prob, dtype=jnp.int64)
+    
+    return _jax_wrapped_geometric_exact
+
+
 class JaxRDDLCompiler:
     '''Compiles a RDDL AST representation into an equivalent JAX representation.
     All operations are identical to their numpy equivalents.
@@ -218,6 +226,7 @@ class JaxRDDLCompiler:
     EXACT_RDDL_TO_JAX_BERNOULLI = _function_bernoulli_exact_named()
     EXACT_RDDL_TO_JAX_DISCRETE = _function_discrete_exact_named()
     EXACT_RDDL_TO_JAX_POISSON = _function_poisson_exact_named()
+    EXACT_RDDL_TO_JAX_GEOMETRIC = _function_geometric_exact_named()
 
     def __init__(self, rddl: RDDLLiftedModel,
                  allow_synchronous_state: bool=True,
@@ -292,6 +301,7 @@ class JaxRDDLCompiler:
         self.BERNOULLI_HELPER = JaxRDDLCompiler.EXACT_RDDL_TO_JAX_BERNOULLI
         self.DISCRETE_HELPER = JaxRDDLCompiler.EXACT_RDDL_TO_JAX_DISCRETE
         self.POISSON_HELPER = JaxRDDLCompiler.EXACT_RDDL_TO_JAX_POISSON
+        self.GEOMETRIC_HELPER = JaxRDDLCompiler.EXACT_RDDL_TO_JAX_GEOMETRIC
     
     # ===========================================================================
     # main compilation subroutines
@@ -1548,33 +1558,25 @@ class JaxRDDLCompiler:
         ERR = JaxRDDLCompiler.ERROR_CODES['INVALID_PARAM_GEOMETRIC']
         JaxRDDLCompiler._check_num_args(expr, 1)        
         arg_prob, = expr.args
+        
+        # if prob is non-fluent, always use the exact operation
+        if self.compile_non_fluent_exact and not self.traced.cached_is_fluent(arg_prob):
+            geom_op = JaxRDDLCompiler.EXACT_RDDL_TO_JAX_GEOMETRIC
+        else:
+            geom_op = self.GEOMETRIC_HELPER
+        jax_geom, jax_param = self._unwrap(geom_op, expr.id, info)
+        
+        # recursively compile arguments        
         jax_prob = self._jax(arg_prob, info)
         
-        if self.compile_non_fluent_exact and not self.traced.cached_is_fluent(arg_prob):            
-            
-            # prob is non-fluent: do not reparameterize
-            def _jax_wrapped_distribution_geometric(x, params, key):
-                prob, key, err = jax_prob(x, params, key)
-                key, subkey = random.split(key)
-                sample = random.geometric(key=subkey, p=prob, dtype=self.INT)
-                out_of_bounds = jnp.logical_not(jnp.all((prob >= 0) & (prob <= 1)))
-                err |= (out_of_bounds * ERR)
-                return sample, key, err
-        
-        else:    
-            floor_op, jax_param = self._unwrap(
-                self.KNOWN_UNARY['floor'], expr.id, info)
-            
-            # reparameterization trick Geom(p) = floor(ln(U(0, 1)) / ln(p)) + 1
-            def _jax_wrapped_distribution_geometric(x, params, key):
-                prob, key, err = jax_prob(x, params, key)
-                key, subkey = random.split(key)
-                U = random.uniform(key=subkey, shape=jnp.shape(prob), dtype=self.REAL)
-                param = params.get(jax_param, None)
-                sample = floor_op(jnp.log(U) / jnp.log(1.0 - prob), param) + 1
-                out_of_bounds = jnp.logical_not(jnp.all((prob >= 0) & (prob <= 1)))
-                err |= (out_of_bounds * ERR)
-                return sample, key, err
+        def _jax_wrapped_distribution_geometric(x, params, key):
+            prob, key, err = jax_prob(x, params, key)
+            key, subkey = random.split(key)
+            param = params.get(jax_param, None)
+            sample = jax_geom(subkey, prob, param).astype(self.INT)
+            out_of_bounds = jnp.logical_not(jnp.all((prob >= 0) & (prob <= 1)))
+            err |= (out_of_bounds * ERR)
+            return sample, key, err
         
         return _jax_wrapped_distribution_geometric
     

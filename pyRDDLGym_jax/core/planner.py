@@ -260,6 +260,7 @@ class JaxRDDLCompilerWithGrad(JaxRDDLCompiler):
         self.BERNOULLI_HELPER = logic.bernoulli()
         self.DISCRETE_HELPER = logic.discrete()
         self.POISSON_HELPER = logic.poisson()
+        self.GEOMETRIC_HELPER = logic.geometric()
         
     def _jax_stop_grad(self, jax_expr):
         
