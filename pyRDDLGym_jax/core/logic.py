@@ -7,6 +7,13 @@ import jax.random as random
 from pyRDDLGym.core.debug.exception import raise_warning
 
 
+# ===========================================================================
+# LOGICAL COMPLEMENT
+# - abstract class
+# - standard complement
+#
+# ===========================================================================
+
 class Complement:
     '''Base class for approximate logical complement operations.'''
     
@@ -20,6 +27,13 @@ class StandardComplement(Complement):
     def __call__(self, x):
         return 1.0 - x
 
+
+# ===========================================================================
+# RELATIONAL OPERATIONS
+# - abstract class
+# - sigmoid comparison
+#
+# ===========================================================================
 
 class Comparison:
     '''Base class for approximate comparison operations.'''
@@ -45,7 +59,16 @@ class SigmoidComparison(Comparison):
     
     def equal(self, x, y, param):
         return 1.0 - jnp.square(jnp.tanh(param * (y - x)))
+ 
         
+# ===========================================================================
+# TNORMS
+# - abstract tnorm
+# - product tnorm
+# - Godel tnorm
+# - Lukasiewicz tnorm
+#
+# ===========================================================================
 
 class TNorm:
     '''Base class for fuzzy differentiable t-norms.'''
@@ -87,8 +110,86 @@ class LukasiewiczTNorm(TNorm):
     
     def norms(self, x, axis):
         return jax.nn.relu(jnp.sum(x - 1.0, axis=axis) + 1.0)
+
+
+# ===========================================================================
+# RANDOM SAMPLING
+# - abstract sampler
+# - Gumbel-softmax sampler
+#
+# ===========================================================================
+
+class RandomSampling:
+    '''An abstract class that describes how discrete and non-reparameterizable 
+    random variables are sampled.'''
     
+    def discrete(self, logic):
+        raise NotImplementedError
     
+    def bernoulli(self, logic):
+        raise NotImplementedError
+    
+    def poisson(self, logic):
+        raise NotImplementedError
+    
+    def geometric(self, logic):
+        raise NotImplementedError
+
+
+class GumbelSoftmax(RandomSampling):
+    
+    def discrete(self, logic):
+        if logic.verbose:
+            raise_warning('Using the replacement rule: '
+                          'Discrete(p) --> Gumbel-softmax(p)')
+        
+        jax_argmax, jax_param = logic.argmax()
+        
+        def _jax_wrapped_calc_discrete_gumbel_softmax(key, prob, param):
+            Gumbel01 = random.gumbel(key=key, shape=prob.shape, dtype=logic.REAL)
+            sample = Gumbel01 + jnp.log(prob + logic.eps)
+            sample = jax_argmax(sample, axis=-1, param=param)
+            return sample
+        
+        return _jax_wrapped_calc_discrete_gumbel_softmax, jax_param
+    
+    def bernoulli(self, logic):
+        jax_discrete, jax_param = self.discrete(logic)
+        
+        def _jax_wrapped_calc_bernoulli_gumbel_softmax(key, prob, param):
+            prob = jnp.stack([1.0 - prob, prob], axis=-1)
+            sample = jax_discrete(key, prob, param)
+            return sample
+        
+        return _jax_wrapped_calc_bernoulli_gumbel_softmax, jax_param
+    
+    def poisson(self, logic):
+        
+        def _jax_wrapped_calc_poisson_exact(key, rate, param):
+            return random.poisson(key=key, lam=rate, dtype=logic.INT)
+        
+        return _jax_wrapped_calc_poisson_exact, None
+    
+    def geometric(self, logic):
+        if logic.verbose:
+            raise_warning('Using the replacement rule: '
+                          'Geometric(p) --> floor(log(U) / log(1 - p)) + 1')
+            
+        jax_floor, jax_param = logic.floor()
+            
+        def _jax_wrapped_calc_geometric_approx(key, prob, param):
+            U = random.uniform(key=key, shape=jnp.shape(prob), dtype=logic.REAL)
+            sample = jax_floor(jnp.log(U) / jnp.log(1.0 - prob), param) + 1
+            return sample
+        
+        return _jax_wrapped_calc_geometric_approx, jax_param
+
+
+# ===========================================================================
+# FUZZY LOGIC
+#
+# ===========================================================================
+
 class FuzzyLogic:
     '''A class representing fuzzy logic in JAX.
     
@@ -99,6 +200,7 @@ class FuzzyLogic:
     def __init__(self, tnorm: TNorm=ProductTNorm(),
                  complement: Complement=StandardComplement(),
                  comparison: Comparison=SigmoidComparison(),
+                 sampling: RandomSampling=GumbelSoftmax(),
                  weight: float=10.0,
                  debias: Optional[Set[str]]=None,
                  eps: float=1e-15,
@@ -109,6 +211,7 @@ class FuzzyLogic:
         :param tnorm: fuzzy operator for logical AND
         :param complement: fuzzy operator for logical NOT
         :param comparison: fuzzy operator for comparisons (>, >=, <, ==, ~=, ...)
+        :param sampling: random sampling of non-reparameterizable distributions
         :param weight: a sharpness parameter for sigmoid and softmax activations
         :param debias: which functions to de-bias approximate on forward pass
         :param eps: small positive float to mitigate underflow
@@ -118,6 +221,7 @@ class FuzzyLogic:
         self.tnorm = tnorm
         self.complement = complement
         self.comparison = comparison
+        self.sampling = sampling
         self.weight = float(weight)
         if debias is None:
             debias = set()
@@ -142,6 +246,7 @@ class FuzzyLogic:
               f'    tnorm         ={type(self.tnorm).__name__}\n'
               f'    complement    ={type(self.complement).__name__}\n'
               f'    comparison    ={type(self.comparison).__name__}\n'
+              f'    sampling      ={type(self.sampling).__name__}\n'
               f'    sigmoid_weight={self.weight}\n'
               f'    cpfs_to_debias={self.debias}\n'
               f'    underflow_tol ={self.eps}\n'
@@ -503,53 +608,23 @@ class FuzzyLogic:
     # ===========================================================================
      
     def discrete(self):
-        if self.verbose:
-            raise_warning('Using the replacement rule: '
-                          'Discrete(p) --> Gumbel-softmax(p)')
-        
-        jax_argmax, jax_param = self.argmax()
-        
-        def _jax_wrapped_calc_discrete_approx(key, prob, param):
-            Gumbel01 = random.gumbel(key=key, shape=prob.shape, dtype=self.REAL)
-            sample = Gumbel01 + jnp.log(prob + self.eps)
-            sample = jax_argmax(sample, axis=-1, param=param)
-            return sample
-        
-        return _jax_wrapped_calc_discrete_approx, jax_param
+        return self.sampling.discrete(self)
     
     def bernoulli(self):
-        jax_discrete, jax_param = self.discrete()
-        
-        def _jax_wrapped_calc_bernoulli_approx(key, prob, param):
-            prob = jnp.stack([1.0 - prob, prob], axis=-1)
-            sample = jax_discrete(key, prob, param)
-            return sample
-        
-        return _jax_wrapped_calc_bernoulli_approx, jax_param
+        return self.sampling.bernoulli(self)
     
     def poisson(self):
-        
-        def _jax_wrapped_calc_poisson_exact(key, rate, param):
-            return random.poisson(key=key, lam=rate, dtype=self.INT)
-        
-        return _jax_wrapped_calc_poisson_exact, None
+        return self.sampling.poisson(self)
     
     def geometric(self):
-        if self.verbose:
-            raise_warning('Using the replacement rule: '
-                          'Geometric(p) --> floor(log(U) / log(1 - p)) + 1')
-            
-        jax_floor, jax_param = self.floor()
-            
-        def _jax_wrapped_calc_geometric_approx(key, prob, param):
-            U = random.uniform(key=key, shape=jnp.shape(prob), dtype=self.REAL)
-            sample = jax_floor(jnp.log(U) / jnp.log(1.0 - prob), param) + 1
-            return sample
-        
-        return _jax_wrapped_calc_geometric_approx, jax_param
+        return self.sampling.geometric(self)
 
 
+# ===========================================================================
 # UNIT TESTS
+#
+# ===========================================================================
+
 logic = FuzzyLogic()
 w = 100.0
 
