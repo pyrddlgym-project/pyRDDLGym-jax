@@ -67,6 +67,7 @@ class SigmoidComparison(Comparison):
 # - product tnorm
 # - Godel tnorm
 # - Lukasiewicz tnorm
+# - Yager(p) tnorm
 #
 # ===========================================================================
 
@@ -111,6 +112,25 @@ class LukasiewiczTNorm(TNorm):
     def norms(self, x, axis):
         return jax.nn.relu(jnp.sum(x - 1.0, axis=axis) + 1.0)
 
+
+class YagerTNorm(TNorm):
+    '''Yager t-norm given by the expression 
+    (x, y) -> max(1 - ((1 - x)^p + (1 - y)^p)^(1/p)).'''
+    
+    def __init__(self, p=2.0):
+        self.p = p
+    
+    def norm(self, x, y):
+        base_x = jax.nn.relu(1.0 - x)
+        base_y = jax.nn.relu(1.0 - y)
+        arg = jnp.power(base_x ** self.p + base_y ** self.p, 1.0 / self.p)
+        return jax.nn.relu(1.0 - arg)
+    
+    def norms(self, x, axis):
+        base = jax.nn.relu(1.0 - x)
+        arg = jnp.power(jnp.sum(base ** self.p, axis=axis), 1.0 / self.p)
+        return jax.nn.relu(1.0 - arg)
+        
 
 # ===========================================================================
 # RANDOM SAMPLING
@@ -601,7 +621,7 @@ class FuzzyLogic:
         def _jax_wrapped_calc_if_approx(c, a, b, param):
             sample = c * a + (1.0 - c) * b
             if debias:
-                hard_sample = jnp.select([c, ~c], [a, b])
+                hard_sample = jnp.where(c > 0.5, a, b)
                 sample += jax.lax.stop_gradient(hard_sample - sample)
             return sample
         

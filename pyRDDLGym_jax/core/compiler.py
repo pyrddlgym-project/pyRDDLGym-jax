@@ -87,7 +87,7 @@ def _function_aggregation_exact_named(op, name):
 def _function_if_exact_named():
         
     def _jax_wrapped_if_exact(c, a, b, param):
-        return jnp.where(c, a, b)
+        return jnp.where(c > 0.5, a, b)
         
     return _jax_wrapped_if_exact
     
