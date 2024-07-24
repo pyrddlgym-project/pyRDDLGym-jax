@@ -1009,13 +1009,14 @@ class JaxRDDLCompiler:
             jax_op, jax_param = self._unwrap(negative_op, expr.id, info)
             return self._jax_unary(jax_expr, jax_op, jax_param, at_least_int=True)
                     
-        elif n == 2:
-            lhs, rhs = args
-            jax_lhs = self._jax(lhs, info)
-            jax_rhs = self._jax(rhs, info)
+        elif n == 2 or (n >= 2 and op in {'*', '+'}):
+            jax_exprs = [self._jax(arg, info) for arg in args]
             jax_op, jax_param = self._unwrap(valid_ops[op], expr.id, info)
-            return self._jax_binary(
-                jax_lhs, jax_rhs, jax_op, jax_param, at_least_int=True)
+            result = jax_exprs[0]
+            for jax_rhs in jax_exprs[1:]:
+                result = self._jax_binary(
+                    result, jax_rhs, jax_op, jax_param, at_least_int=True)
+            return result
         
         JaxRDDLCompiler._check_num_args(expr, 2)
     
@@ -1059,13 +1060,14 @@ class JaxRDDLCompiler:
             jax_op, jax_param = self._unwrap(logical_not_op, expr.id, info)
             return self._jax_unary(jax_expr, jax_op, jax_param, check_dtype=bool)
         
-        elif n == 2:
-            lhs, rhs = args
-            jax_lhs = self._jax(lhs, info)
-            jax_rhs = self._jax(rhs, info)
+        elif n == 2 or (n >= 2 and op in {'^', '&', '|'}):
+            jax_exprs = [self._jax(arg, info) for arg in args]
             jax_op, jax_param = self._unwrap(valid_ops[op], expr.id, info)
-            return self._jax_binary(
-                jax_lhs, jax_rhs, jax_op, jax_param, check_dtype=bool)
+            result = jax_exprs[0]
+            for jax_rhs in jax_exprs[1:]:
+                result = self._jax_binary(
+                    result, jax_rhs, jax_op, jax_param, check_dtype=bool)
+            return result
         
         JaxRDDLCompiler._check_num_args(expr, 2)
     
