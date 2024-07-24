@@ -1714,6 +1714,14 @@ class JaxBackpropPlanner:
             hyperparam_value = float(policy_hyperparams)
             policy_hyperparams = {action: hyperparam_value
                                   for action in self.rddl.action_fluents}
+        
+        # fill in missing entries
+        elif isinstance(policy_hyperparams, dict):
+            for action in self.rddl.action_fluents:
+                if action not in policy_hyperparams:
+                    raise_warning(f'policy_hyperparams[{action}] is not set, '
+                                  'setting 1.0 which could be suboptimal.')
+                    policy_hyperparams[action] = 1.0
             
         # print summary of parameters:
         if print_summary:
