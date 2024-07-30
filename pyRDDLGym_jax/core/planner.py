@@ -35,9 +35,7 @@ from pyRDDLGym_jax.core.logic import FuzzyLogic
 
 # try to import matplotlib, if failed then skip plotting
 try:
-    import matplotlib
     import matplotlib.pyplot as plt
-    matplotlib.use('TkAgg')
 except Exception:
     raise_warning('failed to import matplotlib: '
                   'plotting functionality will be disabled.', 'red')
