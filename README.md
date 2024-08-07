@@ -111,7 +111,7 @@ The ``**planner_args`` and ``**train_args`` are keyword argument parameters to p
 
 ## Configuring the Planner
 
-The simplest way to configure the planner is to write and pass a configuration file with the necessary hyper-parameters.
+The simplest way to configure the planner is to write and pass a configuration file with the necessary [hyper-parameters](https://pyrddlgym.readthedocs.io/en/latest/jax.html#configuring-pyrddlgym-jax).
 The basic structure of a configuration file is provided below for a straight-line planner:
 
 ```ini
