@@ -1781,6 +1781,7 @@ class JaxBackpropPlanner:
         rolling_test_loss = RollingMean(test_rolling_window)
         log = {}
         status = JaxPlannerStatus.NORMAL
+        is_all_zero_fn = lambda x: np.allclose(x, 0)
         
         # initialize plot area
         if plot_step is None or plot_step <= 0 or plt is None:
@@ -1809,7 +1810,7 @@ class JaxBackpropPlanner:
             
             # no progress
             grad_norm_zero, _ = jax.tree_util.tree_flatten(
-                jax.tree_map(lambda x: np.allclose(x, 0), train_log['grad']))
+                jax.tree_map(is_all_zero_fn, train_log['grad']))
             if np.all(grad_norm_zero):
                 status = JaxPlannerStatus.NO_PROGRESS
              
