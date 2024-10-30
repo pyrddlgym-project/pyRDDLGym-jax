@@ -1473,7 +1473,7 @@ class JaxBackpropPlanner:
         def _jax_wrapped_init_policy(key, hyperparams, subs):
             policy_params = init(key, hyperparams, subs)
             opt_state = optimizer.init(policy_params)
-            return policy_params, opt_state, None
+            return policy_params, opt_state, {}
         
         return _jax_wrapped_init_policy
         
@@ -1493,7 +1493,7 @@ class JaxBackpropPlanner:
             policy_params, converged = projection(policy_params, hyperparams)
             log['grad'] = grad
             log['updates'] = updates
-            return policy_params, converged, opt_state, None, loss_val, log
+            return policy_params, converged, opt_state, opt_aux, loss_val, log
         
         return jax.jit(_jax_wrapped_plan_update)
             
@@ -1773,7 +1773,7 @@ class JaxBackpropPlanner:
         else:
             policy_params = guess
             opt_state = self.optimizer.init(policy_params)
-            opt_aux = None
+            opt_aux = {}
         
         # initialize running statistics
         best_params, best_loss, best_grad = policy_params, jnp.inf, jnp.inf
@@ -2106,7 +2106,8 @@ class JaxLineSearchPlanner(JaxBackpropPlanner):
             log['updates'] = None
             log['line_search_iters'] = trials
             log['learning_rate'] = best_step
-            return best_params, True, best_state, best_step, best_f, log
+            opt_aux['best_step'] = best_step
+            return best_params, True, best_state, opt_aux, best_f, log
             
         return _jax_wrapped_plan_update
 
