@@ -1215,6 +1215,8 @@ class JaxBackpropPlanner:
                  optimizer: Callable[..., optax.GradientTransformation]=optax.rmsprop,
                  optimizer_kwargs: Optional[Kwargs]=None,
                  clip_grad: Optional[float]=None,
+                 noise_grad_eta: float=0.0,
+                 noise_grad_gamma: float=1.0,
                  logic: FuzzyLogic=FuzzyLogic(),
                  use_symlog_reward: bool=False,
                  utility: Union[Callable[[jnp.ndarray], float], str]='mean',
@@ -1241,6 +1243,8 @@ class JaxBackpropPlanner:
         :param optimizer_kwargs: a dictionary of parameters to pass to the SGD
         factory (e.g. which parameters are controllable externally)
         :param clip_grad: maximum magnitude of gradient updates
+        :param noise_grad_eta: scale of the gradient noise variance
+        :param noise_grad_gamma: decay rate of the gradient noise variance
         :param logic: a subclass of FuzzyLogic for mapping exact mathematical
         operations to their differentiable counterparts 
         :param use_symlog_reward: whether to use the symlog transform on the 
@@ -1275,6 +1279,8 @@ class JaxBackpropPlanner:
             optimizer_kwargs = {'learning_rate': 0.1}
         self._optimizer_kwargs = optimizer_kwargs
         self.clip_grad = clip_grad
+        self.noise_grad_eta = noise_grad_eta
+        self.noise_grad_gamma = noise_grad_gamma
         
         # set optimizer
         try:
@@ -1372,6 +1378,8 @@ class JaxBackpropPlanner:
               f'    optimizer         ={self._optimizer_name.__name__}\n'
               f'    optimizer args    ={self._optimizer_kwargs}\n'
               f'    clip_gradient     ={self.clip_grad}\n'
+              f'    noise_grad_eta    ={self.noise_grad_eta}\n'
+              f'    noise_grad_gamma  ={self.noise_grad_gamma}\n'
               f'    batch_size_train  ={self.batch_size_train}\n'
               f'    batch_size_test   ={self.batch_size_test}')
         self.plan.summarize_hyperparameters()
@@ -1481,6 +1489,19 @@ class JaxBackpropPlanner:
         optimizer = self.optimizer
         projection = self.plan.projection
         
+        # add Gaussian gradient noise per Neelakantan et al., 2016.
+        def _jax_wrapped_gaussian_param_noise(key, grads, sigma):
+            treedef = jax.tree_util.tree_structure(grads)
+            keys_flat = random.split(key, num=treedef.num_leaves)            
+            keys_tree = jax.tree_util.tree_unflatten(treedef, keys_flat)
+            new_grads = jax.tree_map(
+                lambda g, k: g + sigma * random.normal(
+                    key=k, shape=g.shape, dtype=g.dtype),
+                grads,
+                keys_tree
+            )
+            return new_grads
+        
         # calculate the plan gradient w.r.t. return loss and update optimizer
         # also perform a projection step to satisfy constraints on actions
         def _jax_wrapped_plan_update(key, policy_params, hyperparams,
@@ -1488,6 +1509,8 @@ class JaxBackpropPlanner:
             grad_fn = jax.value_and_grad(loss, argnums=1, has_aux=True)
             (loss_val, log), grad = grad_fn(
                 key, policy_params, hyperparams, subs, model_params)  
+            sigma = opt_aux.get('noise_sigma', 0.0)
+            grad = _jax_wrapped_gaussian_param_noise(key, grad, sigma)
             updates, opt_state = optimizer.update(grad, opt_state) 
             policy_params = optax.apply_updates(policy_params, updates)
             policy_params, converged = projection(policy_params, hyperparams)
@@ -1801,6 +1824,11 @@ class JaxBackpropPlanner:
         for it in iters:
             status = JaxPlannerStatus.NORMAL
             
+            # gradient noise schedule
+            noise_var = self.noise_grad_eta / (1. + it) ** self.noise_grad_gamma
+            noise_sigma = np.sqrt(noise_var)
+            opt_aux['noise_sigma'] = noise_sigma
+            
             # update the parameters of the plan
             key, subkey = random.split(key)
             policy_params, converged, opt_state, opt_aux, \
@@ -1877,6 +1905,7 @@ class JaxBackpropPlanner:
                 'last_iteration_improved': last_iter_improve,
                 'grad': train_log['grad'],
                 'best_grad': best_grad,
+                'noise_sigma': noise_sigma,
                 'updates': train_log['updates'],
                 'elapsed_time': elapsed,
                 'key': key,
