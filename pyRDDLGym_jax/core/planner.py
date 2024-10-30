@@ -1763,7 +1763,7 @@ class JaxBackpropPlanner:
                   f'    print_progress     ={print_progress}\n')
             if self.compiled.relaxations:
                 print('Some RDDL operations are non-differentiable, '
-                      'replacing them with differentiable relaxations:')
+                      'they will be approximated as follows:')
                 print(self.compiled.summarize_model_relaxations())
             
         # compute a batched version of the initial values
