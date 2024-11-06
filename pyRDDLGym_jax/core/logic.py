@@ -24,6 +24,7 @@ class Complement:
 class StandardComplement(Complement):
     '''The standard approximate logical complement given by x -> 1 - x.'''
     
+    # https://www.sciencedirect.com/science/article/abs/pii/016501149190171L
     def __call__(self, x):
         return 1.0 - x
 
@@ -51,6 +52,7 @@ class Comparison:
 class SigmoidComparison(Comparison):
     '''Comparison operations approximated using sigmoid functions.'''
     
+    # https://arxiv.org/abs/2110.05651
     def greater_equal(self, x, y, param):
         return jax.nn.sigmoid(param * (x - y))
     
@@ -69,6 +71,7 @@ class SigmoidComparison(Comparison):
 # - Lukasiewicz tnorm
 # - Yager(p) tnorm
 #
+# https://www.sciencedirect.com/science/article/abs/pii/016501149190171L
 # ===========================================================================
 
 class TNorm:
@@ -185,10 +188,11 @@ class GumbelSoftmax(RandomSampling):
     def discrete(self, logic):
         if logic.verbose:
             raise_warning('Using the replacement rule: '
-                          'Discrete(p) --> Gumbel-softmax(p)')
+                          'Discrete(p) --> Gumbel-Softmax(p)')
         
         jax_argmax, jax_param = logic.argmax()
         
+        # https://arxiv.org/pdf/1611.01144
         def _jax_wrapped_calc_discrete_gumbel_softmax(key, prob, param):
             Gumbel01 = random.gumbel(key=key, shape=prob.shape, dtype=logic.REAL)
             sample = Gumbel01 + jnp.log(prob + logic.eps)
@@ -510,14 +514,23 @@ class FuzzyLogic:
     def floor(self):
         if self.verbose:
             raise_warning('Using the replacement rule: '
-                          'floor(x) --> x - atan(-1.0 / tan(pi * x)) / pi - 0.5')
+                          'floor(x) --> x - SoftFloor(x)')
         
+        debias = 'floor' in self.debias
+        
+        # https://www.tensorflow.org/probability/api_docs/python/tfp/substrates/jax/bijectors/Softfloor
         def _jax_wrapped_calc_floor_approx(x, param):
-            sawtooth_part = jnp.arctan(-1.0 / jnp.tan(x * jnp.pi)) / jnp.pi + 0.5
-            sample = x - jax.lax.stop_gradient(sawtooth_part)
+            ainv = jnp.tanh(param / 4.0)
+            sample = (jax.nn.sigmoid(param * (x - jnp.floor(x) - 1.0)) - 
+                      jax.nn.sigmoid(-param / 2.0)) / ainv + jnp.floor(x)
+            if debias:
+                hard_sample = jnp.floor(x)
+                sample += jax.lax.stop_gradient(hard_sample - sample)
             return sample
         
-        return _jax_wrapped_calc_floor_approx, None
+        tags = ('weight', 'floor')
+        new_param = (tags, self.weight)
+        return _jax_wrapped_calc_floor_approx, new_param
         
     def ceil(self):
         jax_floor, jax_param = self.floor()
@@ -529,10 +542,12 @@ class FuzzyLogic:
     
     def round(self):
         if self.verbose:
-            raise_warning('Using the replacement rule: round(x) --> soft_round(x)')
+            raise_warning('Using the replacement rule: '
+                          'round(x) --> SoftRound(x)')
         
         debias = 'round' in self.debias
         
+        # https://arxiv.org/abs/2006.09952
         def _jax_wrapped_calc_round_approx(x, param):
             m = jnp.floor(x) + 0.5
             sample = m + 0.5 * jnp.tanh(param * (x - m)) / jnp.tanh(param / 2.0)    
@@ -589,6 +604,7 @@ class FuzzyLogic:
             
         debias = 'argmax' in self.debias
         
+        # https://arxiv.org/abs/2110.05651
         def _jax_wrapped_calc_argmax_approx(x, axis, param):
             literals = FuzzyLogic.enumerate_literals(x.shape, axis=axis)
             soft_max = jax.nn.softmax(param * x, axis=axis)
@@ -677,7 +693,7 @@ class FuzzyLogic:
 # ===========================================================================
 
 logic = FuzzyLogic()
-w = 100.0
+w = 1000.0
 
 
 def _test_logical():
