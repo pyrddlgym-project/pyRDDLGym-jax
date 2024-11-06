@@ -35,7 +35,6 @@ setup(
           'jax>=0.4.12',
           'optax>=0.1.9',
           'dm-haiku>=0.0.10',
-          # 'tensorflow>=2.13.0',
           'tensorflow-probability>=0.21.0'
         ],
       python_requires=">=3.8",
