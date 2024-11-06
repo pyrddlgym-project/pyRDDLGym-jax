@@ -638,7 +638,7 @@ class FuzzyLogic:
         def _jax_wrapped_calc_switch_approx(pred, cases, param):
             literals = FuzzyLogic.enumerate_literals(cases.shape, axis=0)
             pred = jnp.broadcast_to(pred[jnp.newaxis, ...], shape=cases.shape)
-            proximity = -jnp.abs(pred - literals)
+            proximity = -jnp.square(pred - literals)
             soft_case = jax.nn.softmax(param * proximity, axis=0)
             sample = jnp.sum(cases * soft_case, axis=0)
             if debias:
@@ -701,7 +701,7 @@ def _test_logical():
 def _test_indexing():
     print('testing indexing')
     _argmax, _ = logic.argmax()
-    _argmin, _ = logic.argmax()
+    _argmin, _ = logic.argmin()
 
     def argmaxmin(x):
         amax = _argmax(x, 0, w)
