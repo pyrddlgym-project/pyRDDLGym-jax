@@ -529,18 +529,21 @@ class FuzzyLogic:
     
     def round(self):
         if self.verbose:
-            raise_warning('Using the replacement rule: round(x) --> x')
+            raise_warning('Using the replacement rule: round(x) --> soft_round(x)')
         
         debias = 'round' in self.debias
         
         def _jax_wrapped_calc_round_approx(x, param):
-            sample = x
+            m = jnp.floor(x) + 0.5
+            sample = m + 0.5 * jnp.tanh(param * (x - m)) / jnp.tanh(param / 2.0)    
             if debias:
                 hard_sample = jnp.round(x)
                 sample += jax.lax.stop_gradient(hard_sample - sample)
             return sample
         
-        return _jax_wrapped_calc_round_approx, None
+        tags = ('weight', 'round')
+        new_param = (tags, self.weight)
+        return _jax_wrapped_calc_round_approx, new_param
     
     def mod(self):
         jax_floor, jax_param = self.floor()
@@ -764,11 +767,13 @@ def _test_rounding():
     print('testing rounding')
     _floor, _ = logic.floor()
     _ceil, _ = logic.ceil()
+    _round, _ = logic.round()
     _mod, _ = logic.mod()
     
-    x = jnp.asarray([2.1, 0.5001, 1.99, -2.01, -3.2, -0.1, -1.01, 23.01, -101.99, 200.01])
+    x = jnp.asarray([2.1, 0.6, 1.99, -2.01, -3.2, -0.1, -1.01, 23.01, -101.99, 200.01])
     print(_floor(x, w))
     print(_ceil(x, w))
+    print(_round(x, w))
     print(_mod(x, 2.0, w))
 
 
