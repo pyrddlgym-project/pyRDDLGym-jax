@@ -650,7 +650,7 @@ class FuzzyLogic:
         if self.verbose:
             raise_warning('Using the replacement rule: '
                           'switch(pred) { cases } --> '
-                          'sum(cases[i] * softmax(-abs(pred - i)))')   
+                          'sum(cases[i] * softmax(-(pred - i)^2))')   
             
         debias = 'switch' in self.debias
         
