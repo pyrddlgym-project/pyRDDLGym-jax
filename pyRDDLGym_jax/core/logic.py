@@ -48,6 +48,9 @@ class Comparison:
     def equal(self, x, y, param):
         raise NotImplementedError
     
+    def sgn(self, x, param):
+        raise NotImplementedError
+    
 
 class SigmoidComparison(Comparison):
     '''Comparison operations approximated using sigmoid functions.'''
@@ -61,6 +64,9 @@ class SigmoidComparison(Comparison):
     
     def equal(self, x, y, param):
         return 1.0 - jnp.square(jnp.tanh(param * (y - x)))
+    
+    def sgn(self, x, param):
+        return jnp.tanh(param * x)
  
         
 # ===========================================================================
@@ -496,12 +502,14 @@ class FuzzyLogic:
      
     def sgn(self):
         if self.verbose:
-            raise_warning('Using the replacement rule: sgn(x) --> tanh(x)')
-            
+            raise_warning('Using the replacement rule: '
+                          'sgn(x) --> comparison.sgn(x)')
+        
+        sgn_op = self.comparison.sgn
         debias = 'sgn' in self.debias
         
         def _jax_wrapped_calc_sgn_approx(x, param):
-            sample = jnp.tanh(param * x)
+            sample = sgn_op(x, param)
             if debias:
                 hard_sample = jnp.sign(x)
                 sample += jax.lax.stop_gradient(hard_sample - sample)
