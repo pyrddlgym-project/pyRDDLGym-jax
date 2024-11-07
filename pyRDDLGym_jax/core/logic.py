@@ -8,28 +8,6 @@ from pyRDDLGym.core.debug.exception import raise_warning
 
 
 # ===========================================================================
-# LOGICAL COMPLEMENT
-# - abstract class
-# - standard complement
-#
-# ===========================================================================
-
-class Complement:
-    '''Base class for approximate logical complement operations.'''
-    
-    def __call__(self, x):
-        raise NotImplementedError
-
-
-class StandardComplement(Complement):
-    '''The standard approximate logical complement given by x -> 1 - x.'''
-    
-    # https://www.sciencedirect.com/science/article/abs/pii/016501149190171L
-    def __call__(self, x):
-        return 1.0 - x
-
-
-# ===========================================================================
 # RELATIONAL OPERATIONS
 # - abstract class
 # - sigmoid comparison
@@ -99,6 +77,28 @@ class SoftRounding(Rounding):
     def round(self, x, param):
         m = jnp.floor(x) + 0.5
         return m + 0.5 * jnp.tanh(param * (x - m)) / jnp.tanh(param / 2.0)    
+
+
+# ===========================================================================
+# LOGICAL COMPLEMENT
+# - abstract class
+# - standard complement
+#
+# ===========================================================================
+
+class Complement:
+    '''Base class for approximate logical complement operations.'''
+    
+    def __call__(self, x):
+        raise NotImplementedError
+
+
+class StandardComplement(Complement):
+    '''The standard approximate logical complement given by x -> 1 - x.'''
+    
+    # https://www.sciencedirect.com/science/article/abs/pii/016501149190171L
+    def __call__(self, x):
+        return 1.0 - x
 
 
 # ===========================================================================
