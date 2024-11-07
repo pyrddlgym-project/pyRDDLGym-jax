@@ -68,7 +68,39 @@ class SigmoidComparison(Comparison):
     def sgn(self, x, param):
         return jnp.tanh(param * x)
  
-        
+ 
+# ===========================================================================
+# ROUNDING OPERATIONS
+# - abstract class
+# - soft rounding
+#
+# ===========================================================================
+
+class Rounding:
+    '''Base class for approximate rounding operations.'''
+    
+    def floor(self, x, param):
+        raise NotImplementedError
+    
+    def round(self, x, param):
+        raise NotImplementedError
+
+
+class SoftRounding(Rounding):
+    '''Rounding operations approximated using soft operations.'''
+    
+    # https://www.tensorflow.org/probability/api_docs/python/tfp/substrates/jax/bijectors/Softfloor
+    def floor(self, x, param):
+        denom = jnp.tanh(param / 4.0)
+        return (jax.nn.sigmoid(param * (x - jnp.floor(x) - 1.0)) - 
+                jax.nn.sigmoid(-param / 2.0)) / denom + jnp.floor(x)
+    
+    # https://arxiv.org/abs/2006.09952
+    def round(self, x, param):
+        m = jnp.floor(x) + 0.5
+        return m + 0.5 * jnp.tanh(param * (x - m)) / jnp.tanh(param / 2.0)    
+
+
 # ===========================================================================
 # TNORMS
 # - abstract tnorm
@@ -259,6 +291,7 @@ class FuzzyLogic:
                  complement: Complement=StandardComplement(),
                  comparison: Comparison=SigmoidComparison(),
                  sampling: RandomSampling=GumbelSoftmax(),
+                 rounding: Rounding=SoftRounding(),
                  weight: float=10.0,
                  debias: Optional[Set[str]]=None,
                  eps: float=1e-15,
@@ -270,6 +303,7 @@ class FuzzyLogic:
         :param complement: fuzzy operator for logical NOT
         :param comparison: fuzzy operator for comparisons (>, >=, <, ==, ~=, ...)
         :param sampling: random sampling of non-reparameterizable distributions
+        :param rounding: rounding floating values to integers
         :param weight: a sharpness parameter for sigmoid and softmax activations
         :param debias: which functions to de-bias approximate on forward pass
         :param eps: small positive float to mitigate underflow
@@ -280,6 +314,7 @@ class FuzzyLogic:
         self.complement = complement
         self.comparison = comparison
         self.sampling = sampling
+        self.rounding = rounding
         self.weight = float(weight)
         if debias is None:
             debias = set()
@@ -305,6 +340,7 @@ class FuzzyLogic:
               f'    complement    ={type(self.complement).__name__}\n'
               f'    comparison    ={type(self.comparison).__name__}\n'
               f'    sampling      ={type(self.sampling).__name__}\n'
+              f'    rounding      ={type(self.rounding).__name__}\n'
               f'    sigmoid_weight={self.weight}\n'
               f'    cpfs_to_debias={self.debias}\n'
               f'    underflow_tol ={self.eps}\n'
@@ -522,15 +558,13 @@ class FuzzyLogic:
     def floor(self):
         if self.verbose:
             raise_warning('Using the replacement rule: '
-                          'floor(x) --> x - SoftFloor(x)')
+                          'floor(x) --> rounding.floor(x)')
         
+        floor_op = self.rounding.floor
         debias = 'floor' in self.debias
         
-        # https://www.tensorflow.org/probability/api_docs/python/tfp/substrates/jax/bijectors/Softfloor
         def _jax_wrapped_calc_floor_approx(x, param):
-            ainv = jnp.tanh(param / 4.0)
-            sample = (jax.nn.sigmoid(param * (x - jnp.floor(x) - 1.0)) - 
-                      jax.nn.sigmoid(-param / 2.0)) / ainv + jnp.floor(x)
+            sample = floor_op(x, param)
             if debias:
                 hard_sample = jnp.floor(x)
                 sample += jax.lax.stop_gradient(hard_sample - sample)
@@ -540,25 +574,16 @@ class FuzzyLogic:
         new_param = (tags, self.weight)
         return _jax_wrapped_calc_floor_approx, new_param
         
-    def ceil(self):
-        jax_floor, jax_param = self.floor()
-        
-        def _jax_wrapped_calc_ceil_approx(x, param):
-            return -jax_floor(-x, param) 
-        
-        return _jax_wrapped_calc_ceil_approx, jax_param
-    
     def round(self):
         if self.verbose:
             raise_warning('Using the replacement rule: '
-                          'round(x) --> SoftRound(x)')
+                          'round(x) --> rounding.round(x)')
         
+        round_op = self.rounding.round
         debias = 'round' in self.debias
         
-        # https://arxiv.org/abs/2006.09952
         def _jax_wrapped_calc_round_approx(x, param):
-            m = jnp.floor(x) + 0.5
-            sample = m + 0.5 * jnp.tanh(param * (x - m)) / jnp.tanh(param / 2.0)    
+            sample = round_op(x, param)
             if debias:
                 hard_sample = jnp.round(x)
                 sample += jax.lax.stop_gradient(hard_sample - sample)
@@ -567,6 +592,14 @@ class FuzzyLogic:
         tags = ('weight', 'round')
         new_param = (tags, self.weight)
         return _jax_wrapped_calc_round_approx, new_param
+    
+    def ceil(self):
+        jax_floor, jax_param = self.floor()
+        
+        def _jax_wrapped_calc_ceil_approx(x, param):
+            return -jax_floor(-x, param) 
+        
+        return _jax_wrapped_calc_ceil_approx, jax_param
     
     def mod(self):
         jax_floor, jax_param = self.floor()
