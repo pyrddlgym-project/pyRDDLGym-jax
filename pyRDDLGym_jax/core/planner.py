@@ -103,10 +103,13 @@ def _load_config(config, args):
     compare_kwargs = model_args.get('comparison_kwargs', {})
     sampling_name = model_args.get('sampling', 'GumbelSoftmax')
     sampling_kwargs = model_args.get('sampling_kwargs', {})
+    rounding_name = model_args.get('rounding', 'SoftRounding')
+    rounding_kwargs = model_args.get('rounding_kwargs', {})
     logic_kwargs['tnorm'] = getattr(logic, tnorm_name)(**tnorm_kwargs)
     logic_kwargs['complement'] = getattr(logic, comp_name)(**comp_kwargs)
     logic_kwargs['comparison'] = getattr(logic, compare_name)(**compare_kwargs)
     logic_kwargs['sampling'] = getattr(logic, sampling_name)(**sampling_kwargs)
+    logic_kwargs['rounding'] = getattr(logic, rounding_name)(**rounding_kwargs)
     
     # read the policy settings
     plan_method = planner_args.pop('method')
