@@ -159,17 +159,17 @@ class YagerTNorm(TNorm):
     (x, y) -> max(1 - ((1 - x)^p + (1 - y)^p)^(1/p)).'''
     
     def __init__(self, p=2.0):
-        self.p = p
+        self.p = float(p)
     
-    def norm(self, x, y):
-        base_x = jax.nn.relu(1.0 - x)
-        base_y = jax.nn.relu(1.0 - y)
-        arg = jnp.power(base_x ** self.p + base_y ** self.p, 1.0 / self.p)
+    def norm(self, x, y):        
+        base = jax.nn.relu(1.0 - jnp.stack([x, y], axis=0))
+        arg = jnp.linalg.norm(base, ord=self.p, axis=0)
         return jax.nn.relu(1.0 - arg)
     
     def norms(self, x, axis):
-        base = jax.nn.relu(1.0 - x)
-        arg = jnp.power(jnp.sum(base ** self.p, axis=axis), 1.0 / self.p)
+        arg = jax.nn.relu(1.0 - x)
+        for ax in sorted(axis, reverse=True):
+            arg = jnp.linalg.norm(arg, ord=self.p, axis=ax)
         return jax.nn.relu(1.0 - arg)
         
 

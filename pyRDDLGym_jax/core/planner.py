@@ -506,7 +506,7 @@ class JaxStraightLinePlan(JaxPlan):
         def _jax_bool_action_to_param(var, action, hyperparams):
             if wrap_sigmoid:
                 weight = hyperparams[var]
-                return (-1.0 / weight) * jnp.log(1.0 / action - 1.0)
+                return jax.scipy.special.logit(action) / weight
             else:
                 return action
             
