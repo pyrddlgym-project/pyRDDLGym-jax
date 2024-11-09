@@ -8,27 +8,6 @@ from pyRDDLGym.core.debug.exception import raise_warning
 
 
 # ===========================================================================
-# LOGICAL COMPLEMENT
-# - abstract class
-# - standard complement
-#
-# ===========================================================================
-
-class Complement:
-    '''Base class for approximate logical complement operations.'''
-    
-    def __call__(self, x):
-        raise NotImplementedError
-
-
-class StandardComplement(Complement):
-    '''The standard approximate logical complement given by x -> 1 - x.'''
-    
-    def __call__(self, x):
-        return 1.0 - x
-
-
-# ===========================================================================
 # RELATIONAL OPERATIONS
 # - abstract class
 # - sigmoid comparison
@@ -47,10 +26,14 @@ class Comparison:
     def equal(self, x, y, param):
         raise NotImplementedError
     
+    def sgn(self, x, param):
+        raise NotImplementedError
+    
 
 class SigmoidComparison(Comparison):
     '''Comparison operations approximated using sigmoid functions.'''
     
+    # https://arxiv.org/abs/2110.05651
     def greater_equal(self, x, y, param):
         return jax.nn.sigmoid(param * (x - y))
     
@@ -59,8 +42,65 @@ class SigmoidComparison(Comparison):
     
     def equal(self, x, y, param):
         return 1.0 - jnp.square(jnp.tanh(param * (y - x)))
+    
+    def sgn(self, x, param):
+        return jnp.tanh(param * x)
  
-        
+ 
+# ===========================================================================
+# ROUNDING OPERATIONS
+# - abstract class
+# - soft rounding
+#
+# ===========================================================================
+
+class Rounding:
+    '''Base class for approximate rounding operations.'''
+    
+    def floor(self, x, param):
+        raise NotImplementedError
+    
+    def round(self, x, param):
+        raise NotImplementedError
+
+
+class SoftRounding(Rounding):
+    '''Rounding operations approximated using soft operations.'''
+    
+    # https://www.tensorflow.org/probability/api_docs/python/tfp/substrates/jax/bijectors/Softfloor
+    def floor(self, x, param):
+        denom = jnp.tanh(param / 4.0)
+        return (jax.nn.sigmoid(param * (x - jnp.floor(x) - 1.0)) - 
+                jax.nn.sigmoid(-param / 2.0)) / denom + jnp.floor(x)
+    
+    # https://arxiv.org/abs/2006.09952
+    def round(self, x, param):
+        m = jnp.floor(x) + 0.5
+        return m + 0.5 * jnp.tanh(param * (x - m)) / jnp.tanh(param / 2.0)    
+
+
+# ===========================================================================
+# LOGICAL COMPLEMENT
+# - abstract class
+# - standard complement
+#
+# ===========================================================================
+
+class Complement:
+    '''Base class for approximate logical complement operations.'''
+    
+    def __call__(self, x):
+        raise NotImplementedError
+
+
+class StandardComplement(Complement):
+    '''The standard approximate logical complement given by x -> 1 - x.'''
+    
+    # https://www.sciencedirect.com/science/article/abs/pii/016501149190171L
+    def __call__(self, x):
+        return 1.0 - x
+
+
 # ===========================================================================
 # TNORMS
 # - abstract tnorm
@@ -69,6 +109,7 @@ class SigmoidComparison(Comparison):
 # - Lukasiewicz tnorm
 # - Yager(p) tnorm
 #
+# https://www.sciencedirect.com/science/article/abs/pii/016501149190171L
 # ===========================================================================
 
 class TNorm:
@@ -118,17 +159,17 @@ class YagerTNorm(TNorm):
     (x, y) -> max(1 - ((1 - x)^p + (1 - y)^p)^(1/p)).'''
     
     def __init__(self, p=2.0):
-        self.p = p
+        self.p = float(p)
     
-    def norm(self, x, y):
-        base_x = jax.nn.relu(1.0 - x)
-        base_y = jax.nn.relu(1.0 - y)
-        arg = jnp.power(base_x ** self.p + base_y ** self.p, 1.0 / self.p)
+    def norm(self, x, y):        
+        base = jax.nn.relu(1.0 - jnp.stack([x, y], axis=0))
+        arg = jnp.linalg.norm(base, ord=self.p, axis=0)
         return jax.nn.relu(1.0 - arg)
     
     def norms(self, x, axis):
-        base = jax.nn.relu(1.0 - x)
-        arg = jnp.power(jnp.sum(base ** self.p, axis=axis), 1.0 / self.p)
+        arg = jax.nn.relu(1.0 - x)
+        for ax in sorted(axis, reverse=True):
+            arg = jnp.linalg.norm(arg, ord=self.p, axis=ax)
         return jax.nn.relu(1.0 - arg)
         
 
@@ -185,10 +226,11 @@ class GumbelSoftmax(RandomSampling):
     def discrete(self, logic):
         if logic.verbose:
             raise_warning('Using the replacement rule: '
-                          'Discrete(p) --> Gumbel-softmax(p)')
+                          'Discrete(p) --> Gumbel-Softmax(p)')
         
         jax_argmax, jax_param = logic.argmax()
         
+        # https://arxiv.org/pdf/1611.01144
         def _jax_wrapped_calc_discrete_gumbel_softmax(key, prob, param):
             Gumbel01 = random.gumbel(key=key, shape=prob.shape, dtype=logic.REAL)
             sample = Gumbel01 + jnp.log(prob + logic.eps)
@@ -249,6 +291,7 @@ class FuzzyLogic:
                  complement: Complement=StandardComplement(),
                  comparison: Comparison=SigmoidComparison(),
                  sampling: RandomSampling=GumbelSoftmax(),
+                 rounding: Rounding=SoftRounding(),
                  weight: float=10.0,
                  debias: Optional[Set[str]]=None,
                  eps: float=1e-15,
@@ -260,6 +303,7 @@ class FuzzyLogic:
         :param complement: fuzzy operator for logical NOT
         :param comparison: fuzzy operator for comparisons (>, >=, <, ==, ~=, ...)
         :param sampling: random sampling of non-reparameterizable distributions
+        :param rounding: rounding floating values to integers
         :param weight: a sharpness parameter for sigmoid and softmax activations
         :param debias: which functions to de-bias approximate on forward pass
         :param eps: small positive float to mitigate underflow
@@ -270,6 +314,7 @@ class FuzzyLogic:
         self.complement = complement
         self.comparison = comparison
         self.sampling = sampling
+        self.rounding = rounding
         self.weight = float(weight)
         if debias is None:
             debias = set()
@@ -295,6 +340,7 @@ class FuzzyLogic:
               f'    complement    ={type(self.complement).__name__}\n'
               f'    comparison    ={type(self.comparison).__name__}\n'
               f'    sampling      ={type(self.sampling).__name__}\n'
+              f'    rounding      ={type(self.rounding).__name__}\n'
               f'    sigmoid_weight={self.weight}\n'
               f'    cpfs_to_debias={self.debias}\n'
               f'    underflow_tol ={self.eps}\n'
@@ -492,12 +538,14 @@ class FuzzyLogic:
      
     def sgn(self):
         if self.verbose:
-            raise_warning('Using the replacement rule: sgn(x) --> tanh(x)')
-            
+            raise_warning('Using the replacement rule: '
+                          'sgn(x) --> comparison.sgn(x)')
+        
+        sgn_op = self.comparison.sgn
         debias = 'sgn' in self.debias
         
         def _jax_wrapped_calc_sgn_approx(x, param):
-            sample = jnp.tanh(param * x)
+            sample = sgn_op(x, param)
             if debias:
                 hard_sample = jnp.sign(x)
                 sample += jax.lax.stop_gradient(hard_sample - sample)
@@ -510,15 +558,41 @@ class FuzzyLogic:
     def floor(self):
         if self.verbose:
             raise_warning('Using the replacement rule: '
-                          'floor(x) --> x - atan(-1.0 / tan(pi * x)) / pi - 0.5')
+                          'floor(x) --> rounding.floor(x)')
+        
+        floor_op = self.rounding.floor
+        debias = 'floor' in self.debias
         
         def _jax_wrapped_calc_floor_approx(x, param):
-            sawtooth_part = jnp.arctan(-1.0 / jnp.tan(x * jnp.pi)) / jnp.pi + 0.5
-            sample = x - jax.lax.stop_gradient(sawtooth_part)
+            sample = floor_op(x, param)
+            if debias:
+                hard_sample = jnp.floor(x)
+                sample += jax.lax.stop_gradient(hard_sample - sample)
             return sample
         
-        return _jax_wrapped_calc_floor_approx, None
+        tags = ('weight', 'floor')
+        new_param = (tags, self.weight)
+        return _jax_wrapped_calc_floor_approx, new_param
         
+    def round(self):
+        if self.verbose:
+            raise_warning('Using the replacement rule: '
+                          'round(x) --> rounding.round(x)')
+        
+        round_op = self.rounding.round
+        debias = 'round' in self.debias
+        
+        def _jax_wrapped_calc_round_approx(x, param):
+            sample = round_op(x, param)
+            if debias:
+                hard_sample = jnp.round(x)
+                sample += jax.lax.stop_gradient(hard_sample - sample)
+            return sample
+        
+        tags = ('weight', 'round')
+        new_param = (tags, self.weight)
+        return _jax_wrapped_calc_round_approx, new_param
+    
     def ceil(self):
         jax_floor, jax_param = self.floor()
         
@@ -526,21 +600,6 @@ class FuzzyLogic:
             return -jax_floor(-x, param) 
         
         return _jax_wrapped_calc_ceil_approx, jax_param
-    
-    def round(self):
-        if self.verbose:
-            raise_warning('Using the replacement rule: round(x) --> x')
-        
-        debias = 'round' in self.debias
-        
-        def _jax_wrapped_calc_round_approx(x, param):
-            sample = x
-            if debias:
-                hard_sample = jnp.round(x)
-                sample += jax.lax.stop_gradient(hard_sample - sample)
-            return sample
-        
-        return _jax_wrapped_calc_round_approx, None
     
     def mod(self):
         jax_floor, jax_param = self.floor()
@@ -586,6 +645,7 @@ class FuzzyLogic:
             
         debias = 'argmax' in self.debias
         
+        # https://arxiv.org/abs/2110.05651
         def _jax_wrapped_calc_argmax_approx(x, axis, param):
             literals = FuzzyLogic.enumerate_literals(x.shape, axis=axis)
             soft_max = jax.nn.softmax(param * x, axis=axis)
@@ -631,14 +691,14 @@ class FuzzyLogic:
         if self.verbose:
             raise_warning('Using the replacement rule: '
                           'switch(pred) { cases } --> '
-                          'sum(cases[i] * softmax(-abs(pred - i)))')   
+                          'sum(cases[i] * softmax(-(pred - i)^2))')   
             
         debias = 'switch' in self.debias
         
         def _jax_wrapped_calc_switch_approx(pred, cases, param):
             literals = FuzzyLogic.enumerate_literals(cases.shape, axis=0)
             pred = jnp.broadcast_to(pred[jnp.newaxis, ...], shape=cases.shape)
-            proximity = -jnp.abs(pred - literals)
+            proximity = -jnp.square(pred - literals)
             soft_case = jax.nn.softmax(param * proximity, axis=0)
             sample = jnp.sum(cases * soft_case, axis=0)
             if debias:
@@ -674,7 +734,7 @@ class FuzzyLogic:
 # ===========================================================================
 
 logic = FuzzyLogic()
-w = 100.0
+w = 1000.0
 
 
 def _test_logical():
@@ -701,7 +761,7 @@ def _test_logical():
 def _test_indexing():
     print('testing indexing')
     _argmax, _ = logic.argmax()
-    _argmin, _ = logic.argmax()
+    _argmin, _ = logic.argmin()
 
     def argmaxmin(x):
         amax = _argmax(x, 0, w)
@@ -764,11 +824,13 @@ def _test_rounding():
     print('testing rounding')
     _floor, _ = logic.floor()
     _ceil, _ = logic.ceil()
+    _round, _ = logic.round()
     _mod, _ = logic.mod()
     
-    x = jnp.asarray([2.1, 0.5001, 1.99, -2.01, -3.2, -0.1, -1.01, 23.01, -101.99, 200.01])
+    x = jnp.asarray([2.1, 0.6, 1.99, -2.01, -3.2, -0.1, -1.01, 23.01, -101.99, 200.01])
     print(_floor(x, w))
     print(_ceil(x, w))
+    print(_round(x, w))
     print(_mod(x, 2.0, w))
 
 
