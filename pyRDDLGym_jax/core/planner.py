@@ -47,7 +47,6 @@ Bounds = Dict[str, Tuple[np.ndarray, np.ndarray]]
 Kwargs = Dict[str, Any]
 Pytree = Any
 
-
 # ***********************************************************************
 # CONFIG FILE MANAGEMENT
 # 
@@ -56,6 +55,7 @@ Pytree = Any
 # - instantiate planner
 #
 # ***********************************************************************
+
 
 def _parse_config_file(path: str):
     if not os.path.isfile(path):
@@ -103,10 +103,13 @@ def _load_config(config, args):
     compare_kwargs = model_args.get('comparison_kwargs', {})
     sampling_name = model_args.get('sampling', 'GumbelSoftmax')
     sampling_kwargs = model_args.get('sampling_kwargs', {})
+    rounding_name = model_args.get('rounding', 'SoftRounding')
+    rounding_kwargs = model_args.get('rounding_kwargs', {})
     logic_kwargs['tnorm'] = getattr(logic, tnorm_name)(**tnorm_kwargs)
     logic_kwargs['complement'] = getattr(logic, comp_name)(**comp_kwargs)
     logic_kwargs['comparison'] = getattr(logic, compare_name)(**compare_kwargs)
     logic_kwargs['sampling'] = getattr(logic, sampling_name)(**sampling_kwargs)
+    logic_kwargs['rounding'] = getattr(logic, rounding_name)(**rounding_kwargs)
     
     # read the policy settings
     plan_method = planner_args.pop('method')
@@ -175,7 +178,6 @@ def load_config_from_string(value: str) -> Tuple[Kwargs, ...]:
     '''Loads config file contents specified explicitly as a string value.'''
     config, args = _parse_config_string(value)
     return _load_config(config, args)
-
     
 # ***********************************************************************
 # MODEL RELAXATIONS
@@ -299,7 +301,6 @@ class JaxRDDLCompilerWithGrad(JaxRDDLCompiler):
         arg, = expr.args
         arg = self._jax(arg, info)
         return arg
-    
 
 # ***********************************************************************
 # ALL VERSIONS OF JAX PLANS
@@ -308,6 +309,7 @@ class JaxRDDLCompilerWithGrad(JaxRDDLCompiler):
 # - deep reactive policy
 #
 # ***********************************************************************
+
 
 class JaxPlan:
     '''Base class for all JAX policy representations.'''
@@ -363,7 +365,7 @@ class JaxPlan:
         self._projection = value
     
     def _calculate_action_info(self, compiled: JaxRDDLCompilerWithGrad,
-                               user_bounds: Bounds, 
+                               user_bounds: Bounds,
                                horizon: int):
         shapes, bounds, bounds_safe, cond_lists = {}, {}, {}, {}
         for (name, prange) in compiled.rddl.variable_ranges.items():
@@ -463,7 +465,7 @@ class JaxStraightLinePlan(JaxPlan):
               f'    max_projection_iters ={self._max_constraint_iter}')
     
     def compile(self, compiled: JaxRDDLCompilerWithGrad,
-                _bounds: Bounds, 
+                _bounds: Bounds,
                 horizon: int) -> None:
         rddl = compiled.rddl
         
@@ -504,7 +506,7 @@ class JaxStraightLinePlan(JaxPlan):
         def _jax_bool_action_to_param(var, action, hyperparams):
             if wrap_sigmoid:
                 weight = hyperparams[var]
-                return (-1.0 / weight) * jnp.log(1.0 / action - 1.0)
+                return jax.scipy.special.logit(action) / weight
             else:
                 return action
             
@@ -513,14 +515,13 @@ class JaxStraightLinePlan(JaxPlan):
         def _jax_non_bool_param_to_action(var, param, hyperparams):
             if wrap_non_bool:
                 lower, upper = bounds_safe[var]
-                action = jnp.select(
-                    condlist=cond_lists[var],
-                    choicelist=[
-                        lower + (upper - lower) * jax.nn.sigmoid(param),
-                        lower + (jax.nn.elu(param) + 1.0),
-                        upper - (jax.nn.elu(-param) + 1.0),
-                        param
-                    ]
+                mb, ml, mu, mn = [mask.astype(compiled.REAL) 
+                                  for mask in cond_lists[var]]       
+                action = (
+                    mb * (lower + (upper - lower) * jax.nn.sigmoid(param)) + 
+                    ml * (lower + (jax.nn.elu(param) + 1.0)) + 
+                    mu * (upper - (jax.nn.elu(-param) + 1.0)) + 
+                    mn * param
                 )
             else:
                 action = param
@@ -780,7 +781,7 @@ class JaxDeepReactivePolicy(JaxPlan):
     def __init__(self, topology: Optional[Sequence[int]]=None,
                  activation: Activation=jnp.tanh,
                  initializer: hk.initializers.Initializer=hk.initializers.VarianceScaling(scale=2.0),
-                 normalize: bool=False, 
+                 normalize: bool=False,
                  normalize_per_layer: bool=False,
                  normalizer_kwargs: Optional[Kwargs]=None,
                  wrap_non_bool: bool=False) -> None:
@@ -828,7 +829,7 @@ class JaxDeepReactivePolicy(JaxPlan):
               f'    wrap_non_bool       ={self._wrap_non_bool}')
     
     def compile(self, compiled: JaxRDDLCompilerWithGrad,
-                _bounds: Bounds, 
+                _bounds: Bounds,
                 horizon: int) -> None:
         rddl = compiled.rddl
         
@@ -881,7 +882,7 @@ class JaxDeepReactivePolicy(JaxPlan):
                     if normalize_per_layer and value_size == 1:
                         raise_warning(
                             f'Cannot apply layer norm to state-fluent <{var}> '
-                            f'of size 1: setting normalize_per_layer = False.', 
+                            f'of size 1: setting normalize_per_layer = False.',
                             'red')
                         normalize_per_layer = False
                     non_bool_dims += value_size
@@ -906,8 +907,8 @@ class JaxDeepReactivePolicy(JaxPlan):
                     else:
                         if normalize and normalize_per_layer:
                             normalizer = hk.LayerNorm(
-                                axis=-1, param_axis=-1, 
-                                name=f'input_norm_{input_names[var]}', 
+                                axis=-1, param_axis=-1,
+                                name=f'input_norm_{input_names[var]}',
                                 **self._normalizer_kwargs)
                             state = normalizer(state)
                         states_non_bool.append(state)
@@ -917,7 +918,7 @@ class JaxDeepReactivePolicy(JaxPlan):
             # optionally perform layer normalization on the non-bool inputs
             if normalize and not normalize_per_layer and non_bool_dims:
                 normalizer = hk.LayerNorm(
-                    axis=-1, param_axis=-1, name='input_norm', 
+                    axis=-1, param_axis=-1, name='input_norm',
                     **self._normalizer_kwargs)
                 normalized = normalizer(state[:non_bool_dims])
                 state = state.at[:non_bool_dims].set(normalized)
@@ -950,14 +951,13 @@ class JaxDeepReactivePolicy(JaxPlan):
                 else:
                     if wrap_non_bool:
                         lower, upper = bounds_safe[var]
-                        action = jnp.select(
-                            condlist=cond_lists[var],
-                            choicelist=[
-                                lower + (upper - lower) * jax.nn.sigmoid(output),
-                                lower + (jax.nn.elu(output) + 1.0),
-                                upper - (jax.nn.elu(-output) + 1.0),
-                                output
-                            ]
+                        mb, ml, mu, mn = [mask.astype(compiled.REAL) 
+                                          for mask in cond_lists[var]]       
+                        action = (
+                            mb * (lower + (upper - lower) * jax.nn.sigmoid(output)) + 
+                            ml * (lower + (jax.nn.elu(output) + 1.0)) + 
+                            mu * (upper - (jax.nn.elu(-output) + 1.0)) + 
+                            mn * output
                         )
                     else:
                         action = output
@@ -1049,7 +1049,6 @@ class JaxDeepReactivePolicy(JaxPlan):
         
     def guess_next_epoch(self, params: Pytree) -> Pytree:
         return params
-
     
 # ***********************************************************************
 # ALL VERSIONS OF JAX PLANNER
@@ -1058,6 +1057,7 @@ class JaxDeepReactivePolicy(JaxPlan):
 # - more stable but slower line search based planner
 #
 # ***********************************************************************
+
 
 class RollingMean:
     '''Maintains an estimate of the rolling mean of a stream of real-valued 
@@ -1080,7 +1080,7 @@ class RollingMean:
 class JaxPlannerPlot:
     '''Supports plotting and visualization of a JAX policy in real time.'''
     
-    def __init__(self, rddl: RDDLPlanningModel, horizon: int, 
+    def __init__(self, rddl: RDDLPlanningModel, horizon: int,
                  show_violin: bool=True, show_action: bool=True) -> None:
         '''Creates a new planner visualizer.
         
@@ -1128,7 +1128,7 @@ class JaxPlannerPlot:
                 for dim in rddl.object_counts(rddl.variable_params[name]):
                     action_dim *= dim     
                 action_plot = ax.pcolormesh(
-                    np.zeros((action_dim, horizon)), 
+                    np.zeros((action_dim, horizon)),
                     cmap='seismic', vmin=vmin, vmax=vmax)
                 ax.set_aspect('auto')        
                 ax.set_xlabel('decision epoch')
@@ -1404,7 +1404,7 @@ class JaxBackpropPlanner:
         
         # Jax compilation of the exact RDDL for testing
         self.test_compiled = JaxRDDLCompiler(
-            rddl=rddl, 
+            rddl=rddl,
             logger=self.logger,
             use64bit=self.use64bit)
         self.test_compiled.compile(log_jax_expr=True, heading='EXACT MODEL')
@@ -1547,7 +1547,7 @@ class JaxBackpropPlanner:
         return init_train, init_test
     
     def as_optimization_problem(
-            self, key: Optional[random.PRNGKey]=None, 
+            self, key: Optional[random.PRNGKey]=None,
             policy_hyperparams: Optional[Pytree]=None,
             loss_function_updates_key: bool=True,
             grad_function_updates_key: bool=False) -> Tuple[Callable, Callable, np.ndarray, Callable]:
@@ -1599,7 +1599,7 @@ class JaxBackpropPlanner:
         @jax.jit
         def _loss_with_key(key, params_1d):
             policy_params = unravel_fn(params_1d)
-            loss_val, _ = loss_fn(key, policy_params, policy_hyperparams, 
+            loss_val, _ = loss_fn(key, policy_params, policy_hyperparams,
                                   train_subs, model_params)
             return loss_val
         
@@ -1607,7 +1607,7 @@ class JaxBackpropPlanner:
         def _grad_with_key(key, params_1d):
             policy_params = unravel_fn(params_1d)
             grad_fn = jax.grad(loss_fn, argnums=1, has_aux=True)
-            grad_val, _ = grad_fn(key, policy_params, policy_hyperparams, 
+            grad_val, _ = grad_fn(key, policy_params, policy_hyperparams,
                                   train_subs, model_params)
             grad_1d = jax.flatten_util.ravel_pytree(grad_val)[0]
             return grad_1d
@@ -1947,7 +1947,7 @@ class JaxBackpropPlanner:
                   f'    best_grad_norm={grad_norm}\n'
                   f'    diagnosis: {diagnosis}\n')
     
-    def _perform_diagnosis(self, last_iter_improve, 
+    def _perform_diagnosis(self, last_iter_improve,
                            train_return, test_return, best_return, grad_norm):
         max_grad_norm = max(jax.tree_util.tree_leaves(grad_norm))
         grad_is_zero = np.allclose(max_grad_norm, 0)
@@ -2126,7 +2126,7 @@ class JaxLineSearchPlanner(JaxBackpropPlanner):
                 trials += 1
                 step *= decay
                 f_step, new_params, new_state = _jax_wrapped_line_search_trial(
-                    step, grad, key, policy_params, hyperparams, subs, 
+                    step, grad, key, policy_params, hyperparams, subs,
                     model_params, opt_state)
                 if f_step < best_f:
                     best_f, best_step, best_params, best_state = \
@@ -2139,7 +2139,6 @@ class JaxLineSearchPlanner(JaxBackpropPlanner):
             return best_params, True, best_state, opt_aux, best_f, log
             
         return _jax_wrapped_plan_update
-
 
 # ***********************************************************************
 # ALL VERSIONS OF RISK FUNCTIONS
@@ -2171,7 +2170,6 @@ def cvar_utility(returns: jnp.ndarray, alpha: float) -> float:
     alpha_mask = jax.lax.stop_gradient(
         returns <= jnp.percentile(returns, q=100 * alpha))
     return jnp.sum(returns * alpha_mask) / jnp.sum(alpha_mask)
-    
 
 # ***********************************************************************
 # ALL VERSIONS OF CONTROLLERS
@@ -2181,12 +2179,13 @@ def cvar_utility(returns: jnp.ndarray, alpha: float) -> float:
 #
 # ***********************************************************************
 
+
 class JaxOfflineController(BaseAgent):
     '''A container class for a Jax policy trained offline.'''
     
     use_tensor_obs = True
     
-    def __init__(self, planner: JaxBackpropPlanner, 
+    def __init__(self, planner: JaxBackpropPlanner,
                  key: Optional[random.PRNGKey]=None,
                  eval_hyperparams: Optional[Dict[str, Any]]=None,
                  params: Optional[Pytree]=None,
@@ -2241,7 +2240,7 @@ class JaxOnlineController(BaseAgent):
     
     use_tensor_obs = True
     
-    def __init__(self, planner: JaxBackpropPlanner, 
+    def __init__(self, planner: JaxBackpropPlanner,
                  key: Optional[random.PRNGKey]=None,
                  eval_hyperparams: Optional[Dict[str, Any]]=None,
                  warm_start: bool=True,
