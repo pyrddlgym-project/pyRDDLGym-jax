@@ -9,7 +9,7 @@ import warnings
 warnings.filterwarnings("ignore")
 
 from bayes_opt import BayesianOptimization
-from bayes_opt.util import UtilityFunction
+from bayes_opt.acquisition import AcquisitionFunction, UpperConfidenceBound
 import jax
 import numpy as np
 
@@ -26,7 +26,6 @@ from pyRDDLGym_jax.core.planner import (
 
 Kwargs = Dict[str, Any]
 
-
 # ===============================================================================
 # 
 # GENERIC TUNING MODULE
@@ -37,6 +36,9 @@ Kwargs = Dict[str, Any]
 # 3. deep reactive policies
 # 
 # ===============================================================================
+COLUMNS = ['pid', 'worker', 'iteration', 'target', 'best_target', 'acq_params']
+
+
 class JaxParameterTuning:
     '''A general-purpose class for tuning a Jax planner.'''
     
@@ -53,7 +55,7 @@ class JaxParameterTuning:
                  num_workers: int=1,
                  poll_frequency: float=0.2,
                  gp_iters: int=25,
-                 acquisition: Optional[UtilityFunction]=None,
+                 acquisition: Optional[AcquisitionFunction]=None,
                  gp_init_kwargs: Optional[Kwargs]=None,
                  gp_params: Optional[Kwargs]=None) -> None:
         '''Creates a new instance for tuning hyper-parameters for Jax planners
@@ -113,10 +115,9 @@ class JaxParameterTuning:
         self.gp_params = gp_params
         
         # create acquisition function
-        self.acq_args = None
         if acquisition is None:
             num_samples = self.gp_iters * self.num_workers
-            acquisition, self.acq_args = JaxParameterTuning._annealing_utility(num_samples)
+            acquisition = JaxParameterTuning._annealing_acquisition(num_samples)
         self.acquisition = acquisition
     
     def summarize_hyperparameters(self) -> None:
@@ -133,23 +134,15 @@ class JaxParameterTuning:
               f'    planning_trials_per_iter  ={self.eval_trials}\n'
               f'    planning_iters_per_trial  ={self.train_epochs}\n'
               f'    planning_timeout_per_trial={self.timeout_training}\n'
-              f'    acquisition_fn            ={type(self.acquisition).__name__}')
-        if self.acq_args is not None:
-            print(f'using default acquisition function:\n'
-                  f'    utility_kind ={self.acq_args[0]}\n'
-                  f'    initial_kappa={self.acq_args[1]}\n'
-                  f'    kappa_decay  ={self.acq_args[2]}')
+              f'    acquisition_fn            ={self.acquisition}')
         
     @staticmethod
-    def _annealing_utility(n_samples, n_delay_samples=0, kappa1=10.0, kappa2=1.0):
-        kappa_decay = (kappa2 / kappa1) ** (1.0 / (n_samples - n_delay_samples))
-        utility_fn = UtilityFunction(
-            kind='ucb',
+    def _annealing_acquisition(n_samples, n_delay_samples=0, kappa1=10.0, kappa2=1.0):
+        acq_fn = UpperConfidenceBound(
             kappa=kappa1,
-            kappa_decay=kappa_decay,
-            kappa_decay_delay=n_delay_samples)
-        utility_args = ['ucb', kappa1, kappa_decay]
-        return utility_fn, utility_args
+            exploration_decay=(kappa2 / kappa1) ** (1.0 / (n_samples - n_delay_samples)),
+            exploration_decay_delay=n_delay_samples)
+        return acq_fn
     
     def _pickleable_objective_with_kwargs(self):
         raise NotImplementedError
@@ -160,7 +153,7 @@ class JaxParameterTuning:
         pid = os.getpid()
         return index, pid, params, target
 
-    def tune(self, key: jax.random.PRNGKey, 
+    def tune(self, key: jax.random.PRNGKey,
              filename: str,
              save_plot: bool=False) -> Dict[str, Any]:
         '''Tunes the hyper-parameters for Jax planner, returns the best found.'''
@@ -178,32 +171,28 @@ class JaxParameterTuning:
             for (name, hparam) in self.hyperparams_dict.items()
         }
         optimizer = BayesianOptimization(
-            f=None,  # probe() is not called
+            f=None,
+            acquisition_function=self.acquisition,
             pbounds=hyperparams_bounds,
             allow_duplicate_points=True,  # to avoid crash
             random_state=np.random.RandomState(key),
             **self.gp_init_kwargs
         )
         optimizer.set_gp_params(**self.gp_params)
-        utility = self.acquisition
         
         # suggest initial parameters to evaluate
         num_workers = self.num_workers
-        suggested, kappas = [], []
+        suggested, acq_params = [], []
         for _ in range(num_workers):
-            utility.update_params()
-            probe = optimizer.suggest(utility)
-            suggested.append(probe)  
-            kappas.append(utility.kappa)
+            probe = optimizer.suggest()
+            suggested.append(probe) 
+            acq_params.append(vars(optimizer.acquisition_function))
         
         # clear and prepare output file
         filename = self._filename(filename, 'csv')
         with open(filename, 'w', newline='') as file:
             writer = csv.writer(file)
-            writer.writerow(
-                ['pid', 'worker', 'iteration', 'target', 'best_target', 'kappa'] + \
-                list(hyperparams_bounds.keys())
-            )
+            writer.writerow(COLUMNS + list(hyperparams_bounds.keys()))
                 
         # start multiprocess evaluation
         worker_ids = list(range(num_workers))
@@ -219,8 +208,8 @@ class JaxParameterTuning:
             
             # continue with next iteration
             print('\n' + '*' * 25 + 
-                  '\n' + f'[{datetime.timedelta(seconds=elapsed)}] ' + 
-                  f'starting iteration {it}' + 
+                  f'\n[{datetime.timedelta(seconds=elapsed)}] ' + 
+                  f'starting iteration {it + 1}' + 
                   '\n' + '*' * 25)
             key, *subkeys = jax.random.split(key, num=num_workers + 1)
             rows = [None] * num_workers
@@ -256,10 +245,9 @@ class JaxParameterTuning:
                         optimizer.register(params, target)
                         
                         # update acquisition function and suggest a new point
-                        utility.update_params()  
-                        suggested[index] = optimizer.suggest(utility)
-                        old_kappa = kappas[index]
-                        kappas[index] = utility.kappa
+                        suggested[index] = optimizer.suggest()
+                        old_acq_params = acq_params[index]
+                        acq_params[index] = vars(optimizer.acquisition_function)
                         
                         # transform suggestion back to natural space
                         rddl_params = {
@@ -272,8 +260,8 @@ class JaxParameterTuning:
                             best_params, best_target = rddl_params, target
                         
                         # write progress to file in real time
-                        rows[index] = [pid, index, it, target, best_target, old_kappa] + \
-                                      list(rddl_params.values())
+                        info_i = [pid, index, it, target, best_target, old_acq_params]
+                        rows[index] = info_i + list(rddl_params.values())
                         
             # write results of all processes in current iteration to file
             with open(filename, 'a', newline='') as file:
@@ -308,16 +296,20 @@ class JaxParameterTuning:
             raise_warning(f'failed to import packages matplotlib or sklearn, '
                           f'aborting plot of search space\n{e}', 'red')
         else:
-            data = np.loadtxt(filename, delimiter=',', dtype=object)
-            data, target = data[1:, 3:], data[1:, 2]
-            data = data.astype(np.float64)
-            target = target.astype(np.float64)
+            with open(filename, 'r') as file:
+                data_iter = csv.reader(file, delimiter=',')
+                data = [row for row in data_iter]
+            data = np.asarray(data, dtype=object)
+            hparam = data[1:, len(COLUMNS):].astype(np.float64)
+            target = data[1:, 3].astype(np.float64)
             target = (target - np.min(target)) / (np.max(target) - np.min(target))
             embedding = MDS(n_components=2, normalized_stress='auto')
-            data1 = embedding.fit_transform(data)
-            sc = plt.scatter(data1[:, 0], data1[:, 1], c=target, s=4.,
-                             cmap='seismic', edgecolor='gray',
-                             linewidth=0.01, alpha=0.4)
+            hparam_low = embedding.fit_transform(hparam)
+            sc = plt.scatter(hparam_low[:, 0], hparam_low[:, 1], c=target, s=5,
+                             cmap='seismic', edgecolor='gray', linewidth=0)
+            ax = plt.gca()
+            for i in range(len(target)):
+                ax.annotate(str(i), (hparam_low[i, 0], hparam_low[i, 1]), fontsize=3)         
             plt.colorbar(sc)
             plt.savefig(self._filename('gp_points', 'pdf'))
             plt.clf()
@@ -342,9 +334,11 @@ def objective_slp(params, kwargs, key, index):
         std, lr, w, wa = param_values
     else:
         std, lr, w = param_values
-        wa = None                      
+        wa = None         
+    key, subkey = jax.random.split(key)             
     if kwargs['verbose']:
-        print(f'[{index}] key={key}, std={std}, lr={lr}, w={w}, wa={wa}...', flush=True)
+        print(f'[{index}] key={subkey[0]}, '
+              f'std={std}, lr={lr}, w={w}, wa={wa}...', flush=True)
         
     # initialize planning algorithm
     planner = JaxBackpropPlanner(
@@ -358,7 +352,6 @@ def objective_slp(params, kwargs, key, index):
     model_params = {name: w for name in planner.compiled.model_params}
     
     # initialize policy
-    key, subkey = jax.random.split(key)
     policy = JaxOfflineController(
         planner=planner,
         key=subkey,
@@ -384,7 +377,7 @@ def objective_slp(params, kwargs, key, index):
         key, subkey = jax.random.split(key)
         total_reward = policy.evaluate(env, seed=np.array(subkey)[0])['mean']
         if kwargs['verbose']:
-            print(f'    [{index}] trial {trial + 1} key={subkey}, '
+            print(f'    [{index}] trial {trial + 1} key={subkey[0]}, '
                   f'reward={total_reward}', flush=True)
         average_reward += total_reward / kwargs['eval_trials']        
     if kwargs['verbose']:
@@ -474,8 +467,10 @@ def objective_replan(params, kwargs, key, index):
     else:
         std, lr, w, T = param_values
         wa = None        
+    key, subkey = jax.random.split(key)
     if kwargs['verbose']:
-        print(f'[{index}] key={key}, std={std}, lr={lr}, w={w}, wa={wa}, T={T}...', flush=True)
+        print(f'[{index}] key={subkey[0]}, '
+              f'std={std}, lr={lr}, w={w}, wa={wa}, T={T}...', flush=True)
 
     # initialize planning algorithm
     planner = JaxBackpropPlanner(
@@ -490,7 +485,6 @@ def objective_replan(params, kwargs, key, index):
     model_params = {name: w for name in planner.compiled.model_params}
     
     # initialize controller
-    key, subkey = jax.random.split(key)
     policy = JaxOnlineController(
         planner=planner,
         key=subkey,
@@ -516,7 +510,7 @@ def objective_replan(params, kwargs, key, index):
         key, subkey = jax.random.split(key)
         total_reward = policy.evaluate(env, seed=np.array(subkey)[0])['mean']
         if kwargs['verbose']:
-            print(f'    [{index}] trial {trial + 1} key={subkey}, '
+            print(f'    [{index}] trial {trial + 1} key={subkey[0]}, '
                   f'reward={total_reward}', flush=True)
         average_reward += total_reward / kwargs['eval_trials']        
     if kwargs['verbose']:
@@ -602,9 +596,11 @@ def objective_drp(params, kwargs, key, index):
     ]
     
     # unpack hyper-parameters
-    lr, w, layers, neurons = param_values                      
+    lr, w, layers, neurons = param_values   
+    key, subkey = jax.random.split(key)                   
     if kwargs['verbose']:
-        print(f'[{index}] key={key}, lr={lr}, w={w}, layers={layers}, neurons={neurons}...', flush=True)
+        print(f'[{index}] key={subkey[0]}, '
+              f'lr={lr}, w={w}, layers={layers}, neurons={neurons}...', flush=True)
            
     # initialize planning algorithm
     planner = JaxBackpropPlanner(
@@ -618,7 +614,6 @@ def objective_drp(params, kwargs, key, index):
     model_params = {name: w for name in planner.compiled.model_params}
     
     # initialize policy
-    key, subkey = jax.random.split(key)
     policy = JaxOfflineController(
         planner=planner,
         key=subkey,
@@ -644,7 +639,7 @@ def objective_drp(params, kwargs, key, index):
         key, subkey = jax.random.split(key)
         total_reward = policy.evaluate(env, seed=np.array(subkey)[0])['mean']
         if kwargs['verbose']:
-            print(f'    [{index}] trial {trial + 1} key={subkey}, '
+            print(f'    [{index}] trial {trial + 1} key={subkey[0]}, '
                   f'reward={total_reward}', flush=True)
         average_reward += total_reward / kwargs['eval_trials']
     if kwargs['verbose']:

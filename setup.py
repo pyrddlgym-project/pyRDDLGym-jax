@@ -31,13 +31,15 @@ setup(
       install_requires=[
           'pyRDDLGym>=2.0',
           'tqdm>=4.66',
-          'bayesian-optimization>=1.4.3',
           'jax>=0.4.12',
           'optax>=0.1.9',
           'dm-haiku>=0.0.10',
           'tensorflow-probability>=0.21.0'
-        ],
-      python_requires=">=3.8",
+      ],
+      extras_require={
+          'extra': ['bayesian-optimization>=2.0.0', 'rddlrepository>=2.0']
+      },
+      python_requires=">=3.9",
       package_data={'': ['*.cfg']},
       include_package_data=True,
       classifiers=[
