@@ -160,10 +160,17 @@ def _load_config(config, args):
         else:
             planner_args['optimizer'] = optimizer
         
-    # read the optimize call settings
+    # optimize call RNG key
     planner_key = train_args.get('key', None)
     if planner_key is not None:
         train_args['key'] = random.PRNGKey(planner_key)
+    
+    # optimize call stopping rule
+    stopping_rule = train_args.get('stopping_rule', None)
+    if stopping_rule is not None:
+        stopping_rule_kwargs = train_args.pop('stopping_rule_kwargs', {})
+        train_args['stopping_rule'] = getattr(
+            sys.modules[__name__], stopping_rule)(**stopping_rule_kwargs)
     
     return planner_args, plan_kwargs, train_args
 
@@ -1201,6 +1208,39 @@ class JaxPlannerStatus(Enum):
         return self.value >= 3
 
 
+class JaxPlannerStoppingRule:
+    '''The base class of all planner stopping rules.'''
+    
+    def reset(self) -> None:
+        raise NotImplementedError
+        
+    def monitor(self, callback: Dict[str, Any]) -> bool:
+        raise NotImplementedError
+    
+
+class NoImprovementStoppingRule(JaxPlannerStoppingRule):
+    '''Stopping rule based on no improvement for a fixed number of iterations.'''
+    
+    def __init__(self, patience: int) -> None:
+        self.patience = patience
+    
+    def reset(self) -> None:
+        self.callback = None
+        self.iters_since_last_update = 0
+        
+    def monitor(self, callback: Dict[str, Any]) -> bool:
+        if self.callback is None \
+        or callback['best_return'] > self.callback['best_return']:
+            self.callback = callback
+            self.iters_since_last_update = 0
+        else:
+            self.iters_since_last_update += 1
+        return self.iters_since_last_update >= self.patience
+    
+    def __str__(self) -> str:
+        return f'No improvement for {self.patience} iterations'
+        
+
 class JaxBackpropPlanner:
     '''A class for optimizing an action sequence in the given RDDL MDP using 
     gradient descent.'''
@@ -1346,14 +1386,14 @@ class JaxBackpropPlanner:
         except Exception as _:
             devices_short = 'N/A'
         LOGO = \
+r"""
+   __   ______   __  __   ______  __       ______   __   __    
+  /\ \ /\  __ \ /\_\_\_\ /\  == \/\ \     /\  __ \ /\ "-.\ \   
+ _\_\ \\ \  __ \\/_/\_\/_\ \  _-/\ \ \____\ \  __ \\ \ \-.  \  
+/\_____\\ \_\ \_\ /\_\/\_\\ \_\   \ \_____\\ \_\ \_\\ \_\\"\_\ 
+\/_____/ \/_/\/_/ \/_/\/_/ \/_/    \/_____/ \/_/\/_/ \/_/ \/_/ 
 """
-   __    ______    __  __    ______  __        ______    __   __    
-  /\ \  /\  __ \  /\_\_\_\  /\  == \/\ \      /\  __ \  /\ "-.\ \   
- _\_\ \ \ \  __ \ \/_/\_\/_ \ \  _-/\ \ \____ \ \  __ \ \ \ \-.  \  
-/\_____\ \ \_\ \_\  /\_\/\_\ \ \_\   \ \_____\ \ \_\ \_\ \ \_\\"\_\ 
-\/_____/  \/_/\/_/  \/_/\/_/  \/_/    \/_____/  \/_/\/_/  \/_/ \/_/ 
-"""
-                                                       
+                   
         print('\n'
               f'{LOGO}\n'
               f'Version {__version__}\n' 
@@ -1656,6 +1696,7 @@ class JaxBackpropPlanner:
         :param print_summary: whether to print planner header, parameter 
         summary, and diagnosis
         :param print_progress: whether to print the progress bar during training
+        :param stopping_rule: stopping criterion
         :param test_rolling_window: the test return is averaged on a rolling 
         window of the past test_rolling_window returns when updating the best
         parameters found so far
@@ -1681,13 +1722,14 @@ class JaxBackpropPlanner:
                            epochs: int=999999,
                            train_seconds: float=120.,
                            plot_step: Optional[int]=None,
-                           plot_kwargs: Optional[Dict[str, Any]]=None,
+                           plot_kwargs: Optional[Kwargs]=None,
                            model_params: Optional[Dict[str, Any]]=None,
                            policy_hyperparams: Optional[Dict[str, Any]]=None,
                            subs: Optional[Dict[str, Any]]=None,
                            guess: Optional[Pytree]=None,
                            print_summary: bool=True,
                            print_progress: bool=True,
+                           stopping_rule: Optional[JaxPlannerStoppingRule]=None,
                            test_rolling_window: int=10,
                            tqdm_position: Optional[int]=None) -> Generator[Dict[str, Any], None, None]:
         '''Returns a generator for computing an optimal policy or plan. 
@@ -1709,6 +1751,7 @@ class JaxBackpropPlanner:
         :param print_summary: whether to print planner header, parameter 
         summary, and diagnosis
         :param print_progress: whether to print the progress bar during training
+        :param stopping_rule: stopping criterion
         :param test_rolling_window: the test return is averaged on a rolling 
         window of the past test_rolling_window returns when updating the best
         parameters found so far
@@ -1760,7 +1803,8 @@ class JaxBackpropPlanner:
                   f'    plot_frequency     ={plot_step}\n'
                   f'    plot_kwargs        ={plot_kwargs}\n'
                   f'    print_summary      ={print_summary}\n'
-                  f'    print_progress     ={print_progress}\n')
+                  f'    print_progress     ={print_progress}\n'
+                  f'    stopping_rule      ={stopping_rule}\n')
             if self.compiled.relaxations:
                 print('Some RDDL operations are non-differentiable, '
                       'they will be approximated as follows:')
@@ -1806,6 +1850,10 @@ class JaxBackpropPlanner:
         status = JaxPlannerStatus.NORMAL
         is_all_zero_fn = lambda x: np.allclose(x, 0)
         
+        # initialize stopping criterion
+        if stopping_rule is not None:
+            stopping_rule.reset()
+            
         # initialize plot area
         if plot_step is None or plot_step <= 0 or plt is None:
             plot = None
@@ -1893,8 +1941,7 @@ class JaxBackpropPlanner:
                 status = JaxPlannerStatus.ITER_BUDGET_REACHED
             
             # return a callback
-            start_time_outside = time.time()
-            yield {
+            callback = {
                 'status': status,
                 'iteration': it,
                 'train_return':-train_loss,
@@ -1911,11 +1958,17 @@ class JaxBackpropPlanner:
                 'key': key,
                 **log
             }
+            start_time_outside = time.time()
+            yield callback
             elapsed_outside_loop += (time.time() - start_time_outside)
             
             # abortion check
             if status.is_failure():
                 break
+            
+            # stopping condition reached
+            if stopping_rule is not None and stopping_rule.monitor(callback):
+                break                
                         
         # release resources
         if print_progress:
