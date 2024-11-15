@@ -31,17 +31,17 @@ To use the compiler or planner without the automated hyper-parameter tuning, you
 - ``tensorflow-probability>=0.21.0``
 
 Additionally, if you wish to run the examples, you need ``rddlrepository>=2``. 
-To run the automated tuning optimization, you will also need ``bayesian-optimization>=1.4.3``.
+To run the automated tuning optimization, you will also need ``bayesian-optimization>=2.0.0``.
 
-You can install this package, together with all of its requirements, via pip:
+You can install pyRDDLGym-jax with all requirements using pip:
 
 ```shell
-pip install rddlrepository pyRDDLGym-jax
+pip install pyRDDLGym-jax[extra]
 ```
 
 ## Running from the Command Line
 
-A basic run script is provided to run the Jax Planner on any domain in ``rddlrepository``, and can be launched in the command line from the install directory of pyRDDLGym-jax:
+A basic run script is provided to run the Jax Planner on any domain in ``rddlrepository`` from the install directory of pyRDDLGym-jax:
 
 ```shell
 python -m pyRDDLGym_jax.examples.run_plan <domain> <instance> <method> <episodes>
@@ -65,8 +65,8 @@ python -m pyRDDLGym_jax.examples.run_tune <domain> <instance> <method> <trials> 
 ```
 
 where:
-- ``domain`` is the domain identifier as specified in rddlrepository (i.e. Wildfire_MDP_ippc2014)
-- ``instance`` is the instance identifier (i.e. 1, 2, ... 10)
+- ``domain`` is the domain identifier as specified in rddlrepository
+- ``instance`` is the instance identifier
 - ``method`` is the planning method to use (i.e. drp, slp, replan)
 - ``trials`` is the (optional) number of trials/episodes to average in evaluating each hyper-parameter setting
 - ``iters`` is the (optional) maximum number of iterations/evaluations of Bayesian optimization to perform
