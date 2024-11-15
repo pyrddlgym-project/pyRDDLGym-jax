@@ -59,9 +59,7 @@ def main(domain, instance, method, trials=5, iters=20, workers=4):
                           gp_iters=iters)
     
     # perform tuning and report best parameters
-    best = tuning.tune(key=train_args['key'], filename=f'gp_{method}', 
-                       save_plot=True)
-    print(f'best parameters found: {best}')
+    tuning.tune(key=train_args['key'], filename=f'gp_{method}', save_plot=True)
 
 
 if __name__ == "__main__":
