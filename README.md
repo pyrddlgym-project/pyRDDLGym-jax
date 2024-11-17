@@ -2,9 +2,10 @@
 
 Author: [Mike Gimelfarb](https://mike-gimelfarb.github.io)
 
-This directory provides:
-1. automated translation and compilation of RDDL description files into [JAX](https://github.com/google/jax), converting any RDDL domain to a differentiable simulator!
-2. powerful, fast and scalable gradient-based planning algorithms, with extendible and flexible policy class representations, automatic model relaxations for working in discrete and hybrid domains, and much more!
+**pyRDDLGym-jax is an efficient gradient-based/differentiable planning algorithm in JAX.** It provides:
+
+1. automatic translation of any RDDL description file into a differentiable simulator in JAX
+2. flexible policy class representations, automatic model relaxations for working in discrete and hybrid domains, Bayesian hyper-parameter tuning, and much more!
 
 > [!NOTE]  
 > While Jax planners can support some discrete state/action problems through model relaxations, on some discrete problems it can perform poorly (though there is an ongoing effort to remedy this!).
