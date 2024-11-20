@@ -1,14 +1,12 @@
 # pyRDDLGym-jax
 
-Author: [Mike Gimelfarb](https://mike-gimelfarb.github.io)
-
 **pyRDDLGym-jax (known in the literature as JaxPlan) is an efficient gradient-based/differentiable planning algorithm in JAX.** It provides:
 
 1. automatic translation of any RDDL description file into a differentiable simulator in JAX
 2. flexible policy class representations, automatic model relaxations for working in discrete and hybrid domains, Bayesian hyper-parameter tuning, and much more!
 
 > [!NOTE]  
-> While Jax planners can support some discrete state/action problems through model relaxations, on some discrete problems it can perform poorly (though there is an ongoing effort to remedy this!).
+> While JaxPlan can support some discrete state/action problems through model relaxations, on some discrete problems it can perform poorly (though there is an ongoing effort to remedy this!).
 > If you find it is not making sufficient progress, check out the [PROST planner](https://github.com/pyrddlgym-project/pyRDDLGym-prost) (for discrete spaces) or the [deep reinforcement learning wrappers](https://github.com/pyrddlgym-project/pyRDDLGym-rl).
 
 ## Contents
@@ -42,7 +40,7 @@ pip install pyRDDLGym-jax[extra]
 
 ## Running from the Command Line
 
-A basic run script is provided to run JaxPlan on any domain in ``rddlrepository`` from the install directory of JaxPlan:
+A basic run script is provided to run JaxPlan on any domain in ``rddlrepository`` from the install directory of pyRDDLGym-jax:
 
 ```shell
 python -m pyRDDLGym_jax.examples.run_plan <domain> <instance> <method> <episodes>
@@ -73,7 +71,7 @@ where:
 - ``iters`` is the (optional) maximum number of iterations/evaluations of Bayesian optimization to perform
 - ``workers`` is the (optional) number of parallel evaluations to be done at each iteration, e.g. the total evaluations = ``iters * workers``.
 
-For example, the following will train the Jax Planner on the Quadcopter domain with 4 drones:
+For example, the following will train JaxPlan on the Quadcopter domain with 4 drones:
 
 ```shell
 python -m pyRDDLGym_jax.examples.run_plan Quadcopter 1 slp
@@ -87,7 +85,7 @@ After several minutes of optimization, you should get a visualization as follows
 
 ## Running from within Python
 
-To run the Jax planner from within a Python application, refer to the following example:
+To run JaxPlan from within a Python application, refer to the following example:
 
 ```python
 import pyRDDLGym
@@ -231,21 +229,8 @@ The [following citation](https://ojs.aaai.org/index.php/ICAPS/article/view/31480
 }
 ```
 
-The utility optimization is discussed in [this paper](https://ojs.aaai.org/index.php/AAAI/article/view/21226):
-
-```
-@inproceedings{patton2022distributional,
-    title={A distributional framework for risk-sensitive end-to-end planning in continuous mdps},
-    author={Patton, Noah and Jeong, Jihwan and Gimelfarb, Mike and Sanner, Scott},
-    booktitle={Proceedings of the AAAI Conference on Artificial Intelligence},
-    volume={36},
-    number={9},
-    pages={9894--9901},
-    year={2022}
-}
-```
-
 Some of the implementation details derive from the following literature, which you may wish to also cite in your research papers:
+- [A Distributional Framework for Risk-Sensitive End-to-End Planning in Continuous MDPs](https://ojs.aaai.org/index.php/AAAI/article/view/21226)
 - [Deep reactive policies for planning in stochastic nonlinear domains, AAAI 2019](https://ojs.aaai.org/index.php/AAAI/article/view/4744)
 - [Scalable planning with tensorflow for hybrid nonlinear domains, NeurIPS 2017](https://proceedings.neurips.cc/paper/2017/file/98b17f068d5d9b7668e19fb8ae470841-Paper.pdf)
 
