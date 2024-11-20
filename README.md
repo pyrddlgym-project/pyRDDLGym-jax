@@ -2,7 +2,7 @@
 
 Author: [Mike Gimelfarb](https://mike-gimelfarb.github.io)
 
-**pyRDDLGym-jax is an efficient gradient-based/differentiable planning algorithm in JAX.** It provides:
+**pyRDDLGym-jax (known in the literature as JaxPlan) is an efficient gradient-based/differentiable planning algorithm in JAX.** It provides:
 
 1. automatic translation of any RDDL description file into a differentiable simulator in JAX
 2. flexible policy class representations, automatic model relaxations for working in discrete and hybrid domains, Bayesian hyper-parameter tuning, and much more!
@@ -19,7 +19,7 @@ Author: [Mike Gimelfarb](https://mike-gimelfarb.github.io)
 - [Configuring the Planner](#configuring-the-planner)
 - [Simulation](#simulation)
 - [Manual Gradient Calculation](#manual-gradient-calculation)
-- [Citing pyRDDLGym-jax](#citing-pyrddlgym-jax)
+- [Citing JaxPlan](#citing-jaxplan)
   
 ## Installation
 
@@ -34,7 +34,7 @@ To use the compiler or planner without the automated hyper-parameter tuning, you
 Additionally, if you wish to run the examples, you need ``rddlrepository>=2``. 
 To run the automated tuning optimization, you will also need ``bayesian-optimization>=2.0.0``.
 
-You can install pyRDDLGym-jax with all requirements using pip:
+You can install JaxPlan with all requirements using pip:
 
 ```shell
 pip install pyRDDLGym-jax[extra]
@@ -42,7 +42,7 @@ pip install pyRDDLGym-jax[extra]
 
 ## Running from the Command Line
 
-A basic run script is provided to run the Jax Planner on any domain in ``rddlrepository`` from the install directory of pyRDDLGym-jax:
+A basic run script is provided to run JaxPlan on any domain in ``rddlrepository`` from the install directory of JaxPlan:
 
 ```shell
 python -m pyRDDLGym_jax.examples.run_plan <domain> <instance> <method> <episodes>
@@ -217,9 +217,9 @@ It is thus possible to apply any JAX transformation to the output of the functio
 Compilation of entire rollouts is also possible by calling the ``compile_rollouts`` function.
 An [example is provided to illustrate how you can define your own policy class and compute the return gradient manually](https://github.com/pyrddlgym-project/pyRDDLGym-jax/blob/main/pyRDDLGym_jax/examples/run_gradient.py).
 
-## Citing pyRDDLGym-jax
+## Citing JaxPlan
 
-The [following citation](https://ojs.aaai.org/index.php/ICAPS/article/view/31480) describes the main ideas of the framework. Please cite it if you found it useful:
+The [following citation](https://ojs.aaai.org/index.php/ICAPS/article/view/31480) describes the main ideas of JaxPlan. Please cite it if you found it useful:
 
 ```
 @inproceedings{gimelfarb2024jaxplan,
