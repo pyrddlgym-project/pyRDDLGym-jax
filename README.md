@@ -3,7 +3,16 @@
 **pyRDDLGym-jax (known in the literature as JaxPlan) is an efficient gradient-based/differentiable planning algorithm in JAX.** It provides:
 
 1. automatic translation of any RDDL description file into a differentiable simulator in JAX
-2. flexible policy class representations, automatic model relaxations for working in discrete and hybrid domains, Bayesian hyper-parameter tuning, and much more!
+2. flexible policy class representations, automatic model relaxations for working in discrete and hybrid domains, and Bayesian hyper-parameter tuning.
+
+Some demos of solved problems by JaxPlan:
+
+<p align="middle">
+<img src="Images/intruders.gif" width="120" height="120" margin=0/>
+<img src="Images/pong.gif" width="120" height="120" margin=0/>
+<img src="Images/quadcopter.gif" width="120" height="120" margin=0/>
+<img src="Images/reacher.gif" width="120" height="120" margin=0/>
+</p>
 
 > [!NOTE]  
 > While JaxPlan can support some discrete state/action problems through model relaxations, on some discrete problems it can perform poorly (though there is an ongoing effort to remedy this!).
@@ -76,12 +85,6 @@ For example, the following will train JaxPlan on the Quadcopter domain with 4 dr
 ```shell
 python -m pyRDDLGym_jax.examples.run_plan Quadcopter 1 slp
 ```
-
-After several minutes of optimization, you should get a visualization as follows:
-
-<p align="center">
-<img src="Images/quadcopter.gif" width="400" height="400" margin=1/>
-</p>
 
 ## Running from within Python
 

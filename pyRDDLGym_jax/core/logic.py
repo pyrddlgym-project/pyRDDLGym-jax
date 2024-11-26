@@ -47,9 +47,10 @@ class SigmoidComparison(Comparison):
         
     # https://arxiv.org/abs/2110.05651
     def greater_equal(self, id, init_params):
-        init_params[id] = self.weight
+        id_ = str(id)
+        init_params[id_] = self.weight
         def _jax_wrapped_calc_greater_equal_approx(x, y, params):
-            gre_eq = jax.nn.sigmoid(params[id] * (x - y))
+            gre_eq = jax.nn.sigmoid(params[id_] * (x - y))
             return gre_eq, params
         return _jax_wrapped_calc_greater_equal_approx
     
@@ -57,25 +58,28 @@ class SigmoidComparison(Comparison):
         return self.greater_equal(id, init_params)
     
     def equal(self, id, init_params):
-        init_params[id] = self.weight
+        id_ = str(id)
+        init_params[id_] = self.weight
         def _jax_wrapped_calc_equal_approx(x, y, params):
-            equal = 1.0 - jnp.square(jnp.tanh(params[id] * (y - x)))
+            equal = 1.0 - jnp.square(jnp.tanh(params[id_] * (y - x)))
             return equal, params
         return _jax_wrapped_calc_equal_approx
     
     def sgn(self, id, init_params):
-        init_params[id] = self.weight
+        id_ = str(id)
+        init_params[id_] = self.weight
         def _jax_wrapped_calc_sgn_approx(x, params):
-            sgn = jnp.tanh(params[id] * x)
+            sgn = jnp.tanh(params[id_] * x)
             return sgn, params
         return _jax_wrapped_calc_sgn_approx
     
     # https://arxiv.org/abs/2110.05651
     def argmax(self, id, init_params):
-        init_params[id] = self.weight
+        id_ = str(id)
+        init_params[id_] = self.weight
         def _jax_wrapped_calc_argmax_approx(x, axis, params):
             literals = enumerate_literals(x.shape, axis=axis)
-            softmax = jax.nn.softmax(params[id] * x, axis=axis)
+            softmax = jax.nn.softmax(params[id_] * x, axis=axis)
             sample = jnp.sum(literals * softmax, axis=axis)
             return sample, params
         return _jax_wrapped_calc_argmax_approx
@@ -109,9 +113,10 @@ class SoftRounding(Rounding):
         
     # https://www.tensorflow.org/probability/api_docs/python/tfp/substrates/jax/bijectors/Softfloor
     def floor(self, id, init_params):
-        init_params[id] = self.weight
+        id_ = str(id)
+        init_params[id_] = self.weight
         def _jax_wrapped_calc_floor_approx(x, params):
-            param = params[id]
+            param = params[id_]
             denom = jnp.tanh(param / 4.0)
             floor = (jax.nn.sigmoid(param * (x - jnp.floor(x) - 1.0)) - 
                      jax.nn.sigmoid(-param / 2.0)) / denom + jnp.floor(x)
@@ -120,9 +125,10 @@ class SoftRounding(Rounding):
     
     # https://arxiv.org/abs/2006.09952
     def round(self, id, init_params):
-        init_params[id] = self.weight
+        id_ = str(id)
+        init_params[id_] = self.weight
         def _jax_wrapped_calc_round_approx(x, params):
-            param = params[id]
+            param = params[id_]
             m = jnp.floor(x) + 0.5
             rounded = m + 0.5 * jnp.tanh(param * (x - m)) / jnp.tanh(param / 2.0)
             return rounded, params
@@ -257,20 +263,22 @@ class YagerTNorm(TNorm):
         self.p = float(p)
     
     def norm(self, id, init_params):
-        init_params[id] = self.p
+        id_ = str(id)
+        init_params[id_] = self.p
         def _jax_wrapped_calc_and_approx(x, y, params):
             base = jax.nn.relu(1.0 - jnp.stack([x, y], axis=0))
-            arg = jnp.linalg.norm(base, ord=params[id], axis=0)
+            arg = jnp.linalg.norm(base, ord=params[id_], axis=0)
             land = jax.nn.relu(1.0 - arg)
             return land, params
         return _jax_wrapped_calc_and_approx
     
     def norms(self, id, init_params):
-        init_params[id] = self.p
+        id_ = str(id)
+        init_params[id_] = self.p
         def _jax_wrapped_calc_forall_approx(x, axis, params):
             arg = jax.nn.relu(1.0 - x)
             for ax in sorted(axis, reverse=True):
-                arg = jnp.linalg.norm(arg, ord=params[id], axis=ax)
+                arg = jnp.linalg.norm(arg, ord=params[id_], axis=ax)
             forall = jax.nn.relu(1.0 - arg)
             return forall, params
         return _jax_wrapped_calc_forall_approx
@@ -397,12 +405,13 @@ class SoftControlFlow(ControlFlow):
         return self._jax_wrapped_calc_if_then_else_soft
     
     def switch(self, id, init_params):
-        init_params[id] = self.weight
+        id_ = str(id)
+        init_params[id_] = self.weight
         def _jax_wrapped_calc_switch_soft(pred, cases, params):
             literals = enumerate_literals(cases.shape, axis=0)
             pred = jnp.broadcast_to(pred[jnp.newaxis, ...], shape=cases.shape)
             proximity = -jnp.square(pred - literals)
-            softcase = jax.nn.softmax(params[id] * proximity, axis=0)
+            softcase = jax.nn.softmax(params[id_] * proximity, axis=0)
             sample = jnp.sum(cases * softcase, axis=0)
             return sample, params
         return _jax_wrapped_calc_switch_soft
