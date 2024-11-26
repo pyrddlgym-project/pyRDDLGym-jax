@@ -5,7 +5,7 @@ import jax.numpy as jnp
 import jax.random as random
 
 
-def enumerate_literals(shape, axis, dtype=jnp.int64):
+def enumerate_literals(shape, axis, dtype=jnp.int32):
     literals = jnp.arange(shape[axis], dtype=dtype)
     literals = literals[(...,) + (jnp.newaxis,) * (len(shape) - 1)]
     literals = jnp.moveaxis(literals, source=0, destination=axis)
