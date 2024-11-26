@@ -515,15 +515,16 @@ class JaxRDDLCompiler:
             return jax_step_fn(subkey, actions, subs, model_params)
                         
         # do a batched step update from the policy
+        # TODO: come up with a better way to reduce the model_param batch dim
         def _jax_wrapped_batched_step_policy(carry, step):
             key, policy_params, hyperparams, subs, model_params = carry  
             key, *subkeys = random.split(key, num=1 + n_batch)
             keys = jnp.asarray(subkeys)
             subs, log, model_params = jax.vmap(
                 _jax_wrapped_single_step_policy,
-                in_axes=(0, None, None, None, 0, None), 
-                out_axes=(0, 0, None)
+                in_axes=(0, None, None, None, 0, None)
             )(keys, policy_params, hyperparams, step, subs, model_params)
+            model_params = jax.tree_map(jnp.mean, model_params)
             carry = (key, policy_params, hyperparams, subs, model_params)
             return carry, log            
             

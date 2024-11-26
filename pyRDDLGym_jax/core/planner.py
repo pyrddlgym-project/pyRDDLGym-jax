@@ -2383,7 +2383,8 @@ class JaxOnlineController(BaseAgent):
             key=self.key,
             guess=self.guess,
             subs=state,
-            **self.train_kwargs)
+            **self.train_kwargs
+        )
         params = callback['best_params']
         self.key, subkey = random.split(self.key)
         actions = planner.get_action(
