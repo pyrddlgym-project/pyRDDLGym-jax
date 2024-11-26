@@ -47,6 +47,7 @@ Bounds = Dict[str, Tuple[np.ndarray, np.ndarray]]
 Kwargs = Dict[str, Any]
 Pytree = Any
 
+
 # ***********************************************************************
 # CONFIG FILE MANAGEMENT
 # 
@@ -188,6 +189,7 @@ def load_config_from_string(value: str) -> Tuple[Kwargs, ...]:
     '''Loads config file contents specified explicitly as a string value.'''
     config, args = _parse_config_string(value)
     return _load_config(config, args)
+    
     
 # ***********************************************************************
 # MODEL RELAXATIONS
@@ -1056,7 +1058,6 @@ class JaxDeepReactivePolicy(JaxPlan):
         
     def guess_next_epoch(self, params: Pytree) -> Pytree:
         return params
-    
     
     
 # ***********************************************************************
@@ -2207,7 +2208,7 @@ class JaxLineSearchPlanner(JaxBackpropPlanner):
         def _jax_wrapped_line_search_trial(step, grad, key, policy_params, 
                                            policy_hyperparams, subs, 
                                            model_params, opt_state):
-            state.hyperparams['learning_rate'] = step
+            opt_state.hyperparams['learning_rate'] = step
             updates, new_opt_state = optimizer.update(grad, opt_state)
             new_policy_params = optax.apply_updates(policy_params, updates)
             new_policy_params, _ = projection(new_policy_params, policy_hyperparams)
