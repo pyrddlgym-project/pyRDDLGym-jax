@@ -56,6 +56,13 @@ class SigmoidComparison(Comparison):
     def greater(self, id, init_params):
         return self.greater_equal(id, init_params)
     
+    def equal(self, id, init_params):
+        init_params[id] = self.weight
+        def _jax_wrapped_calc_equal_approx(x, y, params):
+            equal = 1.0 - jnp.square(jnp.tanh(params[id] * (y - x)))
+            return equal, params
+        return _jax_wrapped_calc_equal_approx
+    
     def sgn(self, id, init_params):
         init_params[id] = self.weight
         def _jax_wrapped_calc_sgn_approx(x, params):
@@ -803,8 +810,8 @@ class FuzzyLogic(Logic):
         _and = self.tnorm.norm(f'{id}_^', init_params)
            
         def _jax_wrapped_calc_equiv_approx(x, y, params):
-            x_implies_y, params = _implies(x, y, params)
-            y_implies_x, params = _implies(y, x, params)
+            x_implies_y, params = _implies1(x, y, params)
+            y_implies_x, params = _implies2(y, x, params)
             return _and(x_implies_y, y_implies_x, params)        
         return _jax_wrapped_calc_equiv_approx
     
