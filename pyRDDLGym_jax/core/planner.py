@@ -31,7 +31,7 @@ from pyRDDLGym.core.policy import BaseAgent
 from pyRDDLGym_jax import __version__
 from pyRDDLGym_jax.core import logic
 from pyRDDLGym_jax.core.compiler import JaxRDDLCompiler
-from pyRDDLGym_jax.core.logic import FuzzyLogic
+from pyRDDLGym_jax.core.logic import Logic, FuzzyLogic
 
 # try to import matplotlib, if failed then skip plotting
 try:
@@ -105,11 +105,14 @@ def _load_config(config, args):
     sampling_kwargs = model_args.get('sampling_kwargs', {})
     rounding_name = model_args.get('rounding', 'SoftRounding')
     rounding_kwargs = model_args.get('rounding_kwargs', {})
+    control_name = model_args.get('control', 'SoftControlFlow')
+    control_kwargs = model_args.get('control_kwargs', {})
     logic_kwargs['tnorm'] = getattr(logic, tnorm_name)(**tnorm_kwargs)
     logic_kwargs['complement'] = getattr(logic, comp_name)(**comp_kwargs)
     logic_kwargs['comparison'] = getattr(logic, compare_name)(**compare_kwargs)
     logic_kwargs['sampling'] = getattr(logic, sampling_name)(**sampling_kwargs)
     logic_kwargs['rounding'] = getattr(logic, rounding_name)(**rounding_kwargs)
+    logic_kwargs['control'] = getattr(logic, control_name)(**control_kwargs)
     
     # read the policy settings
     plan_method = planner_args.pop('method')
@@ -202,7 +205,7 @@ class JaxRDDLCompilerWithGrad(JaxRDDLCompiler):
     '''
     
     def __init__(self, *args,
-                 logic: FuzzyLogic=FuzzyLogic(),
+                 logic: Logic=FuzzyLogic(),
                  cpfs_without_grad: Optional[Set[str]]=None,
                  **kwargs) -> None:
         '''Creates a new RDDL to Jax compiler, where operations that are not
@@ -237,57 +240,55 @@ class JaxRDDLCompilerWithGrad(JaxRDDLCompiler):
         
         # overwrite basic operations with fuzzy ones
         self.RELATIONAL_OPS = {
-            '>=': logic.greater_equal(),
-            '<=': logic.less_equal(),
-            '<': logic.less(),
-            '>': logic.greater(),
-            '==': logic.equal(),
-            '~=': logic.not_equal()
+            '>=': logic.greater_equal,
+            '<=': logic.less_equal,
+            '<': logic.less,
+            '>': logic.greater,
+            '==': logic.equal,
+            '~=': logic.not_equal
         }
-        self.LOGICAL_NOT = logic.logical_not()
+        self.LOGICAL_NOT = logic.logical_not
         self.LOGICAL_OPS = {
-            '^': logic.logical_and(),
-            '&': logic.logical_and(),
-            '|': logic.logical_or(),
-            '~': logic.xor(),
-            '=>': logic.implies(),
-            '<=>': logic.equiv()
+            '^': logic.logical_and,
+            '&': logic.logical_and,
+            '|': logic.logical_or,
+            '~': logic.xor,
+            '=>': logic.implies,
+            '<=>': logic.equiv
         }
-        self.AGGREGATION_OPS['forall'] = logic.forall()
-        self.AGGREGATION_OPS['exists'] = logic.exists()
-        self.AGGREGATION_OPS['argmin'] = logic.argmin()
-        self.AGGREGATION_OPS['argmax'] = logic.argmax()
-        self.KNOWN_UNARY['sgn'] = logic.sgn()
-        self.KNOWN_UNARY['floor'] = logic.floor()   
-        self.KNOWN_UNARY['ceil'] = logic.ceil()   
-        self.KNOWN_UNARY['round'] = logic.round()
-        self.KNOWN_UNARY['sqrt'] = logic.sqrt()
-        self.KNOWN_BINARY['div'] = logic.div()
-        self.KNOWN_BINARY['mod'] = logic.mod()
-        self.KNOWN_BINARY['fmod'] = logic.mod()
-        self.IF_HELPER = logic.control_if()
-        self.SWITCH_HELPER = logic.control_switch()
-        self.BERNOULLI_HELPER = logic.bernoulli()
-        self.DISCRETE_HELPER = logic.discrete()
-        self.POISSON_HELPER = logic.poisson()
-        self.GEOMETRIC_HELPER = logic.geometric()
+        self.AGGREGATION_OPS['forall'] = logic.forall
+        self.AGGREGATION_OPS['exists'] = logic.exists
+        self.AGGREGATION_OPS['argmin'] = logic.argmin
+        self.AGGREGATION_OPS['argmax'] = logic.argmax
+        self.KNOWN_UNARY['sgn'] = logic.sgn
+        self.KNOWN_UNARY['floor'] = logic.floor
+        self.KNOWN_UNARY['ceil'] = logic.ceil
+        self.KNOWN_UNARY['round'] = logic.round
+        self.KNOWN_UNARY['sqrt'] = logic.sqrt
+        self.KNOWN_BINARY['div'] = logic.div
+        self.KNOWN_BINARY['mod'] = logic.mod
+        self.KNOWN_BINARY['fmod'] = logic.mod
+        self.IF_HELPER = logic.control_if
+        self.SWITCH_HELPER = logic.control_switch
+        self.BERNOULLI_HELPER = logic.bernoulli
+        self.DISCRETE_HELPER = logic.discrete
+        self.POISSON_HELPER = logic.poisson
+        self.GEOMETRIC_HELPER = logic.geometric
         
-    def _jax_stop_grad(self, jax_expr):
-        
+    def _jax_stop_grad(self, jax_expr):        
         def _jax_wrapped_stop_grad(x, params, key):
-            sample, key, error = jax_expr(x, params, key)
+            sample, key, error, params = jax_expr(x, params, key)
             sample = jax.lax.stop_gradient(sample)
-            return sample, key, error
-        
+            return sample, key, error, params
         return _jax_wrapped_stop_grad
         
-    def _compile_cpfs(self, info):
+    def _compile_cpfs(self, init_params):
         cpfs_cast = set()   
         jax_cpfs = {}
         for (_, cpfs) in self.levels.items():
             for cpf in cpfs:
                 _, expr = self.rddl.cpfs[cpf]
-                jax_cpfs[cpf] = self._jax(expr, info, dtype=self.REAL)
+                jax_cpfs[cpf] = self._jax(expr, init_params, dtype=self.REAL)
                 if self.rddl.variable_ranges[cpf] != 'real':
                     cpfs_cast.add(cpf)
                 if cpf in self.cpfs_without_grad:
@@ -298,16 +299,15 @@ class JaxRDDLCompilerWithGrad(JaxRDDLCompiler):
                           f'{cpfs_cast} be cast to float.') 
         if self.cpfs_without_grad:
             raise_warning(f'User requested that gradients not flow '
-                          f'through CPFs {self.cpfs_without_grad}.')      
+                          f'through CPFs {self.cpfs_without_grad}.')    
+ 
         return jax_cpfs
     
-    def _jax_kron(self, expr, info):
-        if self.logic.verbose:
-            raise_warning('JAX gradient compiler ignores KronDelta '
-                          'during compilation.')            
+    def _jax_kron(self, expr, init_params):       
         arg, = expr.args
-        arg = self._jax(arg, info)
+        arg = self._jax(arg, init_params)
         return arg
+
 
 # ***********************************************************************
 # ALL VERSIONS OF JAX PLANS
@@ -1057,6 +1057,8 @@ class JaxDeepReactivePolicy(JaxPlan):
     def guess_next_epoch(self, params: Pytree) -> Pytree:
         return params
     
+    
+    
 # ***********************************************************************
 # ALL VERSIONS OF JAX PLANNER
 # 
@@ -1257,7 +1259,7 @@ class JaxBackpropPlanner:
                  clip_grad: Optional[float]=None,
                  noise_grad_eta: float=0.0,
                  noise_grad_gamma: float=1.0,
-                 logic: FuzzyLogic=FuzzyLogic(),
+                 logic: Logic=FuzzyLogic(),
                  use_symlog_reward: bool=False,
                  utility: Union[Callable[[jnp.ndarray], float], str]='mean',
                  utility_kwargs: Optional[Kwargs]=None,
@@ -1285,7 +1287,7 @@ class JaxBackpropPlanner:
         :param clip_grad: maximum magnitude of gradient updates
         :param noise_grad_eta: scale of the gradient noise variance
         :param noise_grad_gamma: decay rate of the gradient noise variance
-        :param logic: a subclass of FuzzyLogic for mapping exact mathematical
+        :param logic: a subclass of Logic for mapping exact mathematical
         operations to their differentiable counterparts 
         :param use_symlog_reward: whether to use the symlog transform on the 
         reward as a form of normalization
@@ -1411,7 +1413,7 @@ r"""
               f'    lookahead         ={self.horizon}\n'
               f'    user_action_bounds={self._action_bounds}\n'
               f'    fuzzy logic type  ={type(self.logic).__name__}\n'
-              f'    nonfluents exact  ={self.compile_non_fluent_exact}\n'
+              f'    non_fluents exact ={self.compile_non_fluent_exact}\n'
               f'    cpfs_no_gradient  ={self.cpfs_without_grad}\n'
               f'optimizer hyper-parameters:\n'
               f'    use_64_bit        ={self.use64bit}\n'
@@ -1439,14 +1441,16 @@ r"""
             logger=self.logger,
             use64bit=self.use64bit,
             cpfs_without_grad=self.cpfs_without_grad,
-            compile_non_fluent_exact=self.compile_non_fluent_exact)
+            compile_non_fluent_exact=self.compile_non_fluent_exact
+        )
         self.compiled.compile(log_jax_expr=True, heading='RELAXED MODEL')
         
         # Jax compilation of the exact RDDL for testing
         self.test_compiled = JaxRDDLCompiler(
             rddl=rddl,
             logger=self.logger,
-            use64bit=self.use64bit)
+            use64bit=self.use64bit
+        )
         self.test_compiled.compile(log_jax_expr=True, heading='EXACT MODEL')
         
     def _jax_compile_optimizer(self):
@@ -1462,13 +1466,15 @@ r"""
         train_rollouts = self.compiled.compile_rollouts(
             policy=self.plan.train_policy,
             n_steps=self.horizon,
-            n_batch=self.batch_size_train)
+            n_batch=self.batch_size_train
+        )
         self.train_rollouts = train_rollouts
         
         test_rollouts = self.test_compiled.compile_rollouts(
             policy=self.plan.test_policy,
             n_steps=self.horizon,
-            n_batch=self.batch_size_test)
+            n_batch=self.batch_size_test
+        )
         self.test_rollouts = jax.jit(test_rollouts)
         
         # initialization
@@ -1503,14 +1509,16 @@ r"""
         _jax_wrapped_returns = self._jax_return(use_symlog)
         
         # the loss is the average cumulative reward across all roll-outs
-        def _jax_wrapped_plan_loss(key, policy_params, hyperparams,
+        def _jax_wrapped_plan_loss(key, policy_params, policy_hyperparams,
                                    subs, model_params):
-            log = rollouts(key, policy_params, hyperparams, subs, model_params)
+            log, model_params = rollouts(
+                key, policy_params, policy_hyperparams, subs, model_params)
             rewards = log['reward']
             returns = _jax_wrapped_returns(rewards)
             utility = utility_fn(returns, **utility_kwargs)
             loss = -utility
-            return loss, log
+            aux = (log, model_params)
+            return loss, aux
         
         return _jax_wrapped_plan_loss
     
@@ -1518,8 +1526,9 @@ r"""
         init = self.plan.initializer
         optimizer = self.optimizer
         
-        def _jax_wrapped_init_policy(key, hyperparams, subs):
-            policy_params = init(key, hyperparams, subs)
+        # initialize both the policy and its optimizer
+        def _jax_wrapped_init_policy(key, policy_hyperparams, subs):
+            policy_params = init(key, policy_hyperparams, subs)
             opt_state = optimizer.init(policy_params)
             return policy_params, opt_state, {}
         
@@ -1544,19 +1553,20 @@ r"""
         
         # calculate the plan gradient w.r.t. return loss and update optimizer
         # also perform a projection step to satisfy constraints on actions
-        def _jax_wrapped_plan_update(key, policy_params, hyperparams,
+        def _jax_wrapped_plan_update(key, policy_params, policy_hyperparams,
                                      subs, model_params, opt_state, opt_aux):
             grad_fn = jax.value_and_grad(loss, argnums=1, has_aux=True)
-            (loss_val, log), grad = grad_fn(
-                key, policy_params, hyperparams, subs, model_params)  
+            (loss_val, (log, model_params)), grad = grad_fn(
+                key, policy_params, policy_hyperparams, subs, model_params)  
             sigma = opt_aux.get('noise_sigma', 0.0)
             grad = _jax_wrapped_gaussian_param_noise(key, grad, sigma)
             updates, opt_state = optimizer.update(grad, opt_state) 
             policy_params = optax.apply_updates(policy_params, updates)
-            policy_params, converged = projection(policy_params, hyperparams)
+            policy_params, converged = projection(policy_params, policy_hyperparams)
             log['grad'] = grad
             log['updates'] = updates
-            return policy_params, converged, opt_state, opt_aux, loss_val, log
+            return policy_params, converged, opt_state, opt_aux, \
+                loss_val, log, model_params
         
         return jax.jit(_jax_wrapped_plan_update)
             
@@ -1583,7 +1593,6 @@ r"""
         for (state, next_state) in rddl.next_state.items():
             init_train[next_state] = init_train[state]
             init_test[next_state] = init_test[state]
-        
         return init_train, init_test
     
     def as_optimization_problem(
@@ -1637,38 +1646,40 @@ r"""
         loss_fn = self._jax_loss(self.train_rollouts)
         
         @jax.jit
-        def _loss_with_key(key, params_1d):
+        def _loss_with_key(key, params_1d, model_params):
             policy_params = unravel_fn(params_1d)
-            loss_val, _ = loss_fn(key, policy_params, policy_hyperparams,
-                                  train_subs, model_params)
-            return loss_val
+            loss_val, (_, model_params) = loss_fn(
+                key, policy_params, policy_hyperparams, train_subs, model_params)
+            return loss_val, model_params
         
         @jax.jit
-        def _grad_with_key(key, params_1d):
+        def _grad_with_key(key, params_1d, model_params):
             policy_params = unravel_fn(params_1d)
             grad_fn = jax.grad(loss_fn, argnums=1, has_aux=True)
-            grad_val, _ = grad_fn(key, policy_params, policy_hyperparams,
-                                  train_subs, model_params)
-            grad_1d = jax.flatten_util.ravel_pytree(grad_val)[0]
-            return grad_1d
+            grad_val, (_, model_params) = grad_fn(
+                key, policy_params, policy_hyperparams, train_subs, model_params)
+            grad_val = jax.flatten_util.ravel_pytree(grad_val)[0]
+            return grad_val, model_params 
         
         def _loss_function(params_1d):
             nonlocal key
+            nonlocal model_params
             if loss_function_updates_key:
                 key, subkey = random.split(key)
             else:
                 subkey = key
-            loss_val = _loss_with_key(subkey, params_1d)
+            loss_val, model_params = _loss_with_key(subkey, params_1d, model_params)
             loss_val = float(loss_val)
             return loss_val
         
         def _grad_function(params_1d):
             nonlocal key
+            nonlocal model_params
             if grad_function_updates_key:
                 key, subkey = random.split(key)
             else:
                 subkey = key
-            grad = _grad_with_key(subkey, params_1d)
+            grad, model_params = _grad_with_key(subkey, params_1d, model_params)
             grad = np.asarray(grad)
             return grad
         
@@ -1760,6 +1771,10 @@ r"""
         start_time = time.time()
         elapsed_outside_loop = 0
         
+        # ======================================================================
+        # INITIALIZATION OF HYPER-PARAMETERS
+        # ======================================================================
+
         # if PRNG key is not provided
         if key is None:
             key = random.PRNGKey(round(time.time() * 1000))
@@ -1805,11 +1820,17 @@ r"""
                   f'    print_summary      ={print_summary}\n'
                   f'    print_progress     ={print_progress}\n'
                   f'    stopping_rule      ={stopping_rule}\n')
-            if self.compiled.relaxations:
-                print('Some RDDL operations are non-differentiable, '
-                      'they will be approximated as follows:')
-                print(self.compiled.summarize_model_relaxations())
-            
+            if self.compiled.model_params:
+                print('Some RDDL operations are non-differentiable '
+                      'and will be approximated as follows:')
+                for (id, mp_info) in self.compiled.model_parameter_info().items():
+                    print(f'name = {id}, ' + ", ".join(
+                        [f'{k} = {v}' for (k, v) in mp_info.items()]))
+        
+        # ======================================================================
+        # INITIALIZATION OF STATE AND POLICY
+        # ======================================================================
+        
         # compute a batched version of the initial values
         if subs is None:
             subs = self.test_compiled.init_values
@@ -1841,6 +1862,10 @@ r"""
             policy_params = guess
             opt_state = self.optimizer.init(policy_params)
             opt_aux = {}
+            
+        # ======================================================================
+        # INITIALIZATION OF RUNNING STATISTICS
+        # ======================================================================
         
         # initialize running statistics
         best_params, best_loss, best_grad = policy_params, jnp.inf, jnp.inf
@@ -1863,13 +1888,21 @@ r"""
             plot = JaxPlannerPlot(self.rddl, self.horizon, **plot_kwargs)
         xticks, loss_values = [], []
         
-        # training loop
+        # ======================================================================
+        # MAIN TRAINING LOOP BEGINS
+        # ======================================================================
+        
         iters = range(epochs)
         if print_progress:
             iters = tqdm(iters, total=100, position=tqdm_position)
         position_str = '' if tqdm_position is None else f'[{tqdm_position}]'
         
         for it in iters:
+            
+            # ==================================================================
+            # NEXT GRADIENT DESCENT STEP
+            # ==================================================================
+            
             status = JaxPlannerStatus.NORMAL
             
             # gradient noise schedule
@@ -1879,10 +1912,14 @@ r"""
             
             # update the parameters of the plan
             key, subkey = random.split(key)
-            policy_params, converged, opt_state, opt_aux, \
-            train_loss, train_log = \
+            (policy_params, converged, opt_state, opt_aux, 
+             train_loss, train_log, model_params) = \
                 self.update(subkey, policy_params, policy_hyperparams,
                             train_subs, model_params, opt_state, opt_aux)
+                
+            # ==================================================================
+            # STATUS CHECKS AND LOGGING
+            # ==================================================================
             
             # no progress
             grad_norm_zero, _ = jax.tree_util.tree_flatten(
@@ -1901,12 +1938,11 @@ r"""
             # numerical error
             if not np.isfinite(train_loss):
                 raise_warning(
-                    f'Aborting JAX planner due to invalid train loss {train_loss}.',
-                    'red')
+                    f'JAX planner aborted due to invalid loss {train_loss}.', 'red')
                 status = JaxPlannerStatus.INVALID_GRADIENT
               
             # evaluate test losses and record best plan so far
-            test_loss, log = self.test_loss(
+            test_loss, (log, model_params_test) = self.test_loss(
                 subkey, policy_params, policy_hyperparams,
                 test_subs, model_params_test)
             test_loss = rolling_test_loss.update(test_loss)
@@ -1956,6 +1992,7 @@ r"""
                 'updates': train_log['updates'],
                 'elapsed_time': elapsed,
                 'key': key,
+                'model_params': model_params,
                 **log
             }
             start_time_outside = time.time()
@@ -1969,7 +2006,11 @@ r"""
             # stopping condition reached
             if stopping_rule is not None and stopping_rule.monitor(callback):
                 break                
-                        
+        
+        # ======================================================================
+        # POST-PROCESSING AND CLEANUP
+        # ====================================================================== 
+        
         # release resources
         if print_progress:
             iters.close()
@@ -2141,33 +2182,36 @@ class JaxLineSearchPlanner(JaxBackpropPlanner):
         
         # initialize the line search routine
         @jax.jit
-        def _jax_wrapped_line_search_init(key, policy_params, hyperparams,
+        def _jax_wrapped_line_search_init(key, policy_params, policy_hyperparams,
                                           subs, model_params):
-            (f, log), grad = jax.value_and_grad(loss, argnums=1, has_aux=True)(
-                key, policy_params, hyperparams, subs, model_params)     
+            value_and_grad_fn = jax.value_and_grad(loss, argnums=1, has_aux=True)
+            (f, (log, model_params)), grad = value_and_grad_fn(
+                key, policy_params, policy_hyperparams, subs, model_params)     
             gnorm2 = jax.tree_map(lambda x: jnp.sum(jnp.square(x)), grad)
             gnorm2 = jax.tree_util.tree_reduce(jnp.add, gnorm2)
             log['grad'] = grad
-            return f, grad, gnorm2, log
+            return f, grad, gnorm2, log, model_params
             
         # compute the next trial solution
         @jax.jit
-        def _jax_wrapped_line_search_trial(
-                step, grad, key, params, hparams, subs, mparams, state):
+        def _jax_wrapped_line_search_trial(step, grad, key, policy_params, 
+                                           policy_hyperparams, subs, 
+                                           model_params, opt_state):
             state.hyperparams['learning_rate'] = step
-            updates, new_state = optimizer.update(grad, state)
-            new_params = optax.apply_updates(params, updates)
-            new_params, _ = projection(new_params, hparams)
-            f_step, _ = loss(key, new_params, hparams, subs, mparams)
-            return f_step, new_params, new_state
+            updates, new_opt_state = optimizer.update(grad, opt_state)
+            new_policy_params = optax.apply_updates(policy_params, updates)
+            new_policy_params, _ = projection(new_policy_params, policy_hyperparams)
+            f_step, (_, model_params) = loss(
+                key, new_policy_params, policy_hyperparams, subs, model_params)
+            return f_step, new_policy_params, new_opt_state, model_params
         
         # main iteration of line search     
-        def _jax_wrapped_plan_update(key, policy_params, hyperparams,
+        def _jax_wrapped_plan_update(key, policy_params, policy_hyperparams,
                                      subs, model_params, opt_state, opt_aux):
             
             # initialize the line search
-            f, grad, gnorm2, log = _jax_wrapped_line_search_init(
-                key, policy_params, hyperparams, subs, model_params)            
+            f, grad, gnorm2, log, model_params = _jax_wrapped_line_search_init(
+                key, policy_params, policy_hyperparams, subs, model_params)            
             
             # continue to reduce the learning rate until the Armijo condition holds
             trials = 0
@@ -2178,8 +2222,8 @@ class JaxLineSearchPlanner(JaxBackpropPlanner):
             or not trials:
                 trials += 1
                 step *= decay
-                f_step, new_params, new_state = _jax_wrapped_line_search_trial(
-                    step, grad, key, policy_params, hyperparams, subs,
+                f_step, new_params, new_state, model_params = _jax_wrapped_line_search_trial(
+                    step, grad, key, policy_params, policy_hyperparams, subs,
                     model_params, opt_state)
                 if f_step < best_f:
                     best_f, best_step, best_params, best_state = \
@@ -2189,9 +2233,10 @@ class JaxLineSearchPlanner(JaxBackpropPlanner):
             log['line_search_iters'] = trials
             log['learning_rate'] = best_step
             opt_aux['best_step'] = best_step
-            return best_params, True, best_state, opt_aux, best_f, log
+            return best_params, True, best_state, opt_aux, best_f, log, model_params
             
         return _jax_wrapped_plan_update
+
 
 # ***********************************************************************
 # ALL VERSIONS OF RISK FUNCTIONS
@@ -2223,6 +2268,7 @@ def cvar_utility(returns: jnp.ndarray, alpha: float) -> float:
     alpha_mask = jax.lax.stop_gradient(
         returns <= jnp.percentile(returns, q=100 * alpha))
     return jnp.sum(returns * alpha_mask) / jnp.sum(alpha_mask)
+
 
 # ***********************************************************************
 # ALL VERSIONS OF CONTROLLERS
