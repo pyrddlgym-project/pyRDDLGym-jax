@@ -73,7 +73,10 @@ class SigmoidComparison(Comparison):
             return sample, params
         return _jax_wrapped_calc_argmax_approx
     
- 
+    def __str__(self) -> str:
+        return f'Sigmoid comparison with weight {self.weight}'
+
+
 # ===========================================================================
 # ROUNDING OPERATIONS
 # - abstract class
@@ -118,6 +121,9 @@ class SoftRounding(Rounding):
             return rounded, params
         return _jax_wrapped_calc_round_approx
 
+    def __str__(self) -> str:
+        return f'SoftFloor and SoftRound with weight {self.weight}'
+
 
 # ===========================================================================
 # LOGICAL COMPLEMENT
@@ -143,7 +149,10 @@ class StandardComplement(Complement):
     
     def __call__(self, id, init_params):
         return self._jax_wrapped_calc_not_approx
-
+    
+    def __str__(self) -> str:
+        return 'Standard complement'
+    
 
 # ===========================================================================
 # TNORMS
@@ -185,6 +194,9 @@ class ProductTNorm(TNorm):
     def norms(self, id, init_params):        
         return self._jax_wrapped_calc_forall_approx
 
+    def __str__(self) -> str:
+        return 'Product t-norm'
+    
 
 class GodelTNorm(TNorm):
     '''Godel t-norm given by the expression (x, y) -> min(x, y).'''
@@ -202,7 +214,10 @@ class GodelTNorm(TNorm):
         
     def norms(self, id, init_params):        
         return self._jax_wrapped_calc_forall_approx
-
+    
+    def __str__(self) -> str:
+        return 'Godel t-norm'
+    
 
 class LukasiewiczTNorm(TNorm):
     '''Lukasiewicz t-norm given by the expression (x, y) -> max(x + y - 1, 0).'''
@@ -222,6 +237,9 @@ class LukasiewiczTNorm(TNorm):
         
     def norms(self, id, init_params):
         return self._jax_wrapped_calc_forall_approx
+    
+    def __str__(self) -> str:
+        return 'Lukasiewicz t-norm'
 
 
 class YagerTNorm(TNorm):
@@ -249,7 +267,10 @@ class YagerTNorm(TNorm):
             forall = jax.nn.relu(1.0 - arg)
             return forall, params
         return _jax_wrapped_calc_forall_approx
-        
+    
+    def __str__(self) -> str:
+        return f'Yager({self.p}) t-norm'
+    
 
 # ===========================================================================
 # RANDOM SAMPLING
@@ -303,6 +324,9 @@ class GumbelSoftmax(RandomSampling):
             return argmax_approx(sample, axis=-1, params=params)
         return _jax_wrapped_calc_discrete_gumbel_softmax
     
+    def __str__(self) -> str:
+        return 'Gumbel-Softmax'
+    
 
 class Determinization(RandomSampling):
     '''Random sampling of variables using their deterministic mean estimate.'''
@@ -330,7 +354,10 @@ class Determinization(RandomSampling):
     
     def geometric(self, id, init_params, logic):
         return self._jax_wrapped_calc_geometric_determinized
-
+    
+    def __str__(self) -> str:
+        return 'Deterministic'
+    
 
 # ===========================================================================
 # CONTROL FLOW
@@ -372,6 +399,9 @@ class SoftControlFlow(ControlFlow):
             sample = jnp.sum(cases * softcase, axis=0)
             return sample, params
         return _jax_wrapped_calc_switch_soft
+    
+    def __str__(self) -> str:
+        return f'Soft control flow with weight {self.weight}'
     
     
 # ===========================================================================
@@ -713,12 +743,12 @@ class FuzzyLogic(Logic):
     
     def summarize_hyperparameters(self) -> None:
         print(f'model relaxation:\n'
-              f'    tnorm         ={type(self.tnorm).__name__}\n'
-              f'    complement    ={type(self.complement).__name__}\n'
-              f'    comparison    ={type(self.comparison).__name__}\n'
-              f'    sampling      ={type(self.sampling).__name__}\n'
-              f'    rounding      ={type(self.rounding).__name__}\n'
-              f'    control       ={type(self.control).__name__}\n'
+              f'    tnorm         ={str(self.tnorm)}\n'
+              f'    complement    ={str(self.complement)}\n'
+              f'    comparison    ={str(self.comparison)}\n'
+              f'    sampling      ={str(self.sampling)}\n'
+              f'    rounding      ={str(self.rounding)}\n'
+              f'    control       ={str(self.control)}\n'
               f'    underflow_tol ={self.eps}\n'
               f'    use_64_bit    ={self.use64bit}')
         
