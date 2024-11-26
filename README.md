@@ -115,9 +115,6 @@ The basic structure of a configuration file is provided below for a straight-lin
 ```ini
 [Model]
 logic='FuzzyLogic'
-logic_kwargs={'weight': 20}
-tnorm='ProductTNorm'
-tnorm_kwargs={}
 
 [Optimizer]
 method='JaxStraightLinePlan'
