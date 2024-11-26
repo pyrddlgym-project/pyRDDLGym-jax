@@ -1377,7 +1377,7 @@ class JaxBackpropPlanner:
         self._jax_compile_rddl()        
         self._jax_compile_optimizer()
     
-    def _summarize_system(self) -> None:
+    def summarize_system(self) -> None:
         try:
             jaxlib_version = jax._src.lib.version_str
         except Exception as _:
@@ -1729,6 +1729,21 @@ r"""
                 pass
         return callback
     
+    def summarize_model_parameters(self):
+        if not self.compiled.model_params:
+            return
+        print('Some RDDL operations are non-differentiable '
+              'and will be approximated as follows:')
+        exprs_by_rddl_op, values_by_rddl_op = {}, {}
+        for info in self.compiled.model_parameter_info().values():
+            rddl_op = info['rddl_op']
+            exprs_by_rddl_op.setdefault(rddl_op, []).append(info['id'])
+            values_by_rddl_op.setdefault(rddl_op, []).append(info['init_value'])
+        for rddl_op in sorted(exprs_by_rddl_op.keys()):
+            print(f'    {rddl_op}:\n'
+                  f'        addresses  ={exprs_by_rddl_op[rddl_op]}\n'
+                  f'        init_values={values_by_rddl_op[rddl_op]}')
+                    
     def optimize_generator(self, key: Optional[random.PRNGKey]=None,
                            epochs: int=999999,
                            train_seconds: float=120.,
@@ -1804,7 +1819,7 @@ r"""
             
         # print summary of parameters:
         if print_summary:
-            self._summarize_system()
+            self.summarize_system()
             self.summarize_hyperparameters()
             print(f'optimize() call hyper-parameters:\n'
                   f'    PRNG key           ={key}\n'
@@ -1820,12 +1835,7 @@ r"""
                   f'    print_summary      ={print_summary}\n'
                   f'    print_progress     ={print_progress}\n'
                   f'    stopping_rule      ={stopping_rule}\n')
-            if self.compiled.model_params:
-                print('Some RDDL operations are non-differentiable '
-                      'and will be approximated as follows:')
-                for (id, mp_info) in self.compiled.model_parameter_info().items():
-                    print(f'name = {id}, ' + ", ".join(
-                        [f'{k} = {v}' for (k, v) in mp_info.items()]))
+            self.summarize_model_parameters()
         
         # ======================================================================
         # INITIALIZATION OF STATE AND POLICY
