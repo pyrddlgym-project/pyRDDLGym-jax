@@ -64,10 +64,11 @@ def main(domain, instance, method, trials=5, iters=20, workers=4):
                                 eval_trials=trials,
                                 num_workers=workers,
                                 gp_iters=iters)
-    tuning.tune(key=42, filename=f'gp_{method}', save_plot=True)
+    tuning.tune(key=42, log_file=f'gp_{method}_{domain}_{instance}.csv')
+    tuning.save_plot(plot_file=f'{method}_{domain}_{instance}.pdf')
     
     # evaluate the agent on the best parameters
-    planner_args, _, train_args = load_config_from_string(tuning.best_config())
+    planner_args, _, train_args = load_config_from_string(tuning.best_config)
     planner = JaxBackpropPlanner(rddl=env.model, **planner_args)
     klass = JaxOnlineController if method == 'replan' else JaxOfflineController
     controller = klass(planner, **train_args)
