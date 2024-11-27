@@ -2344,6 +2344,7 @@ class JaxOfflineController(BaseAgent):
         self.step = 0
         if self.train_on_reset and not self.params_given:
             callback = self.planner.optimize(key=self.key, **self.train_kwargs)
+            self.callback = callback
             self.params = callback['best_params']
 
 
