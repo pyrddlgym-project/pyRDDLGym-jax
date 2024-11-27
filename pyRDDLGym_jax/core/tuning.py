@@ -149,6 +149,18 @@ class JaxParameterTuning:
             for (tag, param) in hyper_params.items()
         }
         return config_params
+    
+    @staticmethod
+    def config_from_template(config_template: str, 
+                             config_params: Dict[str, Any]) -> str:
+        config_string = config_template
+        for (tag, param_value) in config_params.items():
+            config_string = config_string.replace(tag, str(param_value))
+        return config_string
+    
+    @property
+    def best_config(self) -> str:
+        return self.config_from_template(self.config_template, self.best_params)
         
     @staticmethod
     def objective_function(params, key, index, kwargs):
@@ -164,12 +176,10 @@ class JaxParameterTuning:
         verbose = kwargs['verbose']
         
         # config string substitution and parsing
-        config_string = config_template
         config_params = JaxParameterTuning.search_to_config_params(hyperparams_dict, params)
-        for (tag, param_value) in config_params.items():
-            config_string = config_string.replace(tag, str(param_value))
         if verbose:
             print(f'[{index}] key={key[0]}, hyper_params={config_params}', flush=True)
+        config_string = JaxParameterTuning.config_from_template(config_template, config_params)
         planner_args, _, train_args = load_config_from_string(config_string)
     
         # initialize env for evaluation (need fresh copy to avoid concurrency)
@@ -177,18 +187,12 @@ class JaxParameterTuning:
     
         # initialize planning algorithm
         planner = JaxBackpropPlanner(rddl=env.model, **planner_args)
-        if online:
-            policy = JaxOnlineController(
-                planner=planner, key=key,
-                print_summary=False, print_progress=False, tqdm_position=index,
-                **train_args
-            )
-        else:
-            policy = JaxOfflineController(
-                planner=planner, key=key, train_on_reset=True,
-                print_summary=False, print_progress=False, tqdm_position=index,
-                **train_args
-            )
+        klass = JaxOnlineController if online else JaxOfflineController
+        policy = klass(
+            planner=planner, key=key,
+            print_summary=False, print_progress=False, tqdm_position=index,
+            **train_args
+        )
         
         # perform training
         average_reward = 0.0
@@ -333,7 +337,9 @@ class JaxParameterTuning:
               f'    best_meta_objective  ={best_target}\n')        
         if save_plot:
             self._save_plot(filename)
-            
+        
+        self.best_params = best_params
+        self.optimizer = optimizer
         return best_params
 
     def _filename(self, name, ext):
