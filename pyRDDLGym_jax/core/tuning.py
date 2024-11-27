@@ -12,7 +12,6 @@ from bayes_opt.acquisition import AcquisitionFunction, UpperConfidenceBound
 import jax
 import numpy as np
 
-from pyRDDLGym.core.debug.exception import raise_warning
 from pyRDDLGym.core.env import RDDLEnv
 
 from pyRDDLGym_jax.core.planner import (
@@ -184,7 +183,9 @@ class JaxParameterTuning:
         # config string substitution and parsing
         config_params = JaxParameterTuning.search_to_config_params(hyperparams_dict, params)
         if verbose:
-            print(f'[{index}] key={key[0]}, hyper_params={config_params}', flush=True)
+            config_param_str = ', '.join(
+                f'{k}={v}' for (k, v) in config_params.items())
+            print(f'[{index}] key={key[0]}, {config_param_str}', flush=True)
         config_string = JaxParameterTuning.config_from_template(config_template, config_params)
         planner_args, _, train_args = load_config_from_string(config_string)
     
@@ -271,10 +272,10 @@ class JaxParameterTuning:
                 break
             
             # continue with next iteration
-            print('\n' + '*' * 25 + 
+            print('\n' + '*' * 50 + 
                   f'\n[{datetime.timedelta(seconds=elapsed)}] ' + 
                   f'starting iteration {it + 1}' + 
-                  '\n' + '*' * 25)
+                  '\n' + '*' * 50)
             key, *subkeys = jax.random.split(key, num=num_workers + 1)
             rows = [None] * num_workers
             
