@@ -215,16 +215,13 @@ class JaxParameterTuning:
         pid = os.getpid()
         return params, average_reward, index, pid
     
-    def tune(self, key: int,
-             filename: str,
-             save_plot: bool=False) -> ParameterValues:
+    def tune(self, key: int, log_file: str) -> ParameterValues:
         '''Tunes the hyper-parameters for Jax planner, returns the best found.'''
         
         self.summarize_hyperparameters()
         
         # clear and prepare output file
-        filename = self._filename(filename, 'csv')
-        with open(filename, 'w', newline='') as file:
+        with open(log_file, 'w', newline='') as file:
             writer = csv.writer(file)
             writer.writerow(COLUMNS + list(self.hyperparams_dict.keys()))
         
@@ -330,7 +327,7 @@ class JaxParameterTuning:
                                        list(config_params.values())
                         
             # write results of all processes in current iteration to file
-            with open(filename, 'a', newline='') as file:
+            with open(log_file, 'a', newline='') as file:
                 writer = csv.writer(file)
                 writer.writerows(rows)
         
@@ -341,44 +338,34 @@ class JaxParameterTuning:
               f'    iterations           ={it + 1}\n'
               f'    best_hyper_parameters={best_params}\n'
               f'    best_meta_objective  ={best_target}\n')        
-        if save_plot:
-            self._save_plot(filename)
         
         self.best_params = best_params
         self.optimizer = optimizer
+        self.log_file = log_file
         return best_params
 
-    def _filename(self, name, ext):
-        domain_name = ''.join(c for c in self.env.model.domain_name 
-                              if c.isalnum() or c == '_')
-        instance_name = ''.join(c for c in self.env.model.instance_name 
-                                if c.isalnum() or c == '_')
-        filename = f'{name}_{domain_name}_{instance_name}.{ext}'
-        return filename
-    
-    def _save_plot(self, filename):
-        try:
-            import matplotlib.pyplot as plt
-            from sklearn.manifold import MDS
-        except Exception as e:
-            raise_warning(f'failed to import packages matplotlib or sklearn, '
-                          f'aborting plot of search space\n{e}', 'red')
-        else:
-            with open(filename, 'r') as file:
-                data_iter = csv.reader(file, delimiter=',')
-                data = [row for row in data_iter]
-            data = np.asarray(data, dtype=object)
-            hparam = data[1:, len(COLUMNS):].astype(np.float64)
-            target = data[1:, 3].astype(np.float64)
-            target = (target - np.min(target)) / (np.max(target) - np.min(target))
-            embedding = MDS(n_components=2, normalized_stress='auto')
-            hparam_low = embedding.fit_transform(hparam)
-            sc = plt.scatter(hparam_low[:, 0], hparam_low[:, 1], c=target, s=5,
-                             cmap='seismic', edgecolor='gray', linewidth=0)
-            ax = plt.gca()
-            for i in range(len(target)):
-                ax.annotate(str(i), (hparam_low[i, 0], hparam_low[i, 1]), fontsize=3)         
-            plt.colorbar(sc)
-            plt.savefig(self._filename('gp_points', 'pdf'))
-            plt.clf()
-            plt.close()
+    def save_plot(self, plot_file: str) -> None:
+        import matplotlib.pyplot as plt
+        from sklearn.manifold import MDS
+        
+        # load the log file and normalize target values
+        with open(self.log_file, 'r') as file:
+            data_iter = csv.reader(file, delimiter=',')
+            data = [row for row in data_iter]
+        data = np.asarray(data, dtype=object)
+        hparam = data[1:, len(COLUMNS):].astype(np.float64)
+        target = data[1:, 3].astype(np.float64)
+        target = (target - np.min(target)) / (np.max(target) - np.min(target))
+        
+        # embed the parameter vectors in a low dimensional space
+        embedding = MDS(n_components=2, normalized_stress='auto')
+        hparam_low = embedding.fit_transform(hparam)
+        sc = plt.scatter(hparam_low[:, 0], hparam_low[:, 1], c=target, s=5,
+                         cmap='seismic', edgecolor='gray', linewidth=0)
+        ax = plt.gca()
+        for i in range(len(target)):
+            ax.annotate(str(i), (hparam_low[i, 0], hparam_low[i, 1]), fontsize=3)         
+        plt.colorbar(sc)
+        plt.savefig(plot_file)
+        plt.clf()
+        plt.close()
