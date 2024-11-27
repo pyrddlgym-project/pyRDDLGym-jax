@@ -22,13 +22,11 @@ from pyRDDLGym_jax.core.planner import (
     load_config_from_string
 )
 
-Kwargs = Dict[str, Any]
-
 
 class Hyperparameter:
     '''A generic hyper-parameter of the planner that can be tuned.'''
     
-    def __init__(self, name: str, lower_bound: float, upper_bound: float, 
+    def __init__(self, name: str, lower_bound: float, upper_bound: float,
                  search_to_config_map: Callable) -> None:
         self.name = name
         self.lower_bound = lower_bound
@@ -39,6 +37,10 @@ class Hyperparameter:
         return (f'{self.search_to_config_map.__name__} '
                 f': [{self.lower_bound}, {self.upper_bound}] -> {self.name}')
 
+
+Kwargs = Dict[str, Any]
+ParameterValues = Dict[str, Any]
+Hyperparameters = Dict[str, Hyperparameter]
     
 COLUMNS = ['pid', 'worker', 'iteration', 'target', 'best_target', 'acq_params']
 
@@ -48,7 +50,7 @@ class JaxParameterTuning:
     
     def __init__(self, env: RDDLEnv,
                  config_template: str,
-                 hyperparams_dict: Dict[str, Hyperparameter],
+                 hyperparams_dict: Hyperparameters,
                  online: bool,
                  eval_trials: int=5,
                  verbose: bool=True,
@@ -133,7 +135,8 @@ class JaxParameterTuning:
               f'    acquisition_fn            ={self.acquisition}')
         
     @staticmethod
-    def annealing_acquisition(n_samples, n_delay_samples=0, kappa1=10.0, kappa2=1.0):
+    def annealing_acquisition(n_samples: int, n_delay_samples: int=0,
+                              kappa1: float=10.0, kappa2: float=1.0) -> UpperConfidenceBound:
         acq_fn = UpperConfidenceBound(
             kappa=kappa1,
             exploration_decay=(kappa2 / kappa1) ** (1.0 / (n_samples - n_delay_samples)),
@@ -142,8 +145,8 @@ class JaxParameterTuning:
         return acq_fn
     
     @staticmethod
-    def search_to_config_params(hyper_params: Dict[str, Hyperparameter], 
-                                params: Dict[str, Any]) -> Dict[str, Any]:
+    def search_to_config_params(hyper_params: Hyperparameters,
+                                params: ParameterValues) -> ParameterValues:
         config_params = {
             tag: param.search_to_config_map(params[tag])
             for (tag, param) in hyper_params.items()
@@ -151,8 +154,8 @@ class JaxParameterTuning:
         return config_params
     
     @staticmethod
-    def config_from_template(config_template: str, 
-                             config_params: Dict[str, Any]) -> str:
+    def config_from_template(config_template: str,
+                             config_params: ParameterValues) -> str:
         config_string = config_template
         for (tag, param_value) in config_params.items():
             config_string = config_string.replace(tag, str(param_value))
@@ -163,7 +166,10 @@ class JaxParameterTuning:
         return self.config_from_template(self.config_template, self.best_params)
         
     @staticmethod
-    def objective_function(params, key, index, kwargs):
+    def objective_function(params: ParameterValues,
+                           key: jax.random.PRNGKey,
+                           index: int,
+                           kwargs: Kwargs) -> Tuple[ParameterValues, float, int, int]:
         '''A pickleable objective function to evaluate a single hyper-parameter 
         configuration.'''
         
@@ -211,7 +217,7 @@ class JaxParameterTuning:
     
     def tune(self, key: int,
              filename: str,
-             save_plot: bool=False) -> Dict[str, Any]:
+             save_plot: bool=False) -> ParameterValues:
         '''Tunes the hyper-parameters for Jax planner, returns the best found.'''
         
         self.summarize_hyperparameters()
@@ -319,9 +325,9 @@ class JaxParameterTuning:
                         if target > best_target:
                             best_params, best_target = config_params, target
                         
-                        rows[index] = [pid, index, it, target, 
-                                       best_target, old_acq_params] \
-                                        + list(config_params.values())
+                        rows[index] = [pid, index, it, target,
+                                       best_target, old_acq_params] + \
+                                       list(config_params.values())
                         
             # write results of all processes in current iteration to file
             with open(filename, 'a', newline='') as file:
