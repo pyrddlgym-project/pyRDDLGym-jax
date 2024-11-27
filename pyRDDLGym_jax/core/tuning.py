@@ -194,11 +194,7 @@ class JaxParameterTuning:
         # initialize planning algorithm
         planner = JaxBackpropPlanner(rddl=env.model, **planner_args)
         klass = JaxOnlineController if online else JaxOfflineController
-        policy = klass(
-            planner=planner, key=key,
-            print_summary=False, print_progress=False, tqdm_position=index,
-            **train_args
-        )
+        policy = klass(planner=planner, key=key, tqdm_position=index, **train_args)
         
         # perform training
         average_reward = 0.0
@@ -206,11 +202,12 @@ class JaxParameterTuning:
             key, subkey = jax.random.split(key)
             total_reward = policy.evaluate(env, seed=np.array(subkey)[0])['mean']
             if verbose:
-                print(f'    [{index}] trial {trial + 1} key={subkey[0]}, '
-                      f'reward={total_reward}', flush=True)
+                iters = None if policy.callback is None else policy.callback['iteration']
+                print(f'    [{index}] trial {trial + 1}, key={subkey[0]}, '
+                      f'reward={total_reward:.6f}, iters={iters}', flush=True)
             average_reward += total_reward / num_trials    
         if verbose:
-            print(f'[{index}] average reward={average_reward}', flush=True)        
+            print(f'[{index}] average reward={average_reward:.6f}', flush=True)        
         
         pid = os.getpid()
         return params, average_reward, index, pid
