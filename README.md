@@ -12,6 +12,7 @@ Some demos of solved problems by JaxPlan:
 <img src="Images/pong.gif" width="120" height="120" margin=0/>
 <img src="Images/quadcopter.gif" width="120" height="120" margin=0/>
 <img src="Images/reacher.gif" width="120" height="120" margin=0/>
+<img src="Images/reservoir.gif" width="120" height="120" margin=0/>
 </p>
 
 > [!NOTE]  
