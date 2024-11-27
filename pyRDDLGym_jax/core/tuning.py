@@ -278,6 +278,7 @@ class JaxParameterTuning:
                   '\n' + '*' * 50)
             key, *subkeys = jax.random.split(key, num=num_workers + 1)
             rows = [None] * num_workers
+            old_best_target = best_target
             
             # create worker pool: note each iteration must wait for all workers
             # to finish before moving to the next
@@ -323,7 +324,11 @@ class JaxParameterTuning:
                         rows[index] = [pid, index, it, target,
                                        best_target, old_acq_params] + \
                                        list(config_params.values())
-                        
+            
+            # print best parameter if found
+            if best_target > old_best_target:
+                print(f'* found new best average reward {best_target:.6f}')
+                
             # write results of all processes in current iteration to file
             with open(log_file, 'a', newline='') as file:
                 writer = csv.writer(file)
