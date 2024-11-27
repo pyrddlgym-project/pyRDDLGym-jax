@@ -2326,8 +2326,10 @@ class JaxOfflineController(BaseAgent):
         self.params_given = params is not None
         
         self.step = 0
+        self.callback = None
         if not self.train_on_reset and not self.params_given:
             callback = self.planner.optimize(key=self.key, **self.train_kwargs)
+            self.callback = callback
             params = callback['best_params'] 
         self.params = params  
         
@@ -2386,6 +2388,7 @@ class JaxOnlineController(BaseAgent):
             subs=state,
             **self.train_kwargs
         )
+        self.callback = callback
         params = callback['best_params']
         self.key, subkey = random.split(self.key)
         actions = planner.get_action(
@@ -2396,4 +2399,5 @@ class JaxOnlineController(BaseAgent):
         
     def reset(self) -> None:
         self.guess = None
+        self.callback = None
     
