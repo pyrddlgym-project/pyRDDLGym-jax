@@ -760,6 +760,8 @@ class JaxStraightLinePlan(JaxPlan):
             params = {}
             for (var, shape) in shapes.items():
                 if ranges[var] != 'bool' or not stack_bool_params: 
+                    key, subkey = random.split(key)
+                    
                     init_function = init
                     if var in initializer_per_action.keys():
                         init_function = initializer_per_action[var]
