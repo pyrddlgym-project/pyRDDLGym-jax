@@ -713,14 +713,14 @@ class ExactLogic(Logic):
     
     @staticmethod
     def exact_poisson(key, rate, params):
-        return random.poisson(key=key, lam=rate, dtype=self.INT), params   
+        return random.poisson(key=key, lam=rate), params   
     
     def poisson(self, id, init_params):
         return self.exact_poisson
     
     @staticmethod
     def exact_geometric(key, prob, params):
-        return random.geometric(key=key, p=prob, dtype=self.INT), params
+        return random.geometric(key=key, p=prob), params
     
     def geometric(self, id, init_params):
         return self.exact_geometric
