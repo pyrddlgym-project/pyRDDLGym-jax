@@ -424,7 +424,8 @@ class JaxStraightLinePlan(JaxPlan):
                  wrap_non_bool: bool=False,
                  wrap_softmax: bool=False,
                  use_new_projection: bool=False,
-                 max_constraint_iter: int=100) -> None:
+                 max_constraint_iter: int=100,
+                 initializer_per_action: Dict[str, initializers.Initializer]=dict()) -> None:
         '''Creates a new straight line plan in JAX.
         
         :param initializer: a Jax Initializer for setting the initial actions
@@ -444,6 +445,7 @@ class JaxStraightLinePlan(JaxPlan):
         :param max_constraint_iter: max iterations of projected 
         gradient for ensuring actions satisfy constraints, only required if 
         use_new_projection = True
+        :param initializer_per_action: Initializer function for each plan action
         '''
         super(JaxStraightLinePlan, self).__init__()
         
@@ -455,6 +457,7 @@ class JaxStraightLinePlan(JaxPlan):
         self._wrap_softmax = wrap_softmax
         self._use_new_projection = use_new_projection
         self._max_constraint_iter = max_constraint_iter
+        self._initializer_per_action = initializer_per_action
         
     def summarize_hyperparameters(self) -> None:
         bounds = '\n        '.join(
@@ -751,13 +754,18 @@ class JaxStraightLinePlan(JaxPlan):
         
         init = self._initializer
         stack_bool_params = use_constraint_satisfaction and self._wrap_softmax
+        initializer_per_action = self._initializer_per_action
         
         def _jax_wrapped_slp_init(key, hyperparams, subs):
             params = {}
             for (var, shape) in shapes.items():
                 if ranges[var] != 'bool' or not stack_bool_params: 
-                    key, subkey = random.split(key)
-                    param = init(key=subkey, shape=shape, dtype=compiled.REAL)
+                    init_function = init
+                    if var in initializer_per_action.keys():
+                        init_function = initializer_per_action[var]
+
+                    param = init_function(key=subkey, shape=shape, dtype=compiled.REAL)
+                    
                     if ranges[var] == 'bool':
                         param += bool_threshold
                     params[var] = param
@@ -791,7 +799,8 @@ class JaxDeepReactivePolicy(JaxPlan):
                  normalize: bool=False,
                  normalize_per_layer: bool=False,
                  normalizer_kwargs: Optional[Kwargs]=None,
-                 wrap_non_bool: bool=False) -> None:
+                 wrap_non_bool: bool=False,
+                 initializer_per_layer: Dict[str, hk.initializers.Initializer]=None) -> None:
         '''Creates a new deep reactive policy in JAX.
         
         :param neurons: sequence consisting of the number of neurons in each
@@ -805,6 +814,7 @@ class JaxDeepReactivePolicy(JaxPlan):
         to layer norm
         :param wrap_non_bool: whether to wrap real or int action fluent parameters
         with non-linearity (e.g. sigmoid or ELU) to satisfy box constraints
+        :param initializer_per_layer: weight initialization per layer
         '''
         super(JaxDeepReactivePolicy, self).__init__()
         
@@ -820,6 +830,7 @@ class JaxDeepReactivePolicy(JaxPlan):
             normalizer_kwargs = {'create_offset': True, 'create_scale': True}
         self._normalizer_kwargs = normalizer_kwargs
         self._wrap_non_bool = wrap_non_bool
+        self._initializer_per_layer = initializer_per_layer
             
     def summarize_hyperparameters(self) -> None:
         bounds = '\n        '.join(
@@ -872,6 +883,7 @@ class JaxDeepReactivePolicy(JaxPlan):
         layer_sizes = {var: np.prod(shape, dtype=int) 
                        for (var, shape) in shapes.items()}
         layer_names = {var: f'output_{var}'.replace('-', '_') for var in shapes}
+        initializer_per_layer = self._initializer_per_layer
         
         # inputs for the policy network
         if rddl.observ_fluents:
@@ -938,13 +950,27 @@ class JaxDeepReactivePolicy(JaxPlan):
             # feed state vector through hidden layers
             hidden = state
             for (i, (num_neuron, activation)) in layers:
-                linear = hk.Linear(num_neuron, name=f'hidden_{i}', w_init=init)
+                b_layer_init = None
+                w_layer_init = init
+                layer_name = f'hidden_{i}'
+
+                if initializer_per_layer is not None and layer_name in initializer_per_layer.keys():
+                    b_layer_init = hk.initializers.Constant(initializer_per_layer[layer_name]['b'])
+                    w_layer_init = hk.initializers.Constant(initializer_per_layer[layer_name]['w'])
+
+                linear = hk.Linear(num_neuron, name=layer_name, w_init=w_layer_init, b_init=b_layer_init)
                 hidden = activation(linear(hidden))
             
             # each output is a linear layer reshaped to original lifted shape
             actions = {}
             for (var, size) in layer_sizes.items():
-                linear = hk.Linear(size, name=layer_names[var], w_init=init)
+                b_layer_init = None
+                w_layer_init = init
+                if initializer_per_layer is not None and layer_names[var] in initializer_per_layer.keys():
+                    b_layer_init = hk.initializers.Constant(initializer_per_layer[layer_names[var]]['b'])
+                    w_layer_init = hk.initializers.Constant(initializer_per_layer[layer_names[var]]['w'])
+
+                linear = hk.Linear(size, name=layer_names[var], w_init=w_layer_init, b_init=b_layer_init)
                 reshape = hk.Reshape(output_shape=shapes[var], preserve_dims=-1,
                                      name=f'reshape_{layer_names[var]}')
                 output = reshape(linear(hidden))
@@ -1701,8 +1727,12 @@ r"""
         window of the past test_rolling_window returns when updating the best
         parameters found so far
         :param tqdm_position: position of tqdm progress bar (for multiprocessing)
+        :param return_callback: flag that sets if we should return the callback for each iteration
+        (added for compatibility with pyRDDLGym_jax previous versions)
         '''
         it = self.optimize_generator(*args, **kwargs)
+        if kwargs['return_callback']:
+            return it
         
         # if the python is C-compiled then the deque is native C and much faster
         # than naively exhausting iterator, but not if the python is some other
@@ -1731,7 +1761,8 @@ r"""
                            print_progress: bool=True,
                            stopping_rule: Optional[JaxPlannerStoppingRule]=None,
                            test_rolling_window: int=10,
-                           tqdm_position: Optional[int]=None) -> Generator[Dict[str, Any], None, None]:
+                           tqdm_position: Optional[int]=None,
+                           return_callback: bool=False) -> Generator[Dict[str, Any], None, None]:
         '''Returns a generator for computing an optimal policy or plan. 
         Generator can be iterated over to lazily optimize the plan, yielding
         a dictionary of intermediate computations.
@@ -1756,6 +1787,8 @@ r"""
         window of the past test_rolling_window returns when updating the best
         parameters found so far
         :param tqdm_position: position of tqdm progress bar (for multiprocessing)
+        :param return_callback: flag that sets if we should return the callback for each iteration
+        (added for compatibility with pyRDDLGym_jax previous versions)
         '''
         start_time = time.time()
         elapsed_outside_loop = 0

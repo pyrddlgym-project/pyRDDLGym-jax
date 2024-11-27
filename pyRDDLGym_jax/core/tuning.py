@@ -363,7 +363,8 @@ def objective_slp(params, kwargs, key, index):
         policy_hyperparams=policy_hparams,
         print_summary=False,
         print_progress=False,
-        tqdm_position=index)
+        tqdm_position=index,
+        return_callback=False)
     
     # initialize env for evaluation (need fresh copy to avoid concurrency)
     env = RDDLEnv(domain=kwargs['domain'],
