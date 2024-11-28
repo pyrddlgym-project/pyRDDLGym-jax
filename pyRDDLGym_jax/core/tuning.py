@@ -135,7 +135,7 @@ class JaxParameterTuning:
         
     @staticmethod
     def annealing_acquisition(n_samples: int, n_delay_samples: int=0,
-                              kappa1: float=10.0, kappa2: float=1.0) -> UpperConfidenceBound:
+                              kappa1: float=5.0, kappa2: float=1.0) -> UpperConfidenceBound:
         acq_fn = UpperConfidenceBound(
             kappa=kappa1,
             exploration_decay=(kappa2 / kappa1) ** (1.0 / (n_samples - n_delay_samples)),
