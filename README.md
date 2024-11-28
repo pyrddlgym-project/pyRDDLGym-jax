@@ -186,17 +186,12 @@ import os
 import sys
 
 import pyRDDLGym
-
 from pyRDDLGym_jax.core.tuning import JaxParameterTuning, Hyperparameter
-from pyRDDLGym_jax.core.planner import (
-    load_config_from_string, JaxBackpropPlanner, JaxOfflineController, JaxOnlineController
-)
 
 # set up the environment   
 env = pyRDDLGym.make(domain, instance, vectorized=True)
     
 # load the config file template with planner settings
-abs_path = os.path.dirname(os.path.abspath(__file__))
 with open('path/to/config', 'r') as file: 
     config_template = file.read() 
     
