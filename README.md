@@ -182,9 +182,6 @@ would allow to tune the ``#weight`` sharpness of model relaxations, and the ``#l
 Next, you must link the patterns in the config with concrete hyper-parameter ranges the tuner will understand:
 
 ```python
-import os
-import sys
-
 import pyRDDLGym
 from pyRDDLGym_jax.core.tuning import JaxParameterTuning, Hyperparameter
 
@@ -192,7 +189,7 @@ from pyRDDLGym_jax.core.tuning import JaxParameterTuning, Hyperparameter
 env = pyRDDLGym.make(domain, instance, vectorized=True)
     
 # load the config file template with planner settings
-with open('path/to/config', 'r') as file: 
+with open('path/to/config.cfg', 'r') as file: 
     config_template = file.read() 
     
 # map parameters in the config that will be tuned
