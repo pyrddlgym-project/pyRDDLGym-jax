@@ -9,6 +9,7 @@ Some demos of solved problems by JaxPlan:
 
 <p align="middle">
 <img src="Images/intruders.gif" width="120" height="120" margin=0/>
+<img src="Images/marsrover.gif" width="120" height="120" margin=0/>
 <img src="Images/pong.gif" width="120" height="120" margin=0/>
 <img src="Images/quadcopter.gif" width="120" height="120" margin=0/>
 <img src="Images/reacher.gif" width="120" height="120" margin=0/>
