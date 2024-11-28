@@ -1202,7 +1202,7 @@ class JaxPlannerStatus(Enum):
     can be used to monitor and act based on the planner's progress.'''
     
     NORMAL = 0
-    STOPPING_RULE_CONVERGED = 1
+    STOPPING_RULE_REACHED = 1
     NO_PROGRESS = 2
     PRECONDITION_POSSIBLY_UNSATISFIED = 3
     INVALID_GRADIENT = 4
@@ -2003,7 +2003,7 @@ r"""
             
             # stopping condition reached
             if stopping_rule is not None and stopping_rule.monitor(callback):
-                callback['status'] = status = JaxPlannerStatus.STOPPING_RULE_CONVERGED  
+                callback['status'] = status = JaxPlannerStatus.STOPPING_RULE_REACHED  
             
             # if the progress bar is used
             if print_progress:
