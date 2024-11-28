@@ -1202,14 +1202,15 @@ class JaxPlannerStatus(Enum):
     can be used to monitor and act based on the planner's progress.'''
     
     NORMAL = 0
-    NO_PROGRESS = 1
-    PRECONDITION_POSSIBLY_UNSATISFIED = 2
-    INVALID_GRADIENT = 3
-    TIME_BUDGET_REACHED = 4
-    ITER_BUDGET_REACHED = 5
+    CONVERGED = 1
+    NO_PROGRESS = 2
+    PRECONDITION_POSSIBLY_UNSATISFIED = 3
+    INVALID_GRADIENT = 4
+    TIME_BUDGET_REACHED = 5
+    ITER_BUDGET_REACHED = 6
     
-    def is_failure(self) -> bool:
-        return self.value >= 3
+    def is_terminal(self) -> bool:
+        return self.value == 1 or self.value >= 4
 
 
 class JaxPlannerStoppingRule:
@@ -1429,6 +1430,21 @@ r"""
         self.plan.summarize_hyperparameters()
         self.logic.summarize_hyperparameters()
         
+    def summarize_model_parameters(self):
+        if not self.compiled.model_params:
+            return
+        print('Some RDDL operations are non-differentiable '
+              'and will be approximated as follows:')
+        exprs_by_rddl_op, values_by_rddl_op = {}, {}
+        for info in self.compiled.model_parameter_info().values():
+            rddl_op = info['rddl_op']
+            exprs_by_rddl_op.setdefault(rddl_op, []).append(info['id'])
+            values_by_rddl_op.setdefault(rddl_op, []).append(info['init_value'])
+        for rddl_op in sorted(exprs_by_rddl_op.keys()):
+            print(f'    {rddl_op}:\n'
+                  f'        addresses  ={exprs_by_rddl_op[rddl_op]}\n'
+                  f'        init_values={values_by_rddl_op[rddl_op]}')
+                    
     # ===========================================================================
     # COMPILATION SUBROUTINES
     # ===========================================================================
@@ -1731,21 +1747,6 @@ r"""
                 pass
         return callback
     
-    def summarize_model_parameters(self):
-        if not self.compiled.model_params:
-            return
-        print('Some RDDL operations are non-differentiable '
-              'and will be approximated as follows:')
-        exprs_by_rddl_op, values_by_rddl_op = {}, {}
-        for info in self.compiled.model_parameter_info().values():
-            rddl_op = info['rddl_op']
-            exprs_by_rddl_op.setdefault(rddl_op, []).append(info['id'])
-            values_by_rddl_op.setdefault(rddl_op, []).append(info['init_value'])
-        for rddl_op in sorted(exprs_by_rddl_op.keys()):
-            print(f'    {rddl_op}:\n'
-                  f'        addresses  ={exprs_by_rddl_op[rddl_op]}\n'
-                  f'        init_values={values_by_rddl_op[rddl_op]}')
-                    
     def optimize_generator(self, key: Optional[random.PRNGKey]=None,
                            epochs: int=999999,
                            train_seconds: float=120.,
@@ -1973,22 +1974,14 @@ r"""
                 returns = -np.sum(np.asarray(log['reward']), axis=1)
                 plot.redraw(xticks, loss_values, action_values, returns)
             
-            # if the progress bar is used
-            elapsed = time.time() - start_time - elapsed_outside_loop
-            if print_progress:
-                iters.n = int(100 * min(1, max(elapsed / train_seconds, it / epochs)))
-                iters.set_description(
-                    f'{position_str} {it:6} it / {-train_loss:14.6f} train / '
-                    f'{-test_loss:14.6f} test / {-best_loss:14.6f} best / '
-                    f'{status.value} status')
-                        
             # reached computation budget
+            elapsed = time.time() - start_time - elapsed_outside_loop
             if elapsed >= train_seconds:
                 status = JaxPlannerStatus.TIME_BUDGET_REACHED
             if it >= epochs - 1:
                 status = JaxPlannerStatus.ITER_BUDGET_REACHED
             
-            # return a callback
+            # build a callback
             callback = {
                 'status': status,
                 'iteration': it,
@@ -2007,17 +2000,28 @@ r"""
                 'model_params': model_params,
                 **log
             }
+            
+            # stopping condition reached
+            if stopping_rule is not None and stopping_rule.monitor(callback):
+                callback['status'] = status = JaxPlannerStatus.CONVERGED  
+            
+            # if the progress bar is used
+            if print_progress:
+                iters.n = int(100 * min(1, max(elapsed / train_seconds, it / epochs)))
+                iters.set_description(
+                    f'{position_str} {it:6} it / {-train_loss:14.6f} train / '
+                    f'{-test_loss:14.6f} test / {-best_loss:14.6f} best / '
+                    f'{status.value} status'
+                )
+                        
+            # yield the callback
             start_time_outside = time.time()
             yield callback
             elapsed_outside_loop += (time.time() - start_time_outside)
             
             # abortion check
-            if status.is_failure():
-                break
-            
-            # stopping condition reached
-            if stopping_rule is not None and stopping_rule.monitor(callback):
-                break                
+            if status.is_terminal():
+                break             
         
         # ======================================================================
         # POST-PROCESSING AND CLEANUP
