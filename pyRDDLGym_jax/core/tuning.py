@@ -3,7 +3,7 @@ import datetime
 from multiprocessing import get_context
 import os
 import time
-from typing import Any, Callable, Dict, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, Optional, Tuple
 import warnings
 warnings.filterwarnings("ignore")
 
@@ -25,21 +25,21 @@ from pyRDDLGym_jax.core.planner import (
 class Hyperparameter:
     '''A generic hyper-parameter of the planner that can be tuned.'''
     
-    def __init__(self, name: str, lower_bound: float, upper_bound: float,
+    def __init__(self, tag: str, lower_bound: float, upper_bound: float,
                  search_to_config_map: Callable) -> None:
-        self.name = name
+        self.tag = tag
         self.lower_bound = lower_bound
         self.upper_bound = upper_bound
         self.search_to_config_map = search_to_config_map
         
     def __str__(self) -> str:
         return (f'{self.search_to_config_map.__name__} '
-                f': [{self.lower_bound}, {self.upper_bound}] -> {self.name}')
+                f': [{self.lower_bound}, {self.upper_bound}] -> {self.tag}')
 
 
 Kwargs = Dict[str, Any]
 ParameterValues = Dict[str, Any]
-Hyperparameters = Dict[str, Hyperparameter]
+Hyperparameters = Iterable[Hyperparameter]
     
 COLUMNS = ['pid', 'worker', 'iteration', 'target', 'best_target', 'acq_params']
 
@@ -49,7 +49,7 @@ class JaxParameterTuning:
     
     def __init__(self, env: RDDLEnv,
                  config_template: str,
-                 hyperparams_dict: Hyperparameters,
+                 hyperparams: Hyperparameters,
                  online: bool,
                  eval_trials: int=5,
                  verbose: bool=True,
@@ -68,8 +68,8 @@ class JaxParameterTuning:
         :param config_template: base configuration file content to tune: regex
         matches are specified directly in the config and map to keys in the 
         hyperparams_dict field
-        :param hyperparams_dict: dictionary mapping regex match in the config
-        file template to a hyper-parameter object for the tuner to optimize
+        :param hyperparams: list of hyper-parameters to regex replace in the
+        config template during tuning
         :param online: whether the planner is optimized online or offline
         :param timeout_tuning: the maximum amount of time to spend tuning 
         hyperparameters in general (in seconds)
@@ -90,9 +90,9 @@ class JaxParameterTuning:
         # objective parameters
         self.env = env
         self.config_template = config_template
-        hyperparams_dict = {tag: hyper_param 
-                            for (tag, hyper_param) in hyperparams_dict.items()
-                            if tag in config_template}
+        hyperparams_dict = {hyper_param.tag: hyper_param 
+                            for hyper_param in hyperparams
+                            if hyper_param.tag in config_template}
         self.hyperparams_dict = hyperparams_dict
         self.online = online
         self.eval_trials = eval_trials
@@ -117,8 +117,8 @@ class JaxParameterTuning:
     
     def summarize_hyperparameters(self) -> None:
         hyper_params_table = []
-        for (tag, param) in self.hyperparams_dict.items():
-            hyper_params_table.append(f'        {tag}: {str(param)}')
+        for (_, param) in self.hyperparams_dict.items():
+            hyper_params_table.append(f'        {str(param)}')
         hyper_params_table = '\n'.join(hyper_params_table)
         print(f'hyperparameter optimizer parameters:\n'
               f'    tuned_hyper_parameters    =\n{hyper_params_table}\n'

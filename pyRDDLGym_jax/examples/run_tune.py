@@ -47,19 +47,19 @@ def main(domain, instance, method, trials=5, iters=20, workers=4):
         config_template = file.read() 
     
     # map parameters in the config that will be tuned
-    hyperparams_dict = {
-        '#weight': Hyperparameter('model_w', -1., 5., power_10),
-        '#pweight': Hyperparameter('policy_w', -2., 3., power_10),
-        '#lr': Hyperparameter('lr', -5., 1., power_10),
-        '#layer1': Hyperparameter('layer_1', 1, 8, power_2),
-        '#layer2': Hyperparameter('layer_2', 1, 8, power_2),
-        '#T': Hyperparameter('T', 1, min(env.horizon, 100), int)       
-    }
+    hyperparams = [
+        Hyperparameter('#weight', -1., 5., power_10),
+        Hyperparameter('#pweight', -2., 3., power_10),
+        Hyperparameter('#lr', -5., 1., power_10),
+        Hyperparameter('#layer1', 1, 8, power_2),
+        Hyperparameter('#layer2', 1, 8, power_2),
+        Hyperparameter('#T', 1, min(env.horizon, 100), int)       
+    ]
     
     # build the tuner and tune
     tuning = JaxParameterTuning(env=env,
                                 config_template=config_template,
-                                hyperparams_dict=hyperparams_dict,
+                                hyperparams=hyperparams,
                                 online=method == 'replan',
                                 eval_trials=trials,
                                 num_workers=workers,
