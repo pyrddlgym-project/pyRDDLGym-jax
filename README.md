@@ -23,10 +23,10 @@ Some demos of solved problems by JaxPlan:
 
 - [Installation](#installation)
 - [Running from the Command Line](#running-from-the-command-line)
-- [Running from within Python](#running-from-within-python)
+- [Running from Another Python Application](#running-from-another-python-application)
 - [Configuring the Planner](#configuring-the-planner)
+- [Tuning the Planner](#tuning-the-planner)
 - [Simulation](#simulation)
-- [Manual Gradient Calculation](#manual-gradient-calculation)
 - [Citing JaxPlan](#citing-jaxplan)
   
 ## Installation
@@ -67,27 +67,13 @@ The ``method`` parameter supports three possible modes:
 - ``drp`` is the deep reactive policy network described [in this paper](https://ojs.aaai.org/index.php/AAAI/article/view/4744)
 - ``replan`` is the same as ``slp`` except the plan is recalculated at every decision time step.
    
-A basic run script is also provided to run the automatic hyper-parameter tuning:
-
-```shell
-python -m pyRDDLGym_jax.examples.run_tune <domain> <instance> <method> <trials> <iters> <workers>
-```
-
-where:
-- ``domain`` is the domain identifier as specified in rddlrepository
-- ``instance`` is the instance identifier
-- ``method`` is the planning method to use (i.e. drp, slp, replan)
-- ``trials`` is the (optional) number of trials/episodes to average in evaluating each hyper-parameter setting
-- ``iters`` is the (optional) maximum number of iterations/evaluations of Bayesian optimization to perform
-- ``workers`` is the (optional) number of parallel evaluations to be done at each iteration, e.g. the total evaluations = ``iters * workers``.
-
 For example, the following will train JaxPlan on the Quadcopter domain with 4 drones:
 
 ```shell
 python -m pyRDDLGym_jax.examples.run_plan Quadcopter 1 slp
 ```
 
-## Running from within Python
+## Running from Another Python Application
 
 To run JaxPlan from within a Python application, refer to the following example:
 
@@ -119,14 +105,15 @@ The basic structure of a configuration file is provided below for a straight-lin
 ```ini
 [Model]
 logic='FuzzyLogic'
+comparison_kwargs={'weight': 20}
+rounding_kwargs={'weight': 20}
+control_kwargs={'weight': 20}
 
 [Optimizer]
 method='JaxStraightLinePlan'
 method_kwargs={}
 optimizer='rmsprop'
 optimizer_kwargs={'learning_rate': 0.001}
-batch_size_train=1
-batch_size_test=1
 
 [Training]
 key=42
@@ -151,7 +138,7 @@ method_kwargs={'topology': [128, 64], 'activation': 'tanh'}
 ```
 
 The configuration file must then be passed to the planner during initialization. 
-For example, the [previous script here](#running-from-within-python) can be modified to set parameters from a config file:
+For example, the [previous script here](#running-from-another-python-application) can be modified to set parameters from a config file:
 
 ```python
 from pyRDDLGym_jax.core.planner import load_config
@@ -164,6 +151,89 @@ planner = JaxBackpropPlanner(rddl=env.model, **planner_args)
 controller = JaxOfflineController(planner, **train_args)
 ...
 ```
+
+### Tuning the Planner
+
+It is easy to tune the planner's hyper-parameters efficiently and automatically using Bayesian optimization.
+To do this, first create a config file template with patterns replacing concrete parameter values that you want to tune, e.g.:
+
+```ini
+[Model]
+logic='FuzzyLogic'
+comparison_kwargs={'weight': #weight}
+rounding_kwargs={'weight': #weight}
+control_kwargs={'weight': #weight}
+
+[Optimizer]
+method='JaxStraightLinePlan'
+method_kwargs={}
+optimizer='rmsprop'
+optimizer_kwargs={'learning_rate': #lr}
+
+[Training]
+train_seconds=30
+print_summary=False
+print_progress=False
+train_on_reset=True
+```
+
+would allow to tune the ``#weight`` sharpness of model relaxations, and the ``#lr`` learning rate of the optimizer.
+
+Next, you must link the patterns in the config with concrete hyper-parameter ranges the tuner will understand:
+
+```python
+import os
+import sys
+
+import pyRDDLGym
+
+from pyRDDLGym_jax.core.tuning import JaxParameterTuning, Hyperparameter
+from pyRDDLGym_jax.core.planner import (
+    load_config_from_string, JaxBackpropPlanner, JaxOfflineController, JaxOnlineController
+)
+
+# set up the environment   
+env = pyRDDLGym.make(domain, instance, vectorized=True)
+    
+# load the config file template with planner settings
+abs_path = os.path.dirname(os.path.abspath(__file__))
+with open('path/to/config', 'r') as file: 
+    config_template = file.read() 
+    
+# map parameters in the config that will be tuned
+def power_10(x):
+    return 10.0 ** x
+    
+hyperparams = [
+    Hyperparameter('#weight', -1., 5., power_10),  # tune #weight from 10^-1 ... 10^5
+    Hyperparameter('#lr', -5., 1., power_10),   # tune #lr from 10^-5 ... 10^1
+]
+    
+# build the tuner and tune
+tuning = JaxParameterTuning(env=env,
+                            config_template=config_template,
+                            hyperparams=hyperparams,
+                            online=False,
+                            eval_trials=trials,
+                            num_workers=workers,
+                            gp_iters=iters)
+tuning.tune(key=42, log_file='path/to/log.csv')
+```
+ 
+A basic run script is provided to run the automatic hyper-parameter tuning for the most sensitive parameters of JaxPlan:
+
+```shell
+python -m pyRDDLGym_jax.examples.run_tune <domain> <instance> <method> <trials> <iters> <workers>
+```
+
+where:
+- ``domain`` is the domain identifier as specified in rddlrepository
+- ``instance`` is the instance identifier
+- ``method`` is the planning method to use (i.e. drp, slp, replan)
+- ``trials`` is the (optional) number of trials/episodes to average in evaluating each hyper-parameter setting
+- ``iters`` is the (optional) maximum number of iterations/evaluations of Bayesian optimization to perform
+- ``workers`` is the (optional) number of parallel evaluations to be done at each iteration, e.g. the total evaluations = ``iters * workers``.
+ 
 
 ## Simulation
 
@@ -178,43 +248,13 @@ from pyRDDLGym_jax.core.simulator import JaxRDDLSimulator
 env = pyRDDLGym.make("domain", "instance", backend=JaxRDDLSimulator)
 
 # evaluate the random policy
-agent = RandomAgent(action_space=env.action_space,
-                    num_actions=env.max_allowed_actions)
+agent = RandomAgent(action_space=env.action_space, num_actions=env.max_allowed_actions)
 agent.evaluate(env, verbose=True, render=True)
 ```
 
 For some domains, the JAX backend could perform better than the numpy-based one, due to various compiler optimizations. 
 In any event, the simulation results using the JAX backend should (almost) always match the numpy backend.
 
-## Manual Gradient Calculation
-
-For custom applications, it is desirable to compute gradients of the model that can be optimized downstream. 
-Fortunately, we provide a very convenient function for compiling the transition/step function ``P(s, a, s')`` of the environment into JAX.
-
-```python
-import pyRDDLGym
-from pyRDDLGym_jax.core.planner import JaxRDDLCompilerWithGrad
-
-# set up the environment
-env = pyRDDLGym.make("domain", "instance", vectorized=True)
-
-# create the step function
-compiled = JaxRDDLCompilerWithGrad(rddl=env.model)
-compiled.compile()
-step_fn = compiled.compile_transition()
-```
-
-This will return a JAX compiled (pure) function requiring the following inputs:
-- ``key`` is the ``jax.random.PRNGKey`` key for reproducible randomness
-- ``actions`` is the dictionary of action fluent tensors
-- ``subs`` is the dictionary of state-fluent and non-fluent tensors
-- ``model_params`` are the parameters of the differentiable relaxations, such as ``weight``
-
-The function returns a dictionary containing a variety of variables, such as updated pvariables including next-state fluents (``pvar``), reward obtained (``reward``), error codes (``error``).
-It is thus possible to apply any JAX transformation to the output of the function, such as computing gradient using ``jax.grad()`` or batched simulation using ``jax.vmap()``.
-
-Compilation of entire rollouts is also possible by calling the ``compile_rollouts`` function.
-An [example is provided to illustrate how you can define your own policy class and compute the return gradient manually](https://github.com/pyrddlgym-project/pyRDDLGym-jax/blob/main/pyRDDLGym_jax/examples/run_gradient.py).
 
 ## Citing JaxPlan
 
