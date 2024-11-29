@@ -332,7 +332,7 @@ class JaxPlan:
         self.bounds = None
         
     def summarize_hyperparameters(self) -> None:
-        pass
+        print(self.__str__())
         
     def compile(self, compiled: JaxRDDLCompilerWithGrad,
                 _bounds: Bounds,
@@ -458,21 +458,21 @@ class JaxStraightLinePlan(JaxPlan):
         self._wrap_softmax = wrap_softmax
         self._use_new_projection = use_new_projection
         self._max_constraint_iter = max_constraint_iter
-        
-    def summarize_hyperparameters(self) -> None:
+    
+    def __str__(self) -> str:
         bounds = '\n        '.join(
             map(lambda kv: f'{kv[0]}: {kv[1]}', self.bounds.items()))
-        print(f'policy hyper-parameters:\n'
-              f'    initializer          ={self._initializer_base}\n'
-              f'constraint-sat strategy (simple):\n'
-              f'    parsed_action_bounds =\n        {bounds}\n'
-              f'    wrap_sigmoid         ={self._wrap_sigmoid}\n'
-              f'    wrap_sigmoid_min_prob={self._min_action_prob}\n'
-              f'    wrap_non_bool        ={self._wrap_non_bool}\n'
-              f'constraint-sat strategy (complex):\n'
-              f'    wrap_softmax         ={self._wrap_softmax}\n'
-              f'    use_new_projection   ={self._use_new_projection}\n'
-              f'    max_projection_iters ={self._max_constraint_iter}')
+        return (f'policy hyper-parameters:\n'
+                f'    initializer          ={self._initializer_base}\n'
+                f'constraint-sat strategy (simple):\n'
+                f'    parsed_action_bounds =\n        {bounds}\n'
+                f'    wrap_sigmoid         ={self._wrap_sigmoid}\n'
+                f'    wrap_sigmoid_min_prob={self._min_action_prob}\n'
+                f'    wrap_non_bool        ={self._wrap_non_bool}\n'
+                f'constraint-sat strategy (complex):\n'
+                f'    wrap_softmax         ={self._wrap_softmax}\n'
+                f'    use_new_projection   ={self._use_new_projection}\n'
+                f'    max_projection_iters ={self._max_constraint_iter}')
     
     def compile(self, compiled: JaxRDDLCompilerWithGrad,
                 _bounds: Bounds,
@@ -823,21 +823,21 @@ class JaxDeepReactivePolicy(JaxPlan):
             normalizer_kwargs = {'create_offset': True, 'create_scale': True}
         self._normalizer_kwargs = normalizer_kwargs
         self._wrap_non_bool = wrap_non_bool
-            
-    def summarize_hyperparameters(self) -> None:
+    
+    def __str__(self) -> str:
         bounds = '\n        '.join(
             map(lambda kv: f'{kv[0]}: {kv[1]}', self.bounds.items()))
-        print(f'policy hyper-parameters:\n'
-              f'    topology            ={self._topology}\n'
-              f'    activation_fn       ={self._activations[0].__name__}\n'
-              f'    initializer         ={type(self._initializer_base).__name__}\n'
-              f'    apply_input_norm    ={self._normalize}\n'
-              f'    input_norm_layerwise={self._normalize_per_layer}\n'
-              f'    input_norm_args     ={self._normalizer_kwargs}\n'
-              f'constraint-sat strategy:\n'
-              f'    parsed_action_bounds=\n        {bounds}\n'
-              f'    wrap_non_bool       ={self._wrap_non_bool}')
-    
+        return (f'policy hyper-parameters:\n'
+                f'    topology            ={self._topology}\n'
+                f'    activation_fn       ={self._activations[0].__name__}\n'
+                f'    initializer         ={type(self._initializer_base).__name__}\n'
+                f'    apply_input_norm    ={self._normalize}\n'
+                f'    input_norm_layerwise={self._normalize_per_layer}\n'
+                f'    input_norm_args     ={self._normalizer_kwargs}\n'
+                f'constraint-sat strategy:\n'
+                f'    parsed_action_bounds=\n        {bounds}\n'
+                f'    wrap_non_bool       ={self._wrap_non_bool}')
+        
     def compile(self, compiled: JaxRDDLCompilerWithGrad,
                 _bounds: Bounds,
                 horizon: int) -> None:
@@ -1407,44 +1407,48 @@ r"""
               f'optax {optax.__version__}, haiku {hk.__version__}, '
               f'numpy {np.__version__}\n'
               f'devices: {devices_short}\n')
+    
+    def __str__(self) -> str:
+        result = (f'objective hyper-parameters:\n'
+                  f'    utility_fn        ={self.utility.__name__}\n'
+                  f'    utility args      ={self.utility_kwargs}\n'
+                  f'    use_symlog        ={self.use_symlog_reward}\n'
+                  f'    lookahead         ={self.horizon}\n'
+                  f'    user_action_bounds={self._action_bounds}\n'
+                  f'    fuzzy logic type  ={type(self.logic).__name__}\n'
+                  f'    non_fluents exact ={self.compile_non_fluent_exact}\n'
+                  f'    cpfs_no_gradient  ={self.cpfs_without_grad}\n'
+                  f'optimizer hyper-parameters:\n'
+                  f'    use_64_bit        ={self.use64bit}\n'
+                  f'    optimizer         ={self._optimizer_name.__name__}\n'
+                  f'    optimizer args    ={self._optimizer_kwargs}\n'
+                  f'    clip_gradient     ={self.clip_grad}\n'
+                  f'    noise_grad_eta    ={self.noise_grad_eta}\n'
+                  f'    noise_grad_gamma  ={self.noise_grad_gamma}\n'
+                  f'    batch_size_train  ={self.batch_size_train}\n'
+                  f'    batch_size_test   ={self.batch_size_test}')
+        result += '\n' + str(self.plan)
+        result += '\n' + str(self.logic)
         
-    def summarize_hyperparameters(self) -> None:
-        print(f'objective hyper-parameters:\n'
-              f'    utility_fn        ={self.utility.__name__}\n'
-              f'    utility args      ={self.utility_kwargs}\n'
-              f'    use_symlog        ={self.use_symlog_reward}\n'
-              f'    lookahead         ={self.horizon}\n'
-              f'    user_action_bounds={self._action_bounds}\n'
-              f'    fuzzy logic type  ={type(self.logic).__name__}\n'
-              f'    non_fluents exact ={self.compile_non_fluent_exact}\n'
-              f'    cpfs_no_gradient  ={self.cpfs_without_grad}\n'
-              f'optimizer hyper-parameters:\n'
-              f'    use_64_bit        ={self.use64bit}\n'
-              f'    optimizer         ={self._optimizer_name.__name__}\n'
-              f'    optimizer args    ={self._optimizer_kwargs}\n'
-              f'    clip_gradient     ={self.clip_grad}\n'
-              f'    noise_grad_eta    ={self.noise_grad_eta}\n'
-              f'    noise_grad_gamma  ={self.noise_grad_gamma}\n'
-              f'    batch_size_train  ={self.batch_size_train}\n'
-              f'    batch_size_test   ={self.batch_size_test}')
-        self.plan.summarize_hyperparameters()
-        self.logic.summarize_hyperparameters()
-        
-    def summarize_model_parameters(self):
+        # print model relaxation information
         if not self.compiled.model_params:
-            return
-        print('Some RDDL operations are non-differentiable '
-              'and will be approximated as follows:')
+            return result
+        result += '\n' + ('Some RDDL operations are non-differentiable '
+                          'and will be approximated as follows:' + '\n')
         exprs_by_rddl_op, values_by_rddl_op = {}, {}
         for info in self.compiled.model_parameter_info().values():
             rddl_op = info['rddl_op']
             exprs_by_rddl_op.setdefault(rddl_op, []).append(info['id'])
             values_by_rddl_op.setdefault(rddl_op, []).append(info['init_value'])
         for rddl_op in sorted(exprs_by_rddl_op.keys()):
-            print(f'    {rddl_op}:\n'
-                  f'        addresses  ={exprs_by_rddl_op[rddl_op]}\n'
-                  f'        init_values={values_by_rddl_op[rddl_op]}')
-                    
+            result += (f'    {rddl_op}:\n'
+                       f'        addresses  ={exprs_by_rddl_op[rddl_op]}\n'
+                       f'        init_values={values_by_rddl_op[rddl_op]}\n')
+        return result
+        
+    def summarize_hyperparameters(self) -> None:
+        print(self.__str__())
+        
     # ===========================================================================
     # COMPILATION SUBROUTINES
     # ===========================================================================
@@ -1838,7 +1842,6 @@ r"""
                   f'    print_summary      ={print_summary}\n'
                   f'    print_progress     ={print_progress}\n'
                   f'    stopping_rule      ={stopping_rule}\n')
-            self.summarize_model_parameters()
         
         # ======================================================================
         # INITIALIZATION OF STATE AND POLICY
@@ -2183,13 +2186,15 @@ class JaxLineSearchPlanner(JaxBackpropPlanner):
                           'line search planner and will be ignored.', 'red')
             del kwargs['clip_grad']
         super(JaxLineSearchPlanner, self).__init__(*args, **kwargs)
-        
-    def summarize_hyperparameters(self) -> None:
-        super(JaxLineSearchPlanner, self).summarize_hyperparameters()
-        print(f'linesearch hyper-parameters:\n'
-              f'    decay   ={self.decay}\n'
-              f'    c       ={self.c}\n'
-              f'    lr_range=({self.step_min}, {self.step_max})')
+    
+    def __str__(self) -> str:
+        result = super().__str__()
+        result += (f'\n' 
+                   f'linesearch hyper-parameters:\n'
+                   f'    decay   ={self.decay}\n'
+                   f'    c       ={self.c}\n'
+                   f'    lr_range=({self.step_min}, {self.step_max})')
+        return result
     
     def _jax_update(self, loss):
         optimizer = self.optimizer
