@@ -1985,6 +1985,7 @@ r"""
                 status = JaxPlannerStatus.ITER_BUDGET_REACHED
             
             # build a callback
+            progress_percent = int(100 * min(1, max(elapsed / train_seconds, it / epochs)))
             callback = {
                 'status': status,
                 'iteration': it,
@@ -2001,6 +2002,7 @@ r"""
                 'elapsed_time': elapsed,
                 'key': key,
                 'model_params': model_params,
+                'progress': progress_percent,
                 **log
             }
             
@@ -2010,7 +2012,7 @@ r"""
             
             # if the progress bar is used
             if print_progress:
-                iters.n = int(100 * min(1, max(elapsed / train_seconds, it / epochs)))
+                iters.n = progress_percent
                 iters.set_description(
                     f'{position_str} {it:6} it / {-train_loss:14.6f} train / '
                     f'{-test_loss:14.6f} test / {-best_loss:14.6f} best / '
