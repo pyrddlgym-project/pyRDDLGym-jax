@@ -1701,7 +1701,7 @@ r"""
         # if PRNG key is not provided
         if key is None:
             key = random.PRNGKey(round(time.time() * 1000))
-        key0 = key
+        dash_key = key[1].item()
             
         # if policy_hyperparams is not provided
         if policy_hyperparams is None:
@@ -1799,7 +1799,8 @@ r"""
             
         # initialize dash board 
         if dashboard is not None:
-            dashboard_id = dashboard.register_experiment(dashboard_id, self, key=key0)
+            dashboard_id = dashboard.register_experiment(
+                dashboard_id, self, key=dash_key)
         
         # ======================================================================
         # MAIN TRAINING LOOP BEGINS
