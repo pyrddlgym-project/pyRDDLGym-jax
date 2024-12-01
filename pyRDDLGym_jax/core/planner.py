@@ -32,7 +32,16 @@ from pyRDDLGym_jax import __version__
 from pyRDDLGym_jax.core import logic
 from pyRDDLGym_jax.core.compiler import JaxRDDLCompiler
 from pyRDDLGym_jax.core.logic import Logic, FuzzyLogic
-from pyRDDLGym_jax.core.visualization import JaxPlannerDashboard
+
+# try to load the dash board
+try:
+    from pyRDDLGym_jax.core.visualization import JaxPlannerDashboard
+except Exception:
+    raise_warning('Failed to load the dashboard visualization tool: '
+                  'please make sure you have installed the required packages.', 
+                  'red')
+    traceback.print_exc()
+    JaxPlannerDashboard = None
 
 Activation = Callable[[jnp.ndarray], jnp.ndarray]
 Bounds = Dict[str, Tuple[np.ndarray, np.ndarray]]
@@ -164,8 +173,10 @@ def _load_config(config, args):
     
     # dashboard
     dashboard_key = train_args.get('dashboard', None)
-    if dashboard_key is not None and dashboard_key:
+    if dashboard_key is not None and dashboard_key and JaxPlannerDashboard is not None:
         train_args['dashboard'] = JaxPlannerDashboard()
+    else:
+        del train_args['dashboard']        
     
     # optimize call stopping rule
     stopping_rule = train_args.get('stopping_rule', None)
