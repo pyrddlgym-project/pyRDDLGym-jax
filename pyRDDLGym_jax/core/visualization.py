@@ -8,7 +8,7 @@ from threading import Timer
 import warnings
 import webbrowser
 
-from dash import Dash, callback_context, no_update
+from dash import Dash, callback_context
 from dash.dcc import Interval, Graph, Store
 from dash.dependencies import Input, Output, State, ALL
 from dash.html import Div, B, H4, P
@@ -19,7 +19,14 @@ import plotly.graph_objs as go
 from plotly.subplots import make_subplots
 
 from pyRDDLGym_jax import __version__
-
+    
+POLICY_DIST_HEIGHT = 400
+POLICY_DIST_PLOTS_PER_ROW = 6
+ACTION_HEATMAP_HEIGHT = 400
+EXPERIMENT_PER_PAGE = 10
+PROGRESS_FOR_NEXT_RETURN_DIST = 2
+PROGRESS_FOR_NEXT_POLICY_DIST = 10
+        
        
 class JaxPlannerDashboard:
     '''A dashboard app for monitoring the jax planner progress.'''
@@ -27,27 +34,29 @@ class JaxPlannerDashboard:
     def __init__(self, port: int=1222, theme: str=dbc.themes.CERULEAN) -> None:
         self.port = port
         
-        self.xticks = {}
-        self.test_return = {}
-        self.train_return = {}
-        self.return_dist = {}
-        self.action_output = {}
         self.timestamps = {}
         self.duration = {}
         self.seeds = {}
         self.status = {}
         self.warnings = []
         self.progress = {}
-        self.policy_params = {}
+        self.checked = {}
         self.planner_info = {}
         
-        self.checked = {}
+        self.xticks = {}
+        self.test_return = {}
+        self.train_return = {}
+        self.return_dist = {}
+        self.return_dist_ticks = {}
+        self.action_output = {}
+        self.policy_params = {}
+        self.policy_params_ticks = {}
         
         # ======================================================================
         # CREATE PAGE LAYOUT
         # ======================================================================
         
-        def create_experiment_table(active_page, page_size=10):
+        def create_experiment_table(active_page, page_size=EXPERIMENT_PER_PAGE):
             start = (active_page - 1) * page_size
             end = start + page_size
             rows = []
@@ -100,9 +109,12 @@ class JaxPlannerDashboard:
                         dbc.Col([
                             dbc.Card(
                                 dbc.CardBody([
-                                    dbc.Checkbox(id={'type': 'checkbox', 'index': id},
-                                                 value=self.checked[id])],
-                                             style={"padding": "0"}),
+                                    dbc.Checkbox(
+                                        id={'type': 'checkbox', 'index': id},
+                                        value=self.checked[id]
+                                    )],
+                                    style={"padding": "0"}
+                                ),
                                 className="border-0 bg-transparent"
                             )
                         ], width=1),
@@ -126,7 +138,7 @@ class JaxPlannerDashboard:
                         ], width=2),
                         dbc.Col([
                             dbc.Card(
-                                dbc.CardBody(f'{self.duration[id]}s', style={"padding": "0"}),
+                                dbc.CardBody(f'{self.duration[id]:.3f}s', style={"padding": "0"}),
                                 className="border-0 bg-transparent"
                             ),
                         ], width=2),
@@ -138,8 +150,10 @@ class JaxPlannerDashboard:
                         ], width=2),
                         dbc.Col([
                             dbc.Card(
-                                dbc.CardBody([dbc.Progress(label=f"{progress}%", value=progress)],
-                                             style={"padding": "0"}),
+                                dbc.CardBody(
+                                    [dbc.Progress(label=f"{progress}%", value=progress)],
+                                    style={"padding": "0"}
+                                ),
                                 className="border-0 bg-transparent"
                             ),
                         ], width=2),
@@ -158,36 +172,48 @@ class JaxPlannerDashboard:
                     dbc.NavbarBrand(f"JaxPlan Version {__version__}"),
                     dbc.Nav([
                         dbc.NavItem(
-                            dbc.NavLink("Docs", href="https://pyrddlgym.readthedocs.io/en/latest/jax.html")
+                            dbc.NavLink(
+                                "Docs",
+                                href="https://pyrddlgym.readthedocs.io/en/latest/jax.html"
+                            )
                         ),
                         dbc.NavItem(
-                            dbc.NavLink("GitHub", href="https://github.com/pyrddlgym-project/pyRDDLGym-jax")
+                            dbc.NavLink(
+                                "GitHub",
+                                href="https://github.com/pyrddlgym-project/pyRDDLGym-jax"
+                            )
                         ),
                         dbc.NavItem(
-                            dbc.NavLink("Submit an Issue", href="https://github.com/pyrddlgym-project/pyRDDLGym-jax/issues")
+                            dbc.NavLink(
+                                "Submit an Issue",
+                                href="https://github.com/pyrddlgym-project/pyRDDLGym-jax/issues"
+                            )
                         )                                
                     ], navbar=True, className="me-auto"),
                     dbc.Nav([                        
                         dbc.DropdownMenu(
-                            [dbc.DropdownMenuItem("0.5s", id='05sec'), 
-                             dbc.DropdownMenuItem("1s", id='1sec'),
+                            [dbc.DropdownMenuItem("500ms", id='05sec'),
+                             dbc.DropdownMenuItem("1s", id='1sec', active=True),
                              dbc.DropdownMenuItem("5s", id='5sec'),
                              dbc.DropdownMenuItem("1d", id='1day')],
-                            label="Refresh",
+                            label="Refresh: 1s",
+                            id='refresh-rate-dropdown',
                             nav=True
                         )
                     ], navbar=True)
-                ], fluid=True), 
-                color="primary"
+                ], fluid=True)
             ),
             
             # experiments
             dbc.Row([
                 dbc.Col([
                     dbc.Card([
-                        Div(create_experiment_table(0), id='experiment-table'),
-                        Div(id='experiment-table-dummy'),
-                        dbc.Pagination(id='experiment-pagination', active_page=1, max_value=1, size="sm")
+                        dbc.CardBody([
+                            Div(create_experiment_table(0), id='experiment-table'),
+                            Div(id='experiment-table-dummy'),
+                            dbc.Pagination(id='experiment-pagination',
+                                           active_page=1, max_value=1, size="sm")
+                        ], style={'padding': '10px'})
                     ], className="border-0 bg-transparent")
                 ])
             ]),
@@ -208,7 +234,7 @@ class JaxPlannerDashboard:
                                     Graph(id='dist-return-graph')
                                 ])
                             ]), className="border-0 bg-transparent"
-                            ), label="Performance"
+                        ), label="Performance"
                         ),
                         
                         # policy
@@ -221,7 +247,7 @@ class JaxPlannerDashboard:
                                     Graph(id='policy-params'),
                                 ])
                             ]), className="border-0 bg-transparent"
-                            ), label="Policy"
+                        ), label="Policy"
                         ),
                         
                         # information
@@ -231,7 +257,7 @@ class JaxPlannerDashboard:
                                     dbc.Alert(id="planner-info", color="light", dismissable=False)
                                 ]),
                             ]), className="border-0 bg-transparent"
-                            ), label="Information"
+                        ), label="Information"
                         )
                     ])
                 ], width=12)
@@ -251,12 +277,13 @@ class JaxPlannerDashboard:
         
         # modify refresh rate
         @app.callback(
-            Output("refresh-interval", "data"), 
+            Output("refresh-interval", "data"),
             [Input("05sec", "n_clicks"),
              Input("1sec", "n_clicks"),
              Input("5sec", "n_clicks"),
              Input("1day", "n_clicks")],
-            [State('refresh-interval', 'data')])
+            [State('refresh-interval', 'data')]
+        )
         def click_refresh_rate(n05, n1, n5, nd, data):
             ctx = callback_context 
             if not ctx.triggered: 
@@ -275,27 +302,41 @@ class JaxPlannerDashboard:
             
         @app.callback(
             Output('interval', 'interval'),
-            [Input('refresh-interval', 'data')])
+            [Input('refresh-interval', 'data')]
+        )
         def update_refresh_rate(selected_interval):
-            if selected_interval is None:
-                return no_update
+            return selected_interval if selected_interval else 1000
+        
+        @app.callback(
+            Output('refresh-rate-dropdown', 'label'),
+            [Input('refresh-interval', 'data')]
+        )
+        def update_refresh_rate(selected_interval):
+            if selected_interval == 500:
+                return 'Refresh: 500ms'
+            elif selected_interval == 1000:
+                return 'Refresh: 1s'
+            elif selected_interval == 5000:
+                return 'Refresh: 5s'
             else:
-                return selected_interval if selected_interval else 1000
+                return 'Refresh: 1d'
         
         # update the experiment table
         @app.callback(
             Output('experiment-table', 'children'),
             [Input('interval', 'n_intervals'),
-             Input('experiment-pagination', 'active_page')]) 
+             Input('experiment-pagination', 'active_page')]
+        ) 
         def update_experiment_table(n, active_page): 
             return create_experiment_table(active_page)
         
         # update the experiment pagination
         @app.callback(
             Output('pagination', 'max_value'),
-            Input('interval', 'n_intervals')) 
+            Input('interval', 'n_intervals')
+        ) 
         def update_experiment_max_pages(n): 
-            return (len(self.checked) + 9) // 10            
+            return (len(self.checked) + EXPERIMENT_PER_PAGE - 1) // EXPERIMENT_PER_PAGE            
         
         # update the checked status of experiments
         @app.callback(
@@ -329,6 +370,7 @@ class JaxPlannerDashboard:
                 xaxis=dict(title=dict(text="Training Iteration")),
                 yaxis=dict(title=dict(text="Cumulative Reward")),
                 font=dict(size=11),
+                legend=dict(bgcolor='rgba(0,0,0,0)'),
                 template="plotly_white"
             )
             return fig
@@ -352,6 +394,7 @@ class JaxPlannerDashboard:
                 xaxis=dict(title=dict(text="Training Iteration")),
                 yaxis=dict(title=dict(text="Cumulative Reward")),
                 font=dict(size=11),
+                legend=dict(bgcolor='rgba(0,0,0,0)'),
                 template="plotly_white"
             )
             return fig
@@ -365,15 +408,18 @@ class JaxPlannerDashboard:
             for (row, checked) in self.checked.items():
                 if checked:
                     return_dists = self.return_dist[row]
+                    ticks = self.return_dist_ticks[row]
                     colors = pc.sample_colorscale(
-                        pc.get_colorscale('Blues'), np.linspace(0, 1, len(return_dists)))
-                    for (ic, (it, dist)) in enumerate(
-                        zip(self.xticks[row][-len(return_dists):], return_dists)):
+                        pc.get_colorscale('Blues'),
+                        np.linspace(0.1, 1, len(return_dists))
+                    )
+                    for (ic, (tick, dist)) in enumerate(zip(ticks, return_dists)):
                         fig.add_trace(go.Violin(
-                            y=dist, line_color=colors[ic], name=f'{it}'
+                            y=dist, line_color=colors[ic], name=f'{tick}'
                         ))
                     break
-            fig.update_traces(orientation='v', side='positive', width=3, points=False)
+            fig.update_traces(
+                orientation='v', side='positive', width=3, points=False)
             fig.update_layout(
                 title=dict(text="Distribution of Return"),
                 xaxis=dict(title=dict(text="Training Iteration")),
@@ -424,7 +470,7 @@ class JaxPlannerDashboard:
                         title="Values of Action-Fluents",
                         xaxis=dict(title=dict(text="Training Iteration")),
                         font=dict(size=11),
-                        height=400 * num_plots,
+                        height=ACTION_HEATMAP_HEIGHT * num_plots,
                         showlegend=False,
                         template="plotly_white"
                     )          
@@ -439,45 +485,49 @@ class JaxPlannerDashboard:
         def update_policy_params(n):
             fig = go.Figure()
             for (row, checked) in self.checked.items():
-                if checked and self.policy_params[row] is not None and self.policy_params[row]:
-                    policy_params = self.policy_params[row]
+                policy_params = self.policy_params[row]
+                policy_params_ticks = self.policy_params_ticks[row]
+                if checked and policy_params is not None and policy_params:
                     titles = []
                     for (layer_name, layer_params) in policy_params[0].items():
                         if isinstance(layer_params, dict):
                             for weight_name in layer_params:
                                 titles.append(f'{layer_name}/{weight_name}')
                     
-                    n_rows = math.ceil(len(policy_params) / 6)
+                    n_rows = math.ceil(len(policy_params) / POLICY_DIST_PLOTS_PER_ROW)
                     fig = make_subplots(
-                        rows=n_rows, cols=6,
+                        rows=n_rows, cols=POLICY_DIST_PLOTS_PER_ROW,
                         shared_xaxes=True,
                         subplot_titles=titles
                     )
                     colors = pc.sample_colorscale(
-                        pc.get_colorscale('Blues'), np.linspace(0, 1, len(policy_params)))[::-1]
+                        pc.get_colorscale('Blues'),
+                        np.linspace(0.1, 1, len(policy_params))
+                    )[::-1]
                     
-                    for (it, (epoch, policy_params_t)) in enumerate(
-                        zip(self.xticks[row][-len(policy_params):][::-1], policy_params[::-1])):
+                    for (it, (tick, policy_params_t)) in enumerate(
+                        zip(policy_params_ticks[::-1], policy_params[::-1])):
                         r, c = 1, 1
                         for (layer_name, layer_params) in policy_params_t.items():
                             if isinstance(layer_params, dict):
                                 for (weight_name, weight_values) in layer_params.items():
-                                    fig.add_trace(go.Violin(
-                                        x=np.ravel(weight_values),
-                                        line_color=colors[it], name=f'{epoch}'
-                                    ), row=r, col=c)
+                                    if r <= n_rows:
+                                        fig.add_trace(go.Violin(
+                                            x=np.ravel(weight_values),
+                                            line_color=colors[it], name=f'{tick}'
+                                        ), row=r, col=c)
                                     c += 1
-                                    if c > 6:
+                                    if c > POLICY_DIST_PLOTS_PER_ROW:
                                         r += 1
                                         c = 1
-                    fig.update_traces(orientation='h', side='positive', width=3, points=False)
+                    fig.update_traces(
+                        orientation='h', side='positive', width=3, points=False)
                     fig.update_layout(
                         title="Distribution of Network Weight Parameters",
                         font=dict(size=11),
                         showlegend=False,
                         xaxis_showgrid=False, xaxis_zeroline=False,
-                        yaxis={'visible': False, 'showticklabels': False},
-                        height=300 * n_rows,
+                        height=POLICY_DIST_HEIGHT * n_rows,
                         template="plotly_white"
                     )
                     break
@@ -525,35 +575,45 @@ class JaxPlannerDashboard:
         if experiment_id in self.xticks:
             raise ValueError(f'An experiment with id {experiment_id} '
                              'was already created.')
-        self.xticks[experiment_id] = []
-        self.test_return[experiment_id] = []
-        self.train_return[experiment_id] = []
-        self.return_dist[experiment_id] = []
-        self.action_output[experiment_id] = None
-        self.policy_params[experiment_id] = []
-        start_time = time.time()
+        
         self.timestamps[experiment_id] = datetime.fromtimestamp(
-            start_time).strftime('%Y-%m-%d %H:%M:%S')
+            time.time()).strftime('%Y-%m-%d %H:%M:%S')
         self.duration[experiment_id] = 0
         if 'key' in train_kwargs:
             self.seeds[experiment_id] = train_kwargs['key'][0].item()
         else:
             self.seeds[experiment_id] = 'N/A'
-        self.status[experiment_id] = 'N/A'        
-        self.warnings = []
+        self.status[experiment_id] = 'N/A'  
         self.progress[experiment_id] = 0
+        self.warnings = []
         self.planner_info[experiment_id] = str(planner)        
         self.checked[experiment_id] = False
+        
+        self.xticks[experiment_id] = []
+        self.train_return[experiment_id] = []
+        self.test_return[experiment_id] = []
+        self.return_dist_ticks[experiment_id] = []
+        self.return_dist[experiment_id] = []
+        self.action_output[experiment_id] = None
+        self.policy_params[experiment_id] = []
+        self.policy_params_ticks[experiment_id] = []
                         
         with warnings.catch_warnings(record=True) as warning_list:
             for callback in planner.optimize_generator(**train_kwargs):
+                
+                # data for return curves
                 self.xticks[experiment_id].append(callback['iteration'])
-                self.test_return[experiment_id].append(callback['best_return'])
                 self.train_return[experiment_id].append(callback['train_return'])    
-                self.return_dist[experiment_id].append(
-                    np.sum(np.asarray(callback['reward']), axis=1))
-                if len(self.return_dist[experiment_id]) > 40:
-                    self.return_dist[experiment_id].pop(0)
+                self.test_return[experiment_id].append(callback['best_return'])
+                
+                # data for return distributions
+                if callback['progress'] % PROGRESS_FOR_NEXT_RETURN_DIST == 0 \
+                and callback['progress'] != self.progress[experiment_id]:
+                    self.return_dist_ticks[experiment_id].append(callback['iteration'])
+                    self.return_dist[experiment_id].append(
+                        np.sum(np.asarray(callback['reward']), axis=1))
+                    
+                # data for action heatmaps
                 action_output = []
                 for action in planner.rddl.action_fluents:
                     action_values = np.asarray(callback['fluents'][action])
@@ -563,11 +623,15 @@ class JaxPlannerDashboard:
                          planner.rddl.variable_groundings[action])
                     )
                 self.action_output[experiment_id] = action_output
-                self.policy_params[experiment_id].append(callback['best_params'])
-                if len(self.policy_params[experiment_id]) > 10:
-                    self.policy_params[experiment_id].pop(0)
+                
+                # data for policy weight distributions
+                if callback['progress'] % PROGRESS_FOR_NEXT_POLICY_DIST == 0 \
+                and callback['progress'] != self.progress[experiment_id]:
+                    self.policy_params_ticks[experiment_id].append(callback['iteration'])
+                    self.policy_params[experiment_id].append(callback['best_params'])
+                    
                 self.status[experiment_id] = str(callback['status']).split('.')[1]
-                self.duration[experiment_id] = f'{(time.time() - start_time):.3f}'
+                self.duration[experiment_id] = callback["elapsed_time"]
                 self.progress[experiment_id] = callback['progress']
                 self.warnings = warning_list
-
+                
