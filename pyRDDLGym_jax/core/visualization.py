@@ -5,6 +5,7 @@ import numpy as np
 import time
 import threading
 from threading import Timer
+from typing import Any, Dict
 import warnings
 import webbrowser
 
@@ -37,10 +38,12 @@ class JaxPlannerDashboard:
         self.timestamps = {}
         self.duration = {}
         self.seeds = {}
+        self.train_args = {}
         self.status = {}
         self.warnings = []
         self.progress = {}
         self.checked = {}
+        self.planners = {}
         self.planner_info = {}
         
         self.xticks = {}
@@ -569,23 +572,31 @@ class JaxPlannerDashboard:
         dash_thread.start()  
         self.dash_thread = dash_thread
     
-    def run_experiment(self, planner: object, experiment_id: object=None, **train_kwargs):
+    # ==========================================================================
+    # DASHBOARD EXECUTION
+    # ==========================================================================
+        
+    def register_experiment(self, experiment_id: Any, planner: object, **train_kwargs) -> None:
+        
+        # make sure experiment id does not exist
         if experiment_id is None: 
             experiment_id = len(self.xticks) + 1
         if experiment_id in self.xticks:
             raise ValueError(f'An experiment with id {experiment_id} '
                              'was already created.')
-        
+            
         self.timestamps[experiment_id] = datetime.fromtimestamp(
             time.time()).strftime('%Y-%m-%d %H:%M:%S')
         self.duration[experiment_id] = 0
         if 'key' in train_kwargs:
             self.seeds[experiment_id] = train_kwargs['key'][0].item()
         else:
-            self.seeds[experiment_id] = 'N/A'
+            self.seeds[experiment_id] = 'N/A'        
         self.status[experiment_id] = 'N/A'  
+        self.train_args[experiment_id] = train_kwargs
         self.progress[experiment_id] = 0
         self.warnings = []
+        self.planners[experiment_id] = planner
         self.planner_info[experiment_id] = str(planner)        
         self.checked[experiment_id] = False
         
@@ -597,41 +608,47 @@ class JaxPlannerDashboard:
         self.action_output[experiment_id] = None
         self.policy_params[experiment_id] = []
         self.policy_params_ticks[experiment_id] = []
-                        
-        with warnings.catch_warnings(record=True) as warning_list:
-            for callback in planner.optimize_generator(**train_kwargs):
-                
-                # data for return curves
-                self.xticks[experiment_id].append(callback['iteration'])
-                self.train_return[experiment_id].append(callback['train_return'])    
-                self.test_return[experiment_id].append(callback['best_return'])
-                
-                # data for return distributions
-                if callback['progress'] % PROGRESS_FOR_NEXT_RETURN_DIST == 0 \
-                and callback['progress'] != self.progress[experiment_id]:
-                    self.return_dist_ticks[experiment_id].append(callback['iteration'])
-                    self.return_dist[experiment_id].append(
-                        np.sum(np.asarray(callback['reward']), axis=1))
-                    
-                # data for action heatmaps
-                action_output = []
-                for action in planner.rddl.action_fluents:
-                    action_values = np.asarray(callback['fluents'][action])
-                    action_output.append(
-                        (action_values.reshape(action_values.shape[:2] + (-1,)),
-                         action,
-                         planner.rddl.variable_groundings[action])
-                    )
-                self.action_output[experiment_id] = action_output
-                
-                # data for policy weight distributions
-                if callback['progress'] % PROGRESS_FOR_NEXT_POLICY_DIST == 0 \
-                and callback['progress'] != self.progress[experiment_id]:
-                    self.policy_params_ticks[experiment_id].append(callback['iteration'])
-                    self.policy_params[experiment_id].append(callback['best_params'])
-                    
-                self.status[experiment_id] = str(callback['status']).split('.')[1]
-                self.duration[experiment_id] = callback["elapsed_time"]
-                self.progress[experiment_id] = callback['progress']
-                self.warnings = warning_list
-                
+    
+    def update_experiment(self, experiment_id: Any, callback: Dict[str, Any]) -> None:
+        
+        # data for return curves
+        self.xticks[experiment_id].append(callback['iteration'])
+        self.train_return[experiment_id].append(callback['train_return'])    
+        self.test_return[experiment_id].append(callback['best_return'])
+        
+        # data for return distributions
+        if callback['progress'] % PROGRESS_FOR_NEXT_RETURN_DIST == 0 \
+        and callback['progress'] != self.progress[experiment_id]:
+            self.return_dist_ticks[experiment_id].append(callback['iteration'])
+            self.return_dist[experiment_id].append(
+                np.sum(np.asarray(callback['reward']), axis=1))
+        
+        # data for action heatmaps
+        action_output = []
+        rddl = self.planners[experiment_id].rddl
+        for action in rddl.action_fluents:
+            action_values = np.asarray(callback['fluents'][action])
+            action_output.append(
+                (action_values.reshape(action_values.shape[:2] + (-1,)),
+                 action,
+                 rddl.variable_groundings[action])
+            )
+        self.action_output[experiment_id] = action_output
+        
+        # data for policy weight distributions
+        if callback['progress'] % PROGRESS_FOR_NEXT_POLICY_DIST == 0 \
+        and callback['progress'] != self.progress[experiment_id]:
+            self.policy_params_ticks[experiment_id].append(callback['iteration'])
+            self.policy_params[experiment_id].append(callback['best_params'])
+        
+        # update experiment table info
+        self.status[experiment_id] = str(callback['status']).split('.')[1]
+        self.duration[experiment_id] = callback["elapsed_time"]
+        self.progress[experiment_id] = callback['progress']
+        self.warnings = None
+    
+    def run_experiment(self, experiment_id: Any) -> None:
+        planner = self.planners[experiment_id]
+        train_kwargs = self.train_args[experiment_id]
+        for callback in planner.optimize_generator(**train_kwargs):
+            self.update_experiment(experiment_id, callback)
