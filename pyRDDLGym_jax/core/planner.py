@@ -1899,6 +1899,10 @@ r"""
         if plot_step is None or plot_step <= 0 or plt is None:
             plot = None
         else:
+            raise_warning('The plot_step and plot_kwargs arguments are '
+                          'deprecated and will be removed in a future version. '
+                          'Please use the visualization.JaxPlannerDashboard '
+                          'instead.', 'red')
             if plot_kwargs is None:
                 plot_kwargs = {}
             plot = JaxPlannerPlot(self.rddl, self.horizon, **plot_kwargs)
