@@ -557,7 +557,7 @@ class JaxPlannerDashboard:
     # DASHBOARD EXECUTION
     # ==========================================================================
     
-    def launch(self, port: int=1222) -> None:
+    def launch(self, port: int=1222, daemon: bool=True) -> None:
         '''Launches the dashboard in a browser window.'''
         
         # open the browser to the required port
@@ -568,6 +568,7 @@ class JaxPlannerDashboard:
         def run_dash():
             self.app.run(port=port)
         dash_thread = threading.Thread(target=run_dash)
+        dash_thread.daemon = daemon
         dash_thread.start()
         
     def register_experiment(self, experiment_id: str, 

@@ -32,16 +32,8 @@ from pyRDDLGym_jax import __version__
 from pyRDDLGym_jax.core import logic
 from pyRDDLGym_jax.core.compiler import JaxRDDLCompiler
 from pyRDDLGym_jax.core.logic import Logic, FuzzyLogic
+from pyRDDLGym_jax.core.visualization import JaxPlannerDashboard
 
-# try to import matplotlib, if failed then skip plotting
-try:
-    import matplotlib.pyplot as plt
-except Exception:
-    raise_warning('failed to import matplotlib: '
-                  'plotting functionality will be disabled.', 'red')
-    traceback.print_exc()
-    plt = None
-    
 Activation = Callable[[jnp.ndarray], jnp.ndarray]
 Bounds = Dict[str, Tuple[np.ndarray, np.ndarray]]
 Kwargs = Dict[str, Any]
@@ -169,6 +161,11 @@ def _load_config(config, args):
     planner_key = train_args.get('key', None)
     if planner_key is not None:
         train_args['key'] = random.PRNGKey(planner_key)
+    
+    # dashboard
+    dashboard_key = train_args.get('dashboard', None)
+    if dashboard_key is not None and dashboard_key:
+        train_args['dashboard'] = JaxPlannerDashboard()
     
     # optimize call stopping rule
     stopping_rule = train_args.get('stopping_rule', None)
@@ -1088,113 +1085,6 @@ class RollingMean:
         return self._total / len(memory)
 
 
-class JaxPlannerPlot:
-    '''Supports plotting and visualization of a JAX policy in real time.'''
-    
-    def __init__(self, rddl: RDDLPlanningModel, horizon: int,
-                 show_violin: bool=True, show_action: bool=True) -> None:
-        '''Creates a new planner visualizer.
-        
-        :param rddl: the planning model to optimize
-        :param horizon: the lookahead or planning horizon
-        :param show_violin: whether to show the distribution of batch losses
-        :param show_action: whether to show heatmaps of the action fluents
-        '''
-        num_plots = 1
-        if show_violin:
-            num_plots += 1
-        if show_action:
-            num_plots += len(rddl.action_fluents)
-        self._fig, axes = plt.subplots(num_plots)
-        if num_plots == 1:
-            axes = [axes]
-        
-        # prepare the loss plot
-        self._loss_ax = axes[0]
-        self._loss_ax.autoscale(enable=True)
-        self._loss_ax.set_xlabel('training time')
-        self._loss_ax.set_ylabel('loss value')
-        self._loss_plot = self._loss_ax.plot(
-            [], [], linestyle=':', marker='o', markersize=2)[0]
-        self._loss_back = self._fig.canvas.copy_from_bbox(self._loss_ax.bbox)
-        
-        # prepare the violin plot
-        if show_violin:
-            self._hist_ax = axes[1]
-        else:
-            self._hist_ax = None
-            
-        # prepare the action plots
-        if show_action:
-            self._action_ax = {name: axes[idx + (2 if show_violin else 1)]
-                               for (idx, name) in enumerate(rddl.action_fluents)}
-            self._action_plots = {}
-            for name in rddl.action_fluents:
-                ax = self._action_ax[name]
-                if rddl.variable_ranges[name] == 'bool':
-                    vmin, vmax = 0.0, 1.0
-                else:
-                    vmin, vmax = None, None  
-                action_dim = 1
-                for dim in rddl.object_counts(rddl.variable_params[name]):
-                    action_dim *= dim     
-                action_plot = ax.pcolormesh(
-                    np.zeros((action_dim, horizon)),
-                    cmap='seismic', vmin=vmin, vmax=vmax)
-                ax.set_aspect('auto')        
-                ax.set_xlabel('decision epoch')
-                ax.set_ylabel(name)
-                plt.colorbar(action_plot, ax=ax)
-                self._action_plots[name] = action_plot
-            self._action_back = {name: self._fig.canvas.copy_from_bbox(ax.bbox)
-                                 for (name, ax) in self._action_ax.items()}
-        else:
-            self._action_ax = None
-            self._action_plots = None
-            self._action_back = None
-            
-        plt.tight_layout()
-        plt.show(block=False)
-        
-    def redraw(self, xticks, losses, actions, returns) -> None:
-        
-        # draw the loss curve
-        self._fig.canvas.restore_region(self._loss_back)
-        self._loss_plot.set_xdata(xticks)
-        self._loss_plot.set_ydata(losses)        
-        self._loss_ax.set_xlim([0, len(xticks)])
-        self._loss_ax.set_ylim([np.min(losses), np.max(losses)])
-        self._loss_ax.draw_artist(self._loss_plot)
-        self._fig.canvas.blit(self._loss_ax.bbox)
-        
-        # draw the violin plot
-        if self._hist_ax is not None:
-            self._hist_ax.clear()
-            self._hist_ax.set_xlabel('loss value')
-            self._hist_ax.set_ylabel('density')
-            self._hist_ax.violinplot(returns, vert=False, showmeans=True)
-        
-        # draw the actions
-        if self._action_ax is not None:
-            for (name, values) in actions.items():
-                values = np.mean(values, axis=0, dtype=float)
-                values = np.reshape(values, newshape=(values.shape[0], -1)).T
-                self._fig.canvas.restore_region(self._action_back[name])
-                self._action_plots[name].set_array(values)
-                self._action_ax[name].draw_artist(self._action_plots[name])
-                self._fig.canvas.blit(self._action_ax[name].bbox)
-                self._action_plots[name].set_clim([np.min(values), np.max(values)])
-                
-        self._fig.canvas.draw()
-        self._fig.canvas.flush_events()
-        
-    def close(self) -> None:
-        plt.close(self._fig)
-        del self._loss_ax, self._hist_ax, self._action_ax, \
-            self._loss_plot, self._action_plots, self._fig, \
-            self._loss_back, self._action_back
-
-
 class JaxPlannerStatus(Enum):
     '''Represents the status of a policy update from the JAX planner, 
     including whether the update resulted in nan gradient, 
@@ -1716,9 +1606,9 @@ r"""
         
         :param key: JAX PRNG key (derived from clock if not provided)
         :param epochs: the maximum number of steps of gradient descent
-        :param train_seconds: total time allocated for gradient descent
-        :param plot_step: frequency to plot the plan and save result to disk
-        :param plot_kwargs: additional arguments to pass to the plotter
+        :param train_seconds: total time allocated for gradient descent               
+        :param dashboard: dashboard to display training results
+        :param dashboard_id: experiment id for the dashboard
         :param model_params: optional model-parameters to override default
         :param policy_hyperparams: hyper-parameters for the policy/plan, such as
         weights for sigmoid wrapping boolean actions
@@ -1754,8 +1644,8 @@ r"""
     def optimize_generator(self, key: Optional[random.PRNGKey]=None,
                            epochs: int=999999,
                            train_seconds: float=120.,
-                           plot_step: Optional[int]=None,
-                           plot_kwargs: Optional[Kwargs]=None,
+                           dashboard: Optional[JaxPlannerDashboard]=None,
+                           dashboard_id: Optional[str]=None,
                            model_params: Optional[Dict[str, Any]]=None,
                            policy_hyperparams: Optional[Dict[str, Any]]=None,
                            subs: Optional[Dict[str, Any]]=None,
@@ -1771,9 +1661,9 @@ r"""
         
         :param key: JAX PRNG key (derived from clock if not provided)
         :param epochs: the maximum number of steps of gradient descent
-        :param train_seconds: total time allocated for gradient descent
-        :param plot_step: frequency to plot the plan and save result to disk
-        :param plot_kwargs: additional arguments to pass to the plotter
+        :param train_seconds: total time allocated for gradient descent        
+        :param dashboard: dashboard to display training results
+        :param dashboard_id: experiment id for the dashboard
         :param model_params: optional model-parameters to override default
         :param policy_hyperparams: hyper-parameters for the policy/plan, such as
         weights for sigmoid wrapping boolean actions
@@ -1800,6 +1690,7 @@ r"""
         # if PRNG key is not provided
         if key is None:
             key = random.PRNGKey(round(time.time() * 1000))
+        key0 = key
             
         # if policy_hyperparams is not provided
         if policy_hyperparams is None:
@@ -1837,8 +1728,8 @@ r"""
                   f'    override_subs_dict ={subs is not None}\n'
                   f'    provide_param_guess={guess is not None}\n'
                   f'    test_rolling_window={test_rolling_window}\n' 
-                  f'    plot_frequency     ={plot_step}\n'
-                  f'    plot_kwargs        ={plot_kwargs}\n'
+                  f'    dashboard          ={dashboard is not None}\n'
+                  f'    dashboard_id       ={dashboard_id}\n'
                   f'    print_summary      ={print_summary}\n'
                   f'    print_progress     ={print_progress}\n'
                   f'    stopping_rule      ={stopping_rule}\n')
@@ -1895,18 +1786,9 @@ r"""
         if stopping_rule is not None:
             stopping_rule.reset()
             
-        # initialize plot area
-        if plot_step is None or plot_step <= 0 or plt is None:
-            plot = None
-        else:
-            raise_warning('The plot_step and plot_kwargs arguments are '
-                          'deprecated and will be removed in a future version. '
-                          'Please use the visualization.JaxPlannerDashboard '
-                          'instead.', 'red')
-            if plot_kwargs is None:
-                plot_kwargs = {}
-            plot = JaxPlannerPlot(self.rddl, self.horizon, **plot_kwargs)
-        xticks, loss_values = [], []
+        # initialize dash board 
+        if dashboard is not None:
+            dashboard_id = dashboard.register_experiment(dashboard_id, self, key=key0)
         
         # ======================================================================
         # MAIN TRAINING LOOP BEGINS
@@ -1971,16 +1853,6 @@ r"""
                     policy_params, test_loss, train_log['grad']
                 last_iter_improve = it
             
-            # save the plan figure
-            if plot is not None and it % plot_step == 0:
-                xticks.append(it // plot_step)
-                loss_values.append(test_loss.item())
-                action_values = {name: values 
-                                 for (name, values) in log['fluents'].items()
-                                 if name in self.rddl.action_fluents}
-                returns = -np.sum(np.asarray(log['reward']), axis=1)
-                plot.redraw(xticks, loss_values, action_values, returns)
-            
             # reached computation budget
             elapsed = time.time() - start_time - elapsed_outside_loop
             if elapsed >= train_seconds:
@@ -2022,6 +1894,10 @@ r"""
                     f'{-test_loss:14.6f} test / {-best_loss:14.6f} best / '
                     f'{status.value} status'
                 )
+            
+            # dash-board
+            if dashboard is not None:
+                dashboard.update_experiment(dashboard_id, callback)
                         
             # yield the callback
             start_time_outside = time.time()
@@ -2039,8 +1915,6 @@ r"""
         # release resources
         if print_progress:
             iters.close()
-        if plot is not None:
-            plot.close()
         
         # validate the test return
         if log:
