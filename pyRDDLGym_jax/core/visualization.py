@@ -43,7 +43,7 @@ class JaxPlannerDashboard:
         self.warnings = []
         self.progress = {}
         self.checked = {}
-        self.planners = {}
+        self.rddl = {}
         self.planner_info = {}
         
         self.xticks = {}
@@ -596,7 +596,7 @@ class JaxPlannerDashboard:
         self.train_args[experiment_id] = train_kwargs
         self.progress[experiment_id] = 0
         self.warnings = []
-        self.planners[experiment_id] = planner
+        self.rddl[experiment_id] = planner.rddl
         self.planner_info[experiment_id] = str(planner)        
         self.checked[experiment_id] = False
         
@@ -625,7 +625,7 @@ class JaxPlannerDashboard:
         
         # data for action heatmaps
         action_output = []
-        rddl = self.planners[experiment_id].rddl
+        rddl = self.rddl[experiment_id]
         for action in rddl.action_fluents:
             action_values = np.asarray(callback['fluents'][action])
             action_output.append(
@@ -647,8 +647,7 @@ class JaxPlannerDashboard:
         self.progress[experiment_id] = callback['progress']
         self.warnings = None
     
-    def run_experiment(self, experiment_id: Any) -> None:
-        planner = self.planners[experiment_id]
-        train_kwargs = self.train_args[experiment_id]
+    def run_experiment(self, experiment_id: Any, planner: object, **train_kwargs) -> None:
+        self.register_experiment(experiment_id, planner, **train_kwargs)
         for callback in planner.optimize_generator(**train_kwargs):
             self.update_experiment(experiment_id, callback)
