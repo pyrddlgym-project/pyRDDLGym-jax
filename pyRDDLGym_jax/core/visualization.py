@@ -38,7 +38,6 @@ class JaxPlannerDashboard:
         self.timestamps = {}
         self.duration = {}
         self.seeds = {}
-        self.train_args = {}
         self.status = {}
         self.warnings = []
         self.progress = {}
@@ -335,7 +334,7 @@ class JaxPlannerDashboard:
         
         # update the experiment pagination
         @app.callback(
-            Output('pagination', 'max_value'),
+            Output('experiment-pagination', 'max_value'),
             Input('interval', 'n_intervals')
         ) 
         def update_experiment_max_pages(n): 
@@ -576,7 +575,7 @@ class JaxPlannerDashboard:
     # DASHBOARD EXECUTION
     # ==========================================================================
         
-    def register_experiment(self, experiment_id: Any, planner: object, **train_kwargs) -> None:
+    def register_experiment(self, experiment_id: Any, planner: object, **train_kwargs) -> Any:
         
         # make sure experiment id does not exist
         if experiment_id is None: 
@@ -593,7 +592,6 @@ class JaxPlannerDashboard:
         else:
             self.seeds[experiment_id] = 'N/A'        
         self.status[experiment_id] = 'N/A'  
-        self.train_args[experiment_id] = train_kwargs
         self.progress[experiment_id] = 0
         self.warnings = []
         self.rddl[experiment_id] = planner.rddl
@@ -608,6 +606,7 @@ class JaxPlannerDashboard:
         self.action_output[experiment_id] = None
         self.policy_params[experiment_id] = []
         self.policy_params_ticks[experiment_id] = []
+        return experiment_id
     
     def update_experiment(self, experiment_id: Any, callback: Dict[str, Any]) -> None:
         
