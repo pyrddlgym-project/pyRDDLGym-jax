@@ -4,7 +4,6 @@ import math
 import numpy as np
 import time
 import threading
-from threading import Timer
 from typing import Any, Dict, Optional
 import warnings
 import webbrowser
@@ -559,10 +558,8 @@ class JaxPlannerDashboard:
     def launch(self, port: int=1222) -> None:
         
         # open the browser to the required port
-        def open_browser():
-            if not os.environ.get("WERKZEUG_RUN_MAIN"):
-                webbrowser.open_new(f'http://127.0.0.1:{port}/')
-        Timer(1, open_browser).start()
+        if not os.environ.get("WERKZEUG_RUN_MAIN"):
+            webbrowser.open_new(f'http://127.0.0.1:{port}/')
         
         # run the app in a new thread at the specified port
         def run_dash():
