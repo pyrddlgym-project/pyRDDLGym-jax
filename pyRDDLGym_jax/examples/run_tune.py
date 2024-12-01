@@ -48,12 +48,12 @@ def main(domain, instance, method, trials=5, iters=20, workers=4):
     
     # map parameters in the config that will be tuned
     hyperparams = [
-        Hyperparameter('#weight', -1., 5., power_10),
-        Hyperparameter('#pweight', -2., 3., power_10),
-        Hyperparameter('#lr', -5., 1., power_10),
-        Hyperparameter('#layer1', 1, 8, power_2),
-        Hyperparameter('#layer2', 1, 8, power_2),
-        Hyperparameter('#T', 1, min(env.horizon, 100), int)       
+        Hyperparameter('MODEL_WEIGHT_TUNE', -1., 5., power_10),
+        Hyperparameter('POLICY_WEIGHT_TUNE', -2., 2., power_10),
+        Hyperparameter('LEARNING_RATE_TUNE', -5., 1., power_10),
+        Hyperparameter('LAYER1_TUNE', 1, 8, power_2),
+        Hyperparameter('LAYER2_TUNE', 1, 8, power_2),
+        Hyperparameter('ROLLOUT_HORIZON_TUNE', 1, min(env.horizon, 100), int)       
     ]
     
     # build the tuner and tune
