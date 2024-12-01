@@ -5,7 +5,7 @@ import numpy as np
 import time
 import threading
 from threading import Timer
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 import warnings
 import webbrowser
 
@@ -32,8 +32,7 @@ PROGRESS_FOR_NEXT_POLICY_DIST = 10
 class JaxPlannerDashboard:
     '''A dashboard app for monitoring the jax planner progress.'''
 
-    def __init__(self, port: int=1222, theme: str=dbc.themes.CERULEAN) -> None:
-        self.port = port
+    def __init__(self, theme: str=dbc.themes.CERULEAN) -> None:
         
         self.timestamps = {}
         self.duration = {}
@@ -551,31 +550,28 @@ class JaxPlannerDashboard:
                     break            
             return result
         
-        # ======================================================================
-        # LAUNCH DASHBOARD
-        # ======================================================================
-        
-        # open the app in the browser
-        def open_browser():
-            if not os.environ.get("WERKZEUG_RUN_MAIN"):
-                webbrowser.open_new(f'http://127.0.0.1:{self.port}/')
-
-        Timer(1, open_browser).start()
-        
-        # run the app in a new thread
-        def run_dash():
-            app.run(port=self.port)            
-
-        dash_thread = threading.Thread(target=run_dash)
-        # dash_thread.daemon = True
-        dash_thread.start()  
-        self.dash_thread = dash_thread
+        self.app = app
     
     # ==========================================================================
     # DASHBOARD EXECUTION
     # ==========================================================================
+    
+    def launch(self, port: int=1222) -> None:
         
-    def register_experiment(self, experiment_id: Any, planner: object, **train_kwargs) -> Any:
+        # open the browser to the required port
+        def open_browser():
+            if not os.environ.get("WERKZEUG_RUN_MAIN"):
+                webbrowser.open_new(f'http://127.0.0.1:{port}/')
+        Timer(1, open_browser).start()
+        
+        # run the app in a new thread at the specified port
+        def run_dash():
+            self.app.run(port=port)
+        dash_thread = threading.Thread(target=run_dash)
+        dash_thread.start()
+        
+    def register_experiment(self, experiment_id: str, planner: object,
+                            key: Optional[int]=None) -> str:
         
         # make sure experiment id does not exist
         if experiment_id is None: 
@@ -587,10 +583,7 @@ class JaxPlannerDashboard:
         self.timestamps[experiment_id] = datetime.fromtimestamp(
             time.time()).strftime('%Y-%m-%d %H:%M:%S')
         self.duration[experiment_id] = 0
-        if 'key' in train_kwargs:
-            self.seeds[experiment_id] = train_kwargs['key'][0].item()
-        else:
-            self.seeds[experiment_id] = 'N/A'        
+        self.seeds[experiment_id] = key    
         self.status[experiment_id] = 'N/A'  
         self.progress[experiment_id] = 0
         self.warnings = []
@@ -608,7 +601,7 @@ class JaxPlannerDashboard:
         self.policy_params_ticks[experiment_id] = []
         return experiment_id
     
-    def update_experiment(self, experiment_id: Any, callback: Dict[str, Any]) -> None:
+    def update_experiment(self, experiment_id: str, callback: Dict[str, Any]) -> None:
         
         # data for return curves
         self.xticks[experiment_id].append(callback['iteration'])
@@ -646,7 +639,3 @@ class JaxPlannerDashboard:
         self.progress[experiment_id] = callback['progress']
         self.warnings = None
     
-    def run_experiment(self, experiment_id: Any, planner: object, **train_kwargs) -> None:
-        self.register_experiment(experiment_id, planner, **train_kwargs)
-        for callback in planner.optimize_generator(**train_kwargs):
-            self.update_experiment(experiment_id, callback)
