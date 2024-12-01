@@ -4,7 +4,7 @@ import math
 import numpy as np
 import time
 import threading
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, TYPE_CHECKING
 import warnings
 import webbrowser
 
@@ -19,6 +19,8 @@ import plotly.graph_objs as go
 from plotly.subplots import make_subplots
 
 from pyRDDLGym_jax import __version__
+if TYPE_CHECKING:
+    from pyRDDLGym_jax.core.planner import JaxBackpropPlanner
     
 POLICY_DIST_HEIGHT = 400
 POLICY_DIST_PLOTS_PER_ROW = 6
@@ -556,6 +558,7 @@ class JaxPlannerDashboard:
     # ==========================================================================
     
     def launch(self, port: int=1222) -> None:
+        '''Launches the dashboard in a browser window.'''
         
         # open the browser to the required port
         if not os.environ.get("WERKZEUG_RUN_MAIN"):
@@ -567,8 +570,10 @@ class JaxPlannerDashboard:
         dash_thread = threading.Thread(target=run_dash)
         dash_thread.start()
         
-    def register_experiment(self, experiment_id: str, planner: object,
+    def register_experiment(self, experiment_id: str, 
+                            planner: 'JaxBackpropPlanner',
                             key: Optional[int]=None) -> str:
+        '''Starts monitoring a new experiment.'''
         
         # make sure experiment id does not exist
         if experiment_id is None: 
@@ -599,6 +604,7 @@ class JaxPlannerDashboard:
         return experiment_id
     
     def update_experiment(self, experiment_id: str, callback: Dict[str, Any]) -> None:
+        '''Pass new information and update the dashboard for a given experiment.'''
         
         # data for return curves
         self.xticks[experiment_id].append(callback['iteration'])
