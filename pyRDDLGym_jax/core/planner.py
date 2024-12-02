@@ -175,7 +175,7 @@ def _load_config(config, args):
     dashboard_key = train_args.get('dashboard', None)
     if dashboard_key is not None and dashboard_key and JaxPlannerDashboard is not None:
         train_args['dashboard'] = JaxPlannerDashboard()
-    else:
+    elif dashboard_key is not None:
         del train_args['dashboard']        
     
     # optimize call stopping rule
