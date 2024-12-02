@@ -18,6 +18,8 @@ import plotly.colors as pc
 import plotly.graph_objs as go
 from plotly.subplots import make_subplots
 
+from pyRDDLGym.core.debug.decompiler import RDDLDecompiler
+
 from pyRDDLGym_jax import __version__
 if TYPE_CHECKING:
     from pyRDDLGym_jax.core.planner import JaxBackpropPlanner
@@ -29,7 +31,7 @@ EXPERIMENT_PER_PAGE = 10
 PROGRESS_FOR_NEXT_RETURN_DIST = 2
 PROGRESS_FOR_NEXT_POLICY_DIST = 10
         
-       
+    
 class JaxPlannerDashboard:
     '''A dashboard app for monitoring the jax planner progress.'''
 
@@ -53,6 +55,9 @@ class JaxPlannerDashboard:
         self.action_output = {}
         self.policy_params = {}
         self.policy_params_ticks = {}
+        
+        self.relaxed_exprs = {}
+        self.relaxed_exprs_values = {}
         
         # ======================================================================
         # CREATE PAGE LAYOUT
@@ -162,6 +167,66 @@ class JaxPlannerDashboard:
                     ])
                     rows.append(row)
             return rows
+        
+        def create_model_relaxation_graph(xticks, values, expr_id):
+            fig = go.Figure()
+            fig.add_trace(go.Scatter(
+                x=xticks, y=values,
+                mode='lines+markers',
+                marker=dict(size=2), line=dict(width=2)
+            ))
+            fig.update_layout(
+                title=dict(text=f"Model Parameters for Expression {expr_id}"),
+                xaxis=dict(title=dict(text="Training Iteration")),
+                yaxis=dict(title=dict(text="Parameter Value")),
+                font=dict(size=11),
+                legend=dict(bgcolor='rgba(0,0,0,0)'),
+                template="plotly_white"
+            )
+            return Graph(figure=fig)
+            
+        def create_model_relaxation_table(experiment_id):
+            rows = []
+            
+            # create header
+            row = dbc.Row([
+                dbc.Col([
+                    dbc.Card(dbc.CardBody(
+                        B('Relaxed Expression'), style={"padding": "0"}
+                    ), className="border-0 bg-transparent")
+                ], width=6),
+                dbc.Col([
+                    dbc.Card(dbc.CardBody(
+                        B('Model Parameter(s)'), style={"padding": "0"}
+                    ), className="border-0 bg-transparent")
+                ], width=6)
+            ])
+            rows.append(row)
+            if experiment_id is None: return rows
+            
+            # create content
+            for (expr_id, expr) in self.relaxed_exprs[experiment_id].items():
+                xvalues = self.xticks[experiment_id]
+                yvalues = self.relaxed_exprs_values[experiment_id][expr_id]
+                row = dbc.Row([
+                    dbc.Col([
+                        dbc.Card(
+                            dbc.CardBody(expr, style={"padding": "0"}),
+                            className="border-0 bg-transparent"
+                        ),
+                    ], width=6),
+                    dbc.Col([
+                        dbc.Card(
+                            dbc.CardBody(
+                                create_model_relaxation_graph(xvalues, yvalues, expr_id), 
+                                style={"padding": "0"}
+                            ),
+                            className="border-0 bg-transparent"
+                        ),
+                    ], width=6)
+                ])
+                rows.append(row)
+            return rows
             
         app = Dash(__name__, external_stylesheets=[theme])
         
@@ -252,6 +317,14 @@ class JaxPlannerDashboard:
                         ), label="Policy"
                         ),
                         
+                        # model
+                        dbc.Tab(dbc.Card(
+                            dbc.CardBody([
+                                Div(create_model_relaxation_table(None), id='model-relaxation-table')
+                            ]), className="border-0 bg-transparent"
+                        ), label="Model"
+                        ),
+                        
                         # information
                         dbc.Tab(dbc.Card(
                             dbc.CardBody([
@@ -259,7 +332,7 @@ class JaxPlannerDashboard:
                                     dbc.Alert(id="planner-info", color="light", dismissable=False)
                                 ]),
                             ]), className="border-0 bg-transparent"
-                        ), label="Information"
+                        ), label="Debug"
                         )
                     ])
                 ], width=12)
@@ -332,7 +405,6 @@ class JaxPlannerDashboard:
         def update_experiment_table(n, active_page): 
             return create_experiment_table(active_page)
         
-        # update the experiment pagination
         @app.callback(
             Output('experiment-pagination', 'max_value'),
             Input('interval', 'n_intervals')
@@ -340,43 +412,18 @@ class JaxPlannerDashboard:
         def update_experiment_max_pages(n): 
             return (len(self.checked) + EXPERIMENT_PER_PAGE - 1) // EXPERIMENT_PER_PAGE            
         
-        # update the checked status of experiments
         @app.callback(
             Output('experiment-table-dummy', 'children'),
             Input({'type': 'checkbox', 'index': ALL}, 'value'),
             State({'type': 'checkbox', 'index': ALL}, 'id')
         )
-        def update_test_return_graph(checked, ids):
+        def update_checked_experiment_status(checked, ids):
             for (i, chk) in enumerate(checked):
                 row = ids[i]['index']
                 self.checked[row] = chk
             return []
         
-        # update the return information
-        @app.callback(
-            Output('test-return-graph', 'figure'),
-            Input('interval', 'n_intervals')
-        )
-        def update_test_return_graph(n):
-            fig = go.Figure()
-            for (row, checked) in self.checked.items():
-                if checked:
-                    fig.add_trace(go.Scatter(
-                        x=self.xticks[row], y=self.test_return[row],
-                        name=f'id={row}',
-                        mode='lines+markers',
-                        marker=dict(size=2), line=dict(width=2)
-                    ))
-            fig.update_layout(
-                title=dict(text="Test Return"),
-                xaxis=dict(title=dict(text="Training Iteration")),
-                yaxis=dict(title=dict(text="Cumulative Reward")),
-                font=dict(size=11),
-                legend=dict(bgcolor='rgba(0,0,0,0)'),
-                template="plotly_white"
-            )
-            return fig
-        
+        # update the return information        
         @app.callback(
             Output('train-return-graph', 'figure'),
             Input('interval', 'n_intervals')
@@ -393,6 +440,30 @@ class JaxPlannerDashboard:
                     ))
             fig.update_layout(
                 title=dict(text="Train Return"),
+                xaxis=dict(title=dict(text="Training Iteration")),
+                yaxis=dict(title=dict(text="Cumulative Reward")),
+                font=dict(size=11),
+                legend=dict(bgcolor='rgba(0,0,0,0)'),
+                template="plotly_white"
+            )
+            return fig
+        
+        @app.callback(
+            Output('test-return-graph', 'figure'),
+            Input('interval', 'n_intervals')
+        )
+        def update_test_return_graph(n):
+            fig = go.Figure()
+            for (row, checked) in self.checked.items():
+                if checked:
+                    fig.add_trace(go.Scatter(
+                        x=self.xticks[row], y=self.test_return[row],
+                        name=f'id={row}',
+                        mode='lines+markers',
+                        marker=dict(size=2), line=dict(width=2)
+                    ))
+            fig.update_layout(
+                title=dict(text="Test Return"),
                 xaxis=dict(title=dict(text="Training Iteration")),
                 yaxis=dict(title=dict(text="Cumulative Reward")),
                 font=dict(size=11),
@@ -535,6 +606,19 @@ class JaxPlannerDashboard:
                     break
             return fig
         
+        # update the model relaxation information
+        @app.callback(
+            Output('model-relaxation-table', 'children'),
+            Input('interval', 'n_intervals')
+        )
+        def update_model_relaxation_table(n):
+            result = []
+            for (row, checked) in self.checked.items():
+                if checked:
+                    result = create_model_relaxation_table(row)
+                    break
+            return result
+        
         # update the run information
         @app.callback(
             Output('planner-info', 'children'),
@@ -602,20 +686,32 @@ class JaxPlannerDashboard:
         self.action_output[experiment_id] = None
         self.policy_params[experiment_id] = []
         self.policy_params_ticks[experiment_id] = []
+        
+        decompiler = RDDLDecompiler()
+        self.relaxed_exprs[experiment_id] = {}
+        self.relaxed_exprs_values[experiment_id] = {}
+        for info in planner.compiled.model_parameter_info().values():
+            expr = planner.compiled.traced.lookup(info['id'])
+            compiled_expr = decompiler.decompile_expr(expr)
+            self.relaxed_exprs[experiment_id][info['id']] = compiled_expr
+            self.relaxed_exprs_values[experiment_id][info['id']] = []
+            
         return experiment_id
     
     def update_experiment(self, experiment_id: str, callback: Dict[str, Any]) -> None:
         '''Pass new information and update the dashboard for a given experiment.'''
         
         # data for return curves
-        self.xticks[experiment_id].append(callback['iteration'])
+        iteration = callback['iteration']
+        self.xticks[experiment_id].append(iteration)
         self.train_return[experiment_id].append(callback['train_return'])    
         self.test_return[experiment_id].append(callback['best_return'])
         
         # data for return distributions
-        if callback['progress'] % PROGRESS_FOR_NEXT_RETURN_DIST == 0 \
-        and callback['progress'] != self.progress[experiment_id]:
-            self.return_dist_ticks[experiment_id].append(callback['iteration'])
+        progress = callback['progress']
+        if progress % PROGRESS_FOR_NEXT_RETURN_DIST == 0 \
+        and progress != self.progress[experiment_id]:
+            self.return_dist_ticks[experiment_id].append(iteration)
             self.return_dist[experiment_id].append(
                 np.sum(np.asarray(callback['reward']), axis=1))
         
@@ -632,14 +728,20 @@ class JaxPlannerDashboard:
         self.action_output[experiment_id] = action_output
         
         # data for policy weight distributions
-        if callback['progress'] % PROGRESS_FOR_NEXT_POLICY_DIST == 0 \
-        and callback['progress'] != self.progress[experiment_id]:
-            self.policy_params_ticks[experiment_id].append(callback['iteration'])
+        if progress % PROGRESS_FOR_NEXT_POLICY_DIST == 0 \
+        and progress != self.progress[experiment_id]:
+            self.policy_params_ticks[experiment_id].append(iteration)
             self.policy_params[experiment_id].append(callback['best_params'])
+        
+        # data for model relaxations
+        model_params = callback['model_params']
+        for (key, values) in model_params.items():
+            expr_id = int(str(key).split('_')[0])
+            self.relaxed_exprs_values[experiment_id][expr_id].append(values.item())
         
         # update experiment table info
         self.status[experiment_id] = str(callback['status']).split('.')[1]
         self.duration[experiment_id] = callback["elapsed_time"]
-        self.progress[experiment_id] = callback['progress']
+        self.progress[experiment_id] = progress
         self.warnings = None
     
