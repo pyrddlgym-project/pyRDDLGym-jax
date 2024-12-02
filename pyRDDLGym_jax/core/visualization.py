@@ -185,7 +185,7 @@ class JaxPlannerDashboard:
                 legend=dict(bgcolor='rgba(0,0,0,0)'),
                 template="plotly_white"
             )
-            return Graph(figure=fig)
+            return fig
             
         def create_model_relaxation_table(experiment_id):
             rows = []
@@ -210,6 +210,7 @@ class JaxPlannerDashboard:
             for (expr_id, expr) in self.relaxed_exprs[experiment_id].items():
                 xvalues = self.xticks[experiment_id]
                 yvalues = self.relaxed_exprs_values[experiment_id][expr_id]
+                fig = create_model_relaxation_graph(xvalues, yvalues, expr_id)
                 row = dbc.Row([
                     dbc.Col([
                         dbc.Card(
@@ -220,8 +221,7 @@ class JaxPlannerDashboard:
                     dbc.Col([
                         dbc.Card(
                             dbc.CardBody(
-                                create_model_relaxation_graph(xvalues, yvalues, expr_id), 
-                                style={"padding": "0"}
+                                Graph(figure=fig), style={"padding": "0"}
                             ),
                             className="border-0 bg-transparent"
                         ),
