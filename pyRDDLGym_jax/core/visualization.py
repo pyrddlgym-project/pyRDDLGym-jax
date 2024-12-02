@@ -8,7 +8,7 @@ from typing import Any, Dict, Optional, TYPE_CHECKING
 import warnings
 import webbrowser
 
-from dash import Dash, callback_context
+import dash
 from dash.dcc import Interval, Graph, Store
 from dash.dependencies import Input, Output, State, ALL
 from dash.html import Div, B, H4, P
@@ -228,7 +228,7 @@ class JaxPlannerDashboard:
                 rows.append(row)
             return rows
             
-        app = Dash(__name__, external_stylesheets=[theme])
+        app = dash.Dash(__name__, external_stylesheets=[theme])
         
         app.layout = dbc.Container([
             Store(id='refresh-interval'),
@@ -282,7 +282,6 @@ class JaxPlannerDashboard:
                     dbc.Card([
                         dbc.CardBody([
                             Div(create_experiment_table(0), id='experiment-table'),
-                            Div(id='experiment-table-dummy'),
                             dbc.Pagination(id='experiment-pagination',
                                            active_page=1, max_value=1, size="sm")
                         ], style={'padding': '10px'})
@@ -348,7 +347,8 @@ class JaxPlannerDashboard:
                 id='interval',
                 interval=1000,
                 n_intervals=0
-            )
+            ),
+            Div(id='trigger-experiment-check', style={'display': 'none'})
         ], fluid=True, className="dbc")
         
         # ======================================================================
@@ -370,7 +370,7 @@ class JaxPlannerDashboard:
             [State('refresh-interval', 'data')]
         )
         def click_refresh_rate(n05, n1, n2, n5, n10, n30, n1m, n5m, nd, data):
-            ctx = callback_context 
+            ctx = dash.callback_context 
             if not ctx.triggered: 
                 return data 
             else: 
@@ -443,7 +443,7 @@ class JaxPlannerDashboard:
             return (len(self.checked) + EXPERIMENT_PER_PAGE - 1) // EXPERIMENT_PER_PAGE            
         
         @app.callback(
-            Output('experiment-table-dummy', 'children'),
+            Output('trigger-experiment-check', 'children'),
             Input({'type': 'checkbox', 'index': ALL}, 'value'),
             State({'type': 'checkbox', 'index': ALL}, 'id')
         )
@@ -451,14 +451,15 @@ class JaxPlannerDashboard:
             for (i, chk) in enumerate(checked):
                 row = ids[i]['index']
                 self.checked[row] = chk
-            return []
+            return time.time()
         
         # update the return information        
         @app.callback(
             Output('train-return-graph', 'figure'),
-            Input('interval', 'n_intervals')
+            [Input('interval', 'n_intervals'),
+             Input('trigger-experiment-check', 'children')]
         )
-        def update_train_return_graph(n):
+        def update_train_return_graph(n, trigger):
             fig = go.Figure()
             for (row, checked) in self.checked.copy().items():
                 if checked:
@@ -480,9 +481,10 @@ class JaxPlannerDashboard:
         
         @app.callback(
             Output('test-return-graph', 'figure'),
-            Input('interval', 'n_intervals')
+            [Input('interval', 'n_intervals'),
+             Input('trigger-experiment-check', 'children')]
         )
-        def update_test_return_graph(n):
+        def update_test_return_graph(n, trigger):
             fig = go.Figure()
             for (row, checked) in self.checked.copy().items():
                 if checked:
@@ -504,9 +506,10 @@ class JaxPlannerDashboard:
         
         @app.callback(
             Output('dist-return-graph', 'figure'),
-            Input('interval', 'n_intervals')
+            [Input('interval', 'n_intervals'),
+             Input('trigger-experiment-check', 'children')]
         )
-        def update_dist_return_graph(n):
+        def update_dist_return_graph(n, trigger):
             fig = go.Figure()
             for (row, checked) in self.checked.copy().items():
                 if checked:
@@ -537,9 +540,10 @@ class JaxPlannerDashboard:
         # update the action heatmap
         @app.callback(
             Output('action-output', 'figure'),
-            Input('interval', 'n_intervals')
+            [Input('interval', 'n_intervals'),
+             Input('trigger-experiment-check', 'children')]
         )
-        def update_action_heatmap(n):
+        def update_action_heatmap(n, trigger):
             fig = go.Figure()
             for (row, checked) in self.checked.copy().items():
                 if checked and self.action_output[row] is not None:
@@ -583,9 +587,10 @@ class JaxPlannerDashboard:
         # update the weight histograms
         @app.callback(
             Output('policy-params', 'figure'),
-            Input('interval', 'n_intervals')
+            [Input('interval', 'n_intervals'),
+             Input('trigger-experiment-check', 'children')]
         )
-        def update_policy_params(n):
+        def update_policy_params(n, trigger):
             fig = go.Figure()
             for (row, checked) in self.checked.copy().items():
                 policy_params = self.policy_params[row]
@@ -639,9 +644,10 @@ class JaxPlannerDashboard:
         # update the model relaxation information
         @app.callback(
             Output('model-relaxation-table', 'children'),
-            Input('interval', 'n_intervals')
+            [Input('interval', 'n_intervals'),
+             Input('trigger-experiment-check', 'children')]
         )
-        def update_model_relaxation_table(n):
+        def update_model_relaxation_table(n, trigger):
             result = []
             for (row, checked) in self.checked.copy().items():
                 if checked:
@@ -652,9 +658,10 @@ class JaxPlannerDashboard:
         # update the run information
         @app.callback(
             Output('planner-info', 'children'),
-            Input('interval', 'n_intervals')
+            [Input('interval', 'n_intervals'),
+             Input('trigger-experiment-check', 'children')]
         )
-        def update_planner_info(n): 
+        def update_planner_info(n, trigger): 
             result = []
             for (row, checked) in self.checked.copy().items():
                 if checked:
