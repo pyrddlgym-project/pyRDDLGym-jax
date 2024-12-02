@@ -194,12 +194,12 @@ class JaxPlannerDashboard:
                     dbc.Card(dbc.CardBody(
                         B('Relaxed Expression'), style={"padding": "0"}
                     ), className="border-0 bg-transparent")
-                ], width=6),
+                ], width=4),
                 dbc.Col([
                     dbc.Card(dbc.CardBody(
                         B('Model Parameter(s)'), style={"padding": "0"}
                     ), className="border-0 bg-transparent")
-                ], width=6)
+                ], width=8)
             ])
             rows.append(row)
             if experiment_id is None: return rows
@@ -214,7 +214,7 @@ class JaxPlannerDashboard:
                             dbc.CardBody(expr, style={"padding": "0"}),
                             className="border-0 bg-transparent"
                         ),
-                    ], width=6),
+                    ], width=4),
                     dbc.Col([
                         dbc.Card(
                             dbc.CardBody(
@@ -223,7 +223,7 @@ class JaxPlannerDashboard:
                             ),
                             className="border-0 bg-transparent"
                         ),
-                    ], width=6)
+                    ], width=8)
                 ])
                 rows.append(row)
             return rows
@@ -460,7 +460,7 @@ class JaxPlannerDashboard:
         )
         def update_train_return_graph(n):
             fig = go.Figure()
-            for (row, checked) in self.checked.items():
+            for (row, checked) in self.checked.copy().items():
                 if checked:
                     fig.add_trace(go.Scatter(
                         x=self.xticks[row], y=self.train_return[row],
@@ -484,7 +484,7 @@ class JaxPlannerDashboard:
         )
         def update_test_return_graph(n):
             fig = go.Figure()
-            for (row, checked) in self.checked.items():
+            for (row, checked) in self.checked.copy().items():
                 if checked:
                     fig.add_trace(go.Scatter(
                         x=self.xticks[row], y=self.test_return[row],
@@ -508,7 +508,7 @@ class JaxPlannerDashboard:
         )
         def update_dist_return_graph(n):
             fig = go.Figure()
-            for (row, checked) in self.checked.items():
+            for (row, checked) in self.checked.copy().items():
                 if checked:
                     return_dists = self.return_dist[row]
                     ticks = self.return_dist_ticks[row]
@@ -541,7 +541,7 @@ class JaxPlannerDashboard:
         )
         def update_action_heatmap(n):
             fig = go.Figure()
-            for (row, checked) in self.checked.items():
+            for (row, checked) in self.checked.copy().items():
                 if checked and self.action_output[row] is not None:
                     num_plots = len(self.action_output[row])
                     titles = []
@@ -587,7 +587,7 @@ class JaxPlannerDashboard:
         )
         def update_policy_params(n):
             fig = go.Figure()
-            for (row, checked) in self.checked.items():
+            for (row, checked) in self.checked.copy().items():
                 policy_params = self.policy_params[row]
                 policy_params_ticks = self.policy_params_ticks[row]
                 if checked and policy_params is not None and policy_params:
@@ -643,7 +643,7 @@ class JaxPlannerDashboard:
         )
         def update_model_relaxation_table(n):
             result = []
-            for (row, checked) in self.checked.items():
+            for (row, checked) in self.checked.copy().items():
                 if checked:
                     result = create_model_relaxation_table(row)
                     break
@@ -656,7 +656,7 @@ class JaxPlannerDashboard:
         )
         def update_planner_info(n): 
             result = []
-            for (row, checked) in self.checked.items():
+            for (row, checked) in self.checked.copy().items():
                 if checked:
                     result = [
                         H4(f'Hyper-Parameters [id={row}]', className="alert-heading"),
