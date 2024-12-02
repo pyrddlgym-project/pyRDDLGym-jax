@@ -289,7 +289,7 @@ class JaxPlannerDashboard:
                 ])
             ]),
             
-            # empirical results
+            # empirical results tabs
             dbc.Row([
                 dbc.Col([
                     dbc.Tabs([
@@ -305,7 +305,7 @@ class JaxPlannerDashboard:
                                     Graph(id='dist-return-graph')
                                 ])
                             ]), className="border-0 bg-transparent"
-                        ), label="Performance"
+                        ), label="Performance", tab_id='tab-performance'
                         ),
                         
                         # policy
@@ -318,7 +318,7 @@ class JaxPlannerDashboard:
                                     Graph(id='policy-params'),
                                 ])
                             ]), className="border-0 bg-transparent"
-                        ), label="Policy"
+                        ), label="Policy", tab_id='tab-policy'
                         ),
                         
                         # model
@@ -326,7 +326,7 @@ class JaxPlannerDashboard:
                             dbc.CardBody([
                                 Div(create_model_relaxation_table(None), id='model-relaxation-table')
                             ]), className="border-0 bg-transparent"
-                        ), label="Model"
+                        ), label="Model", tab_id='tab-model'
                         ),
                         
                         # information
@@ -336,9 +336,9 @@ class JaxPlannerDashboard:
                                     dbc.Alert(id="planner-info", color="light", dismissable=False)
                                 ]),
                             ]), className="border-0 bg-transparent"
-                        ), label="Debug"
+                        ), label="Debug", tab_id='tab-debug'
                         )
-                    ])
+                    ], id='tabs-main')
                 ], width=12)
             ]),
             
@@ -457,9 +457,11 @@ class JaxPlannerDashboard:
         @app.callback(
             Output('train-return-graph', 'figure'),
             [Input('interval', 'n_intervals'),
-             Input('trigger-experiment-check', 'children')]
+             Input('trigger-experiment-check', 'children'),
+             Input('tabs-main', 'active_tab')]
         )
-        def update_train_return_graph(n, trigger):
+        def update_train_return_graph(n, trigger, active_tab):
+            if active_tab != 'tab-performance': return dash.no_update
             fig = go.Figure()
             for (row, checked) in self.checked.copy().items():
                 if checked:
@@ -482,9 +484,11 @@ class JaxPlannerDashboard:
         @app.callback(
             Output('test-return-graph', 'figure'),
             [Input('interval', 'n_intervals'),
-             Input('trigger-experiment-check', 'children')]
+             Input('trigger-experiment-check', 'children'),
+             Input('tabs-main', 'active_tab')]
         )
-        def update_test_return_graph(n, trigger):
+        def update_test_return_graph(n, trigger, active_tab):
+            if active_tab != 'tab-performance': return dash.no_update
             fig = go.Figure()
             for (row, checked) in self.checked.copy().items():
                 if checked:
@@ -507,9 +511,11 @@ class JaxPlannerDashboard:
         @app.callback(
             Output('dist-return-graph', 'figure'),
             [Input('interval', 'n_intervals'),
-             Input('trigger-experiment-check', 'children')]
+             Input('trigger-experiment-check', 'children'),
+             Input('tabs-main', 'active_tab')]
         )
-        def update_dist_return_graph(n, trigger):
+        def update_dist_return_graph(n, trigger, active_tab):
+            if active_tab != 'tab-performance': return dash.no_update
             fig = go.Figure()
             for (row, checked) in self.checked.copy().items():
                 if checked:
@@ -541,9 +547,11 @@ class JaxPlannerDashboard:
         @app.callback(
             Output('action-output', 'figure'),
             [Input('interval', 'n_intervals'),
-             Input('trigger-experiment-check', 'children')]
+             Input('trigger-experiment-check', 'children'),
+             Input('tabs-main', 'active_tab')]
         )
-        def update_action_heatmap(n, trigger):
+        def update_action_heatmap(n, trigger, active_tab):
+            if active_tab != 'tab-policy': return dash.no_update
             fig = go.Figure()
             for (row, checked) in self.checked.copy().items():
                 if checked and self.action_output[row] is not None:
@@ -588,9 +596,11 @@ class JaxPlannerDashboard:
         @app.callback(
             Output('policy-params', 'figure'),
             [Input('interval', 'n_intervals'),
-             Input('trigger-experiment-check', 'children')]
+             Input('trigger-experiment-check', 'children'),
+             Input('tabs-main', 'active_tab')]
         )
-        def update_policy_params(n, trigger):
+        def update_policy_params(n, trigger, active_tab):
+            if active_tab != 'tab-policy': return dash.no_update
             fig = go.Figure()
             for (row, checked) in self.checked.copy().items():
                 policy_params = self.policy_params[row]
@@ -645,9 +655,11 @@ class JaxPlannerDashboard:
         @app.callback(
             Output('model-relaxation-table', 'children'),
             [Input('interval', 'n_intervals'),
-             Input('trigger-experiment-check', 'children')]
+             Input('trigger-experiment-check', 'children'),
+             Input('tabs-main', 'active_tab')]
         )
-        def update_model_relaxation_table(n, trigger):
+        def update_model_relaxation_table(n, trigger, active_tab):
+            if active_tab != 'tab-model': return dash.no_update
             result = []
             for (row, checked) in self.checked.copy().items():
                 if checked:
@@ -659,9 +671,11 @@ class JaxPlannerDashboard:
         @app.callback(
             Output('planner-info', 'children'),
             [Input('interval', 'n_intervals'),
-             Input('trigger-experiment-check', 'children')]
+             Input('trigger-experiment-check', 'children'),
+             Input('tabs-main', 'active_tab')]
         )
-        def update_planner_info(n, trigger): 
+        def update_planner_info(n, trigger, active_tab): 
+            if active_tab != 'tab-debug': return dash.no_update
             result = []
             for (row, checked) in self.checked.copy().items():
                 if checked:
