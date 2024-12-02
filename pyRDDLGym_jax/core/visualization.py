@@ -1,3 +1,4 @@
+import ast
 import os
 from datetime import datetime
 import math
@@ -183,70 +184,11 @@ class JaxPlannerDashboard:
                     rows.append(row)
             return rows
         
-        def create_model_relaxation_graph(xticks, values, expr_id):
-            fig = go.Figure()
-            fig.add_trace(go.Scatter(
-                x=xticks, y=values,
-                mode='lines+markers',
-                marker=dict(size=2), line=dict(width=2)
-            ))
-            fig.update_layout(
-                title=dict(text=f"Model Parameters for Expression {expr_id}"),
-                xaxis=dict(title=dict(text="Training Iteration")),
-                yaxis=dict(title=dict(text="Parameter Value")),
-                font=dict(size=11),
-                legend=dict(bgcolor='rgba(0,0,0,0)'),
-                template="plotly_white"
-            )
-            return fig
-            
-        def create_model_relaxation_table(experiment_id):
-            rows = []
-            
-            # create header
-            row = dbc.Row([
-                dbc.Col([
-                    dbc.Card(dbc.CardBody(
-                        B('Relaxed Expression'), style={"padding": "0"}
-                    ), className="border-0 bg-transparent")
-                ], width=4),
-                dbc.Col([
-                    dbc.Card(dbc.CardBody(
-                        B('Model Parameter(s)'), style={"padding": "0"}
-                    ), className="border-0 bg-transparent")
-                ], width=8)
-            ])
-            rows.append(row)
-            if experiment_id is None: return rows
-            
-            # create content
-            for (expr_id, expr) in self.relaxed_exprs[experiment_id].items():
-                xvalues = self.xticks[experiment_id]
-                yvalues = self.relaxed_exprs_values[experiment_id][expr_id]
-                fig = create_model_relaxation_graph(xvalues, yvalues, expr_id)
-                row = dbc.Row([
-                    dbc.Col([
-                        dbc.Card(
-                            dbc.CardBody(expr, style={"padding": "0"}),
-                            className="border-0 bg-transparent"
-                        ),
-                    ], width=4),
-                    dbc.Col([
-                        dbc.Card(
-                            dbc.CardBody(
-                                Graph(figure=fig), style={"padding": "0"}
-                            ),
-                            className="border-0 bg-transparent"
-                        ),
-                    ], width=8)
-                ])
-                rows.append(row)
-            return rows
-            
         app = dash.Dash(__name__, external_stylesheets=[theme])
         
         app.layout = dbc.Container([
             Store(id='refresh-interval'),
+            Store(id='model-params-dropdown-expr', data=''),
             
             # navbar
             dbc.Navbar(
@@ -340,7 +282,25 @@ class JaxPlannerDashboard:
                         # model
                         dbc.Tab(dbc.Card(
                             dbc.CardBody([
-                                Div(create_model_relaxation_table(None), id='model-relaxation-table')
+                                dbc.Row([
+                                    dbc.Col([
+                                        dbc.DropdownMenu(
+                                            [], 
+                                            label="RDDL Expression", 
+                                            id='model-params-dropdown'
+                                        )
+                                    ])
+                                ]),
+                                dbc.Row([
+                                    dbc.Col([
+                                        dbc.Card(
+                                            dbc.CardBody(
+                                                Graph(id='model-params-graph')
+                                            ),
+                                            className="border-0 bg-transparent"
+                                        ),
+                                    ])
+                                ])
                             ]), className="border-0 bg-transparent"
                         ), label="Model", tab_id='tab-model'
                         ),
@@ -389,8 +349,7 @@ class JaxPlannerDashboard:
             ctx = dash.callback_context 
             if not ctx.triggered: 
                 return data 
-            else: 
-                button_id = ctx.triggered[0]['prop_id'].split('.')[0]
+            button_id = ctx.triggered[0]['prop_id'].split('.')[0]
             if button_id == '05sec':
                 return 500
             elif button_id == '1sec':
@@ -545,18 +504,18 @@ class JaxPlannerDashboard:
                         fig.add_trace(go.Violin(
                             y=dist, line_color=colors[ic], name=f'{tick}'
                         ))
+                    fig.update_traces(
+                        orientation='v', side='positive', width=3, points=False)
+                    fig.update_layout(
+                        title=dict(text="Distribution of Return"),
+                        xaxis=dict(title=dict(text="Training Iteration")),
+                        yaxis=dict(title=dict(text="Cumulative Reward")),
+                        font=dict(size=11),
+                        showlegend=False,
+                        yaxis_showgrid=False, yaxis_zeroline=False,
+                        template="plotly_white"
+                    )
                     break
-            fig.update_traces(
-                orientation='v', side='positive', width=3, points=False)
-            fig.update_layout(
-                title=dict(text="Distribution of Return"),
-                xaxis=dict(title=dict(text="Training Iteration")),
-                yaxis=dict(title=dict(text="Cumulative Reward")),
-                font=dict(size=11),
-                showlegend=False,
-                yaxis_showgrid=False, yaxis_zeroline=False,
-                template="plotly_white"
-            )
             return fig
         
         # update the action heatmap
@@ -670,22 +629,68 @@ class JaxPlannerDashboard:
                     break
             return fig
         
-        # update the model relaxation information
+        # update the model parameter information
         @app.callback(
-            Output('model-relaxation-table', 'children'),
-            [Input('interval', 'n_intervals'),
-             Input('trigger-experiment-check', 'children'),
+            Output('model-params-dropdown', 'children'),
+            [Input('trigger-experiment-check', 'children'),
              Input('tabs-main', 'active_tab')]
         )
-        def update_model_relaxation_table(n, trigger, active_tab):
+        def update_model_params_dropdown_create(trigger, active_tab):
             if active_tab != 'tab-model': return dash.no_update
-            result = []
+            items = []
             for (row, checked) in self.checked.copy().items():
                 if checked:
-                    result = create_model_relaxation_table(row)
+                    items = []
+                    for (expr_id, expr) in self.relaxed_exprs[row].items():
+                        items.append(dbc.DropdownMenuItem([
+                            B(f'{expr_id}: '),
+                            expr.replace('\n', ' ')[:80]
+                        ], id={'type': 'dropdown-item', 'index': expr_id}))
                     break
-            return result
+            return items
         
+        @app.callback(
+            Output('model-params-dropdown-expr', 'data'),
+            Input({'type': 'dropdown-item', 'index': ALL}, 'n_clicks')
+        )
+        def update_model_params_dropdown_select(n_clicks):
+            ctx = dash.callback_context
+            if not ctx.triggered: 
+                return dash.no_update
+            if not next((item for item in n_clicks if item is not None), False):
+                return dash.no_update
+            return ast.literal_eval(
+                ctx.triggered[0]['prop_id'].split('.n_clicks')[0])['index']
+                
+        @app.callback(
+            Output('model-params-graph', 'figure'),
+            [Input('interval', 'n_intervals'),
+             Input('tabs-main', 'active_tab')],
+            [State('model-params-dropdown-expr', 'data')]
+        )
+        def update_model_params_graph(n, active_tab, expr_id):
+            if active_tab != 'tab-model': return dash.no_update
+            fig = go.Figure()
+            if expr_id == '': return fig            
+            for (row, checked) in self.checked.copy().items():
+                if checked:
+                    fig.add_trace(go.Scatter(
+                        x=self.xticks[row], 
+                        y=self.relaxed_exprs_values[row][expr_id],
+                        mode='lines+markers',
+                        marker=dict(size=2), line=dict(width=2)
+                    ))
+                    fig.update_layout(
+                        title=dict(text=f"Model Parameters for Expression {expr_id}"),
+                        xaxis=dict(title=dict(text="Training Iteration")),
+                        yaxis=dict(title=dict(text="Parameter Value")),
+                        font=dict(size=11),
+                        legend=dict(bgcolor='rgba(0,0,0,0)'),
+                        template="plotly_white"
+                    )
+                    break
+            return fig
+                
         # update the run information
         @app.callback(
             Output('planner-info', 'children'),
