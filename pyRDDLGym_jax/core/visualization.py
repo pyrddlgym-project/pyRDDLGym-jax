@@ -11,7 +11,7 @@ import webbrowser
 import dash
 from dash.dcc import Interval, Graph, Store
 from dash.dependencies import Input, Output, State, ALL
-from dash.html import Div, B, H4, P
+from dash.html import Div, B, H4, P, Img
 import dash_bootstrap_components as dbc
 
 import plotly.colors as pc 
@@ -30,7 +30,8 @@ ACTION_HEATMAP_HEIGHT = 400
 EXPERIMENT_PER_PAGE = 10
 PROGRESS_FOR_NEXT_RETURN_DIST = 2
 PROGRESS_FOR_NEXT_POLICY_DIST = 10
-        
+LOGO_FILE = os.path.join('assets', 'logo.png')
+
     
 class JaxPlannerDashboard:
     '''A dashboard app for monitoring the jax planner progress.'''
@@ -84,7 +85,7 @@ class JaxPlannerDashboard:
                     dbc.Card(dbc.CardBody(
                         B('Seed'), style={"padding": "0"}
                     ), className="border-0 bg-transparent")
-                ], width=2),
+                ], width=1),
                 dbc.Col([
                     dbc.Card(dbc.CardBody(
                         B('Timestamp'), style={"padding": "0"}
@@ -97,6 +98,11 @@ class JaxPlannerDashboard:
                 ], width=2),
                 dbc.Col([
                     dbc.Card(dbc.CardBody(
+                        B('Best Return'), style={"padding": "0"}
+                    ), className="border-0 bg-transparent")
+                ], width=2),
+                dbc.Col([
+                    dbc.Card(dbc.CardBody(
                         B('Status'), style={"padding": "0"}
                     ), className="border-0 bg-transparent")
                 ], width=2),
@@ -104,7 +110,7 @@ class JaxPlannerDashboard:
                     dbc.Card(dbc.CardBody(
                         B('Progress'), style={"padding": "0"}
                     ), className="border-0 bg-transparent")
-                ], width=2)
+                ], width=1)
             ])
             rows.append(row)
             
@@ -138,7 +144,7 @@ class JaxPlannerDashboard:
                                 dbc.CardBody(self.seeds[id], style={"padding": "0"}),
                                 className="border-0 bg-transparent"
                             )
-                        ], width=2),
+                        ], width=1),
                         dbc.Col([
                             dbc.Card(
                                 dbc.CardBody(self.timestamps[id], style={"padding": "0"}),
@@ -148,6 +154,13 @@ class JaxPlannerDashboard:
                         dbc.Col([
                             dbc.Card(
                                 dbc.CardBody(f'{self.duration[id]:.3f}s', style={"padding": "0"}),
+                                className="border-0 bg-transparent"
+                            ),
+                        ], width=2),
+                        dbc.Col([
+                            dbc.Card(
+                                dbc.CardBody(f'{(self.test_return[id] or [np.nan])[-1]:.3f}',
+                                             style={"padding": "0"}),
                                 className="border-0 bg-transparent"
                             ),
                         ], width=2),
@@ -165,7 +178,7 @@ class JaxPlannerDashboard:
                                 ),
                                 className="border-0 bg-transparent"
                             ),
-                        ], width=2),
+                        ], width=1),
                     ])
                     rows.append(row)
             return rows
@@ -238,6 +251,7 @@ class JaxPlannerDashboard:
             # navbar
             dbc.Navbar(
                 dbc.Container([
+                    Img(src=LOGO_FILE, height="30px", style={'margin-right': '10px'}),
                     dbc.NavbarBrand(f"JaxPlan Version {__version__}"),
                     dbc.Nav([
                         dbc.NavItem(
@@ -704,11 +718,12 @@ class JaxPlannerDashboard:
         # run the app in a new thread at the specified port
         def run_dash():
             self.app.run(port=port)
+
         dash_thread = threading.Thread(target=run_dash)
         dash_thread.daemon = daemon
         dash_thread.start()
         
-    def register_experiment(self, experiment_id: str, 
+    def register_experiment(self, experiment_id: str,
                             planner: 'JaxBackpropPlanner',
                             key: Optional[int]=None) -> str:
         '''Starts monitoring a new experiment.'''
