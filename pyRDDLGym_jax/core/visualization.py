@@ -277,7 +277,7 @@ class JaxPlannerDashboard:
                         dbc.DropdownMenu(
                             [dbc.DropdownMenuItem("500ms", id='05sec'),
                              dbc.DropdownMenuItem("1s", id='1sec'),
-                             dbc.DropdownMenuItem("2s", id='2sec', active=True),
+                             dbc.DropdownMenuItem("2s", id='2sec'),
                              dbc.DropdownMenuItem("5s", id='5sec'),
                              dbc.DropdownMenuItem("10s", id='10sec'),
                              dbc.DropdownMenuItem("30s", id='30sec'),
@@ -361,7 +361,7 @@ class JaxPlannerDashboard:
             # refresh interval
             Interval(
                 id='interval',
-                interval=1000,
+                interval=2000,
                 n_intervals=0
             ),
             Div(id='trigger-experiment-check', style={'display': 'none'})
@@ -440,7 +440,7 @@ class JaxPlannerDashboard:
             elif selected_interval == 300000:
                 return 'Refresh: 5m'
             else:
-                return 'Refresh: 1d'
+                return 'Refresh: 2s'
         
         # update the experiment table
         @app.callback(
@@ -589,13 +589,16 @@ class JaxPlannerDashboard:
                             z=action_values,
                             x=np.arange(action_values.shape[1]),
                             y=np.arange(action_values.shape[0]),
-                            colorscale='Blues', colorbar_x=0.45,
+                            colorscale='Blues', colorbar_x=0.45, 
+                            colorbar_len=0.8 / num_plots,
+                            colorbar_y=1 - (i + 0.5) / num_plots
                         ), row=i + 1, col=1)
                         fig.add_trace(go.Heatmap(
                             z=action_errors,
                             x=np.arange(action_errors.shape[1]),
-                            y=np.arange(action_errors.shape[0]),
-                            colorscale='Reds'
+                            y=np.arange(action_errors.shape[0]), 
+                            colorscale='Reds', colorbar_len=0.8 / num_plots,
+                            colorbar_y=1 - (i + 0.5) / num_plots
                         ), row=i + 1, col=2)
                     fig.update_layout(
                         title="Values of Action-Fluents",
