@@ -110,6 +110,8 @@ class JaxPlannerDashboard:
             
             # experiments
             for (i, id) in enumerate(self.checked):
+                if i >= end:
+                    break
                 if i >= start and i < end:
                     progress = self.progress[id]
                     row = dbc.Row([
