@@ -260,10 +260,15 @@ class JaxPlannerDashboard:
                     dbc.Nav([                        
                         dbc.DropdownMenu(
                             [dbc.DropdownMenuItem("500ms", id='05sec'),
-                             dbc.DropdownMenuItem("1s", id='1sec', active=True),
+                             dbc.DropdownMenuItem("1s", id='1sec'),
+                             dbc.DropdownMenuItem("2s", id='2sec', active=True),
                              dbc.DropdownMenuItem("5s", id='5sec'),
+                             dbc.DropdownMenuItem("10s", id='10sec'),
+                             dbc.DropdownMenuItem("30s", id='30sec'),
+                             dbc.DropdownMenuItem("1m", id='1min'),
+                             dbc.DropdownMenuItem("5m", id='5min'),
                              dbc.DropdownMenuItem("1d", id='1day')],
-                            label="Refresh: 1s",
+                            label="Refresh: 2s",
                             id='refresh-rate-dropdown',
                             nav=True
                         )
@@ -355,11 +360,16 @@ class JaxPlannerDashboard:
             Output("refresh-interval", "data"),
             [Input("05sec", "n_clicks"),
              Input("1sec", "n_clicks"),
+             Input("2sec", "n_clicks"),
              Input("5sec", "n_clicks"),
+             Input("10sec", "n_clicks"),
+             Input("30sec", "n_clicks"),
+             Input("1min", "n_clicks"),
+             Input("5min", "n_clicks"),
              Input("1day", "n_clicks")],
             [State('refresh-interval', 'data')]
         )
-        def click_refresh_rate(n05, n1, n5, nd, data):
+        def click_refresh_rate(n05, n1, n2, n5, n10, n30, n1m, n5m, nd, data):
             ctx = callback_context 
             if not ctx.triggered: 
                 return data 
@@ -369,8 +379,18 @@ class JaxPlannerDashboard:
                 return 500
             elif button_id == '1sec':
                 return 1000
+            elif button_id == '2sec':
+                return 2000
             elif button_id == '5sec':
                 return 5000
+            elif button_id == '10sec':
+                return 10000
+            elif button_id == '30sec':
+                return 30000
+            elif button_id == '1min':
+                return 60000
+            elif button_id == '5min':
+                return 300000
             elif button_id == '1day':
                 return 86400000
             return data            
@@ -380,7 +400,7 @@ class JaxPlannerDashboard:
             [Input('refresh-interval', 'data')]
         )
         def update_refresh_rate(selected_interval):
-            return selected_interval if selected_interval else 1000
+            return selected_interval if selected_interval else 2000
         
         @app.callback(
             Output('refresh-rate-dropdown', 'label'),
@@ -391,8 +411,18 @@ class JaxPlannerDashboard:
                 return 'Refresh: 500ms'
             elif selected_interval == 1000:
                 return 'Refresh: 1s'
+            elif selected_interval == 2000:
+                return 'Refresh: 2s'
             elif selected_interval == 5000:
                 return 'Refresh: 5s'
+            elif selected_interval == 10000:
+                return 'Refresh: 10s'
+            elif selected_interval == 30000:
+                return 'Refresh: 30s'
+            elif selected_interval == 60000:
+                return 'Refresh: 1m'
+            elif selected_interval == 300000:
+                return 'Refresh: 5m'
             else:
                 return 'Refresh: 1d'
         
