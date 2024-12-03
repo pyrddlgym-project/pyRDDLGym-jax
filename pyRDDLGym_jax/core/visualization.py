@@ -61,8 +61,8 @@ class JaxPlannerDashboard:
         
         self.relaxed_exprs = {}
         self.relaxed_exprs_values = {}
-        self.train_state_dist = {}
-        self.test_state_dist = {}
+        self.train_reward_dist = {}
+        self.test_reward_dist = {}
         
         # ======================================================================
         # CREATE PAGE LAYOUT
@@ -318,7 +318,7 @@ class JaxPlannerDashboard:
                                     dbc.Col([
                                         dbc.Card(
                                             dbc.CardBody(
-                                                Graph(id='model-errors-graph')
+                                                Graph(id='model-errors-reward-graph')
                                             ),
                                             className="border-0 bg-transparent"
                                         ),
@@ -718,31 +718,32 @@ class JaxPlannerDashboard:
                     break
             return fig
         
+        # update the model errors information
         @app.callback(
-            Output('model-errors-graph', 'figure'),
+            Output('model-errors-reward-graph', 'figure'),
             [Input('interval', 'n_intervals'),
              Input('trigger-experiment-check', 'children'),
              Input('tabs-main', 'active_tab')]
         )
-        def update_model_error_graph(n, trigger, active_tab):
+        def update_model_error_reward_graph(n, trigger, active_tab):
             if active_tab != 'tab-model': return dash.no_update
             fig = go.Figure()
             fig.update_layout(template='plotly_white')
             for (row, checked) in self.checked.copy().items():
-                if checked and row in self.train_state_dist:
-                    data = self.train_state_dist[row]
+                if checked and row in self.train_reward_dist:
+                    data = self.train_reward_dist[row]
                     num_epochs = data.shape[1]
                     step = 1
                     if num_epochs > REWARD_ERROR_DIST_SUBPLOTS:
                         step = num_epochs // REWARD_ERROR_DIST_SUBPLOTS
                     for epoch in range(0, num_epochs, step):
                         fig.add_trace(go.Violin(
-                            y=self.train_state_dist[row][:, epoch], x0=epoch,
+                            y=self.train_reward_dist[row][:, epoch], x0=epoch,
                             side='negative', line_color='red', 
                             name=f'Train Epoch {epoch + 1}'
                         ))
                         fig.add_trace(go.Violin(
-                            y=self.test_state_dist[row][:, epoch], x0=epoch,
+                            y=self.test_reward_dist[row][:, epoch], x0=epoch,
                             side='positive', line_color='blue',
                             name=f'Test Epoch {epoch + 1}'
                         ))
@@ -884,8 +885,8 @@ class JaxPlannerDashboard:
             self.relaxed_exprs_values[experiment_id][expr_id].append(values.item())
         
         # data for state distribution
-        self.train_state_dist[experiment_id] = callback['train_log']['reward']
-        self.test_state_dist[experiment_id] = callback['reward']
+        self.train_reward_dist[experiment_id] = callback['train_log']['reward']
+        self.test_reward_dist[experiment_id] = callback['reward']
         
         # update experiment table info
         self.status[experiment_id] = str(callback['status']).split('.')[1]
