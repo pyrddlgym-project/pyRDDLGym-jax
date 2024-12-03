@@ -1891,6 +1891,7 @@ r"""
                 'key': key,
                 'model_params': model_params,
                 'progress': progress_percent,
+                'train_log': train_log,
                 **log
             }
             

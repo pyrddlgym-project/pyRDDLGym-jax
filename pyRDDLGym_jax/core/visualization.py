@@ -12,7 +12,7 @@ import webbrowser
 import dash
 from dash.dcc import Interval, Graph, Store
 from dash.dependencies import Input, Output, State, ALL
-from dash.html import Div, B, H4, P, Img
+from dash.html import Div, B, H4, P, Img, Hr
 import dash_bootstrap_components as dbc
 
 import plotly.colors as pc 
@@ -31,6 +31,7 @@ ACTION_HEATMAP_HEIGHT = 400
 EXPERIMENT_PER_PAGE = 10
 PROGRESS_FOR_NEXT_RETURN_DIST = 2
 PROGRESS_FOR_NEXT_POLICY_DIST = 10
+REWARD_ERROR_DIST_SUBPLOTS = 40
 LOGO_FILE = os.path.join('assets', 'logo.png')
 
     
@@ -60,6 +61,8 @@ class JaxPlannerDashboard:
         
         self.relaxed_exprs = {}
         self.relaxed_exprs_values = {}
+        self.train_state_dist = {}
+        self.test_state_dist = {}
         
         # ======================================================================
         # CREATE PAGE LAYOUT
@@ -273,6 +276,11 @@ class JaxPlannerDashboard:
                                     Graph(id='action-output'),
                                 ]),
                                 dbc.Row([
+                                    dbc.Col([
+                                        Hr(className='my-4')
+                                    ])
+                                ]),
+                                dbc.Row([
                                     Graph(id='policy-params'),
                                 ])
                             ]), className="border-0 bg-transparent"
@@ -296,6 +304,21 @@ class JaxPlannerDashboard:
                                         dbc.Card(
                                             dbc.CardBody(
                                                 Graph(id='model-params-graph')
+                                            ),
+                                            className="border-0 bg-transparent"
+                                        ),
+                                    ])
+                                ]),
+                                dbc.Row([
+                                    dbc.Col([
+                                        Hr(className='my-4')
+                                    ])
+                                ]),
+                                dbc.Row([
+                                    dbc.Col([
+                                        dbc.Card(
+                                            dbc.CardBody(
+                                                Graph(id='model-errors-graph')
                                             ),
                                             className="border-0 bg-transparent"
                                         ),
@@ -492,6 +515,7 @@ class JaxPlannerDashboard:
         def update_dist_return_graph(n, trigger, active_tab):
             if active_tab != 'tab-performance': return dash.no_update
             fig = go.Figure()
+            fig.update_layout(template='plotly_white')
             for (row, checked) in self.checked.copy().items():
                 if checked:
                     return_dists = self.return_dist[row]
@@ -528,6 +552,7 @@ class JaxPlannerDashboard:
         def update_action_heatmap(n, trigger, active_tab):
             if active_tab != 'tab-policy': return dash.no_update
             fig = go.Figure()
+            fig.update_layout(template='plotly_white')
             for (row, checked) in self.checked.copy().items():
                 if checked and self.action_output[row] is not None:
                     num_plots = len(self.action_output[row])
@@ -561,7 +586,7 @@ class JaxPlannerDashboard:
                         ), row=i + 1, col=2)
                     fig.update_layout(
                         title="Values of Action-Fluents",
-                        xaxis=dict(title=dict(text="Training Iteration")),
+                        xaxis=dict(title=dict(text="Decision Epoch")),
                         font=dict(size=11),
                         height=ACTION_HEATMAP_HEIGHT * num_plots,
                         showlegend=False,
@@ -580,6 +605,7 @@ class JaxPlannerDashboard:
         def update_policy_params(n, trigger, active_tab):
             if active_tab != 'tab-policy': return dash.no_update
             fig = go.Figure()
+            fig.update_layout(template='plotly_white')
             for (row, checked) in self.checked.copy().items():
                 policy_params = self.policy_params[row]
                 policy_params_ticks = self.policy_params_ticks[row]
@@ -671,6 +697,7 @@ class JaxPlannerDashboard:
         def update_model_params_graph(n, active_tab, expr_id):
             if active_tab != 'tab-model': return dash.no_update
             fig = go.Figure()
+            fig.update_layout(template='plotly_white')
             if expr_id == '': return fig            
             for (row, checked) in self.checked.copy().items():
                 if checked:
@@ -685,6 +712,47 @@ class JaxPlannerDashboard:
                         xaxis=dict(title=dict(text="Training Iteration")),
                         yaxis=dict(title=dict(text="Parameter Value")),
                         font=dict(size=11),
+                        legend=dict(bgcolor='rgba(0,0,0,0)'),
+                        template="plotly_white"
+                    )
+                    break
+            return fig
+        
+        @app.callback(
+            Output('model-errors-graph', 'figure'),
+            [Input('interval', 'n_intervals'),
+             Input('trigger-experiment-check', 'children'),
+             Input('tabs-main', 'active_tab')]
+        )
+        def update_model_error_graph(n, trigger, active_tab):
+            if active_tab != 'tab-model': return dash.no_update
+            fig = go.Figure()
+            fig.update_layout(template='plotly_white')
+            for (row, checked) in self.checked.copy().items():
+                if checked and row in self.train_state_dist:
+                    data = self.train_state_dist[row]
+                    num_epochs = data.shape[1]
+                    step = 1
+                    if num_epochs > REWARD_ERROR_DIST_SUBPLOTS:
+                        step = num_epochs // REWARD_ERROR_DIST_SUBPLOTS
+                    for epoch in range(0, num_epochs, step):
+                        fig.add_trace(go.Violin(
+                            y=self.train_state_dist[row][:, epoch], x0=epoch,
+                            side='negative', line_color='red', 
+                            name=f'Train Epoch {epoch + 1}'
+                        ))
+                        fig.add_trace(go.Violin(
+                            y=self.test_state_dist[row][:, epoch], x0=epoch,
+                            side='positive', line_color='blue',
+                            name=f'Test Epoch {epoch + 1}'
+                        ))
+                    fig.update_traces(meanline_visible=True)
+                    fig.update_layout(
+                        title=dict(text="Distribution of Reward in Relaxed Model vs True Model"),
+                        xaxis=dict(title=dict(text="Decision Epoch")),
+                        yaxis=dict(title=dict(text="Reward")),
+                        font=dict(size=11),
+                        violingap=0, violinmode='overlay', showlegend=False,
                         legend=dict(bgcolor='rgba(0,0,0,0)'),
                         template="plotly_white"
                     )
@@ -771,7 +839,7 @@ class JaxPlannerDashboard:
             compiled_expr = decompiler.decompile_expr(expr)
             self.relaxed_exprs[experiment_id][info['id']] = compiled_expr
             self.relaxed_exprs_values[experiment_id][info['id']] = []
-            
+        
         return experiment_id
     
     def update_experiment(self, experiment_id: str, callback: Dict[str, Any]) -> None:
@@ -814,6 +882,10 @@ class JaxPlannerDashboard:
         for (key, values) in model_params.items():
             expr_id = int(str(key).split('_')[0])
             self.relaxed_exprs_values[experiment_id][expr_id].append(values.item())
+        
+        # data for state distribution
+        self.train_state_dist[experiment_id] = callback['train_log']['reward']
+        self.test_state_dist[experiment_id] = callback['reward']
         
         # update experiment table info
         self.status[experiment_id] = str(callback['status']).split('.')[1]
