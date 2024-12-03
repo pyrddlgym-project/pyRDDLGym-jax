@@ -31,7 +31,8 @@ ACTION_HEATMAP_HEIGHT = 400
 EXPERIMENT_PER_PAGE = 10
 PROGRESS_FOR_NEXT_RETURN_DIST = 2
 PROGRESS_FOR_NEXT_POLICY_DIST = 10
-REWARD_ERROR_DIST_SUBPLOTS = 40
+REWARD_ERROR_DIST_SUBPLOTS = 20
+MODEL_STATE_ERROR_HEIGHT = 300
 LOGO_FILE = os.path.join('assets', 'logo.png')
 
     
@@ -63,6 +64,8 @@ class JaxPlannerDashboard:
         self.relaxed_exprs_values = {}
         self.train_reward_dist = {}
         self.test_reward_dist = {}
+        self.train_state_fluents = {}
+        self.test_state_fluents = {}
         
         # ======================================================================
         # CREATE PAGE LAYOUT
@@ -192,6 +195,7 @@ class JaxPlannerDashboard:
         app.layout = dbc.Container([
             Store(id='refresh-interval'),
             Store(id='model-params-dropdown-expr', data=''),
+            Store(id='model-errors-state-dropdown-selected', data=''),
             
             # navbar
             dbc.Navbar(
@@ -289,23 +293,17 @@ class JaxPlannerDashboard:
                         
                         # model
                         dbc.Tab(dbc.Card(
-                            dbc.CardBody([
+                            dbc.CardBody([                                
                                 dbc.Row([
                                     dbc.Col([
-                                        dbc.DropdownMenu(
-                                            [], 
-                                            label="RDDL Expression", 
-                                            id='model-params-dropdown'
-                                        )
-                                    ])
-                                ]),
-                                dbc.Row([
-                                    dbc.Col([
-                                        dbc.Card(
-                                            dbc.CardBody(
-                                                Graph(id='model-params-graph')
+                                        dbc.Card([
+                                            dbc.DropdownMenu(
+                                                [], 
+                                                label="RDDL Expression", 
+                                                id='model-params-dropdown'
                                             ),
-                                            className="border-0 bg-transparent"
+                                            Graph(id='model-params-graph')
+                                        ], className="border-0 bg-transparent"
                                         ),
                                     ])
                                 ]),
@@ -323,7 +321,20 @@ class JaxPlannerDashboard:
                                             className="border-0 bg-transparent"
                                         ),
                                     ])
-                                ])
+                                ]),
+                                dbc.Row([
+                                    dbc.Col([
+                                        dbc.Card([
+                                            dbc.DropdownMenu(
+                                                [], 
+                                                label="State-Fluent", 
+                                                id='model-errors-state-dropdown'
+                                            ),
+                                            Graph(id='model-errors-state-graph')
+                                        ], className="border-0 bg-transparent"
+                                        )
+                                    ])
+                                ]),
                             ]), className="border-0 bg-transparent"
                         ), label="Model", tab_id='tab-model'
                         ),
@@ -670,7 +681,7 @@ class JaxPlannerDashboard:
                     for (expr_id, expr) in self.relaxed_exprs[row].items():
                         items.append(dbc.DropdownMenuItem([
                             B(f'{expr_id}: '),
-                            expr.replace('\n', ' ')[:80]
+                            expr.replace('\n', ' ')[:120]
                         ], id={'type': 'expr-dropdown-item', 'index': expr_id}))
                     break
             return items
@@ -718,7 +729,7 @@ class JaxPlannerDashboard:
                     break
             return fig
         
-        # update the model errors information
+        # update the model errors information for reward
         @app.callback(
             Output('model-errors-reward-graph', 'figure'),
             [Input('interval', 'n_intervals'),
@@ -753,6 +764,92 @@ class JaxPlannerDashboard:
                         xaxis=dict(title=dict(text="Decision Epoch")),
                         yaxis=dict(title=dict(text="Reward")),
                         font=dict(size=11),
+                        violingap=0, violinmode='overlay', showlegend=False,
+                        legend=dict(bgcolor='rgba(0,0,0,0)'),
+                        template="plotly_white"
+                    )
+                    break
+            return fig
+        
+        # update the model errors information for state
+        @app.callback(
+            Output('model-errors-state-dropdown', 'children'),
+            [Input('trigger-experiment-check', 'children'),
+             Input('tabs-main', 'active_tab')]
+        )
+        def update_model_errors_state_dropdown_create(trigger, active_tab):
+            if active_tab != 'tab-model': return dash.no_update
+            items = []
+            for (row, checked) in self.checked.copy().items():
+                if checked:
+                    items = []
+                    for name in self.train_state_fluents[row]:
+                        items.append(dbc.DropdownMenuItem(
+                            [name], 
+                            id={'type': 'state-fluent-dropdown-item', 'index': name}
+                        ))
+                    break
+            return items
+        
+        @app.callback(
+            Output('model-errors-state-dropdown-selected', 'data'),
+            Input({'type': 'state-fluent-dropdown-item', 'index': ALL}, 'n_clicks')
+        )
+        def update_model_errors_state_dropdown_select(n_clicks):
+            ctx = dash.callback_context
+            if not ctx.triggered: 
+                return dash.no_update
+            if not next((item for item in n_clicks if item is not None), False):
+                return dash.no_update
+            return ast.literal_eval(
+                ctx.triggered[0]['prop_id'].split('.n_clicks')[0])['index']
+        
+        @app.callback(
+            Output('model-errors-state-graph', 'figure'),
+            [Input('interval', 'n_intervals'),
+             Input('trigger-experiment-check', 'children'),
+             Input('tabs-main', 'active_tab')],
+            [State('model-errors-state-dropdown-selected', 'data')]
+        )
+        def update_model_errors_state_graph(n, trigger, active_tab, state):
+            if active_tab != 'tab-model': return dash.no_update
+            if not state: return dash.no_update
+            fig = go.Figure()
+            fig.update_layout(template='plotly_white')
+            for (row, checked) in self.checked.copy().items():
+                if checked and row in self.train_state_fluents \
+                and state in self.train_state_fluents[row]:
+                    train_values = self.train_state_fluents[row][state]
+                    test_values = self.test_state_fluents[row][state]
+                    train_values = 1 * train_values.reshape(train_values.shape[:2] + (-1,))
+                    test_values = 1 * test_values.reshape(test_values.shape[:2] + (-1,))
+                    num_epochs, num_states = train_values.shape[1:]
+                    step = 1
+                    if num_epochs > REWARD_ERROR_DIST_SUBPLOTS:
+                        step = num_epochs // REWARD_ERROR_DIST_SUBPLOTS
+                    fig = make_subplots(
+                        rows=num_states, cols=1, shared_xaxes=True
+                    )
+                    for istate in range(num_states):
+                        for epoch in range(0, num_epochs, step):
+                            fig.add_trace(go.Violin(
+                                y=train_values[:, epoch, istate], x0=epoch,
+                                side='negative', line_color='red', 
+                                name=f'Train Epoch {epoch + 1}'
+                            ), row=istate + 1, col=1)
+                            fig.add_trace(go.Violin(
+                                y=test_values[:, epoch, istate], x0=epoch,
+                                side='positive', line_color='blue',
+                                name=f'Test Epoch {epoch + 1}'
+                            ), row=istate + 1, col=1)
+                    fig.update_traces(meanline_visible=True)
+                    fig.update_layout(
+                        title=dict(text=(f"Distribution of State-Fluent {state} "
+                                         f"in Relaxed Model vs True Model")),
+                        xaxis=dict(title=dict(text="Decision Epoch")),
+                        yaxis=dict(title=dict(text="State-Fluent Value")),
+                        font=dict(size=11),
+                        height=MODEL_STATE_ERROR_HEIGHT * num_states,
                         violingap=0, violinmode='overlay', showlegend=False,
                         legend=dict(bgcolor='rgba(0,0,0,0)'),
                         template="plotly_white"
@@ -883,10 +980,16 @@ class JaxPlannerDashboard:
         for (key, values) in model_params.items():
             expr_id = int(str(key).split('_')[0])
             self.relaxed_exprs_values[experiment_id][expr_id].append(values.item())
-        
-        # data for state distribution
         self.train_reward_dist[experiment_id] = callback['train_log']['reward']
         self.test_reward_dist[experiment_id] = callback['reward']
+        self.train_state_fluents[experiment_id] = {
+            name: callback['train_log']['fluents'][name] 
+            for name in rddl.state_fluents or name in rddl.observ_fluents
+        }
+        self.test_state_fluents[experiment_id] = {
+            name: callback['fluents'][name]
+            for name in self.train_state_fluents[experiment_id]
+        }
         
         # update experiment table info
         self.status[experiment_id] = str(callback['status']).split('.')[1]
