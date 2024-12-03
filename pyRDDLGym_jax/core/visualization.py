@@ -129,7 +129,7 @@ class JaxPlannerDashboard:
                             dbc.Card(
                                 dbc.CardBody([
                                     dbc.Checkbox(
-                                        id={'type': 'checkbox', 'index': id},
+                                        id={'type': 'experiment-checkbox', 'index': id},
                                         value=self.checked[id]
                                     )],
                                     style={"padding": "0"}
@@ -442,8 +442,8 @@ class JaxPlannerDashboard:
         
         @app.callback(
             Output('trigger-experiment-check', 'children'),
-            Input({'type': 'checkbox', 'index': ALL}, 'value'),
-            State({'type': 'checkbox', 'index': ALL}, 'id')
+            Input({'type': 'experiment-checkbox', 'index': ALL}, 'value'),
+            State({'type': 'experiment-checkbox', 'index': ALL}, 'id')
         )
         def update_checked_experiment_status(checked, ids):
             for (i, chk) in enumerate(checked):
@@ -671,13 +671,13 @@ class JaxPlannerDashboard:
                         items.append(dbc.DropdownMenuItem([
                             B(f'{expr_id}: '),
                             expr.replace('\n', ' ')[:80]
-                        ], id={'type': 'dropdown-item', 'index': expr_id}))
+                        ], id={'type': 'expr-dropdown-item', 'index': expr_id}))
                     break
             return items
         
         @app.callback(
             Output('model-params-dropdown-expr', 'data'),
-            Input({'type': 'dropdown-item', 'index': ALL}, 'n_clicks')
+            Input({'type': 'expr-dropdown-item', 'index': ALL}, 'n_clicks')
         )
         def update_model_params_dropdown_select(n_clicks):
             ctx = dash.callback_context
