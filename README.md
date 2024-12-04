@@ -195,15 +195,15 @@ To do this, first create a config file template with patterns replacing concrete
 ```ini
 [Model]
 logic='FuzzyLogic'
-comparison_kwargs={'weight': #weight}
-rounding_kwargs={'weight': #weight}
-control_kwargs={'weight': #weight}
+comparison_kwargs={'weight': TUNABLE_WEIGHT}
+rounding_kwargs={'weight': TUNABLE_WEIGHT}
+control_kwargs={'weight': TUNABLE_WEIGHT}
 
 [Optimizer]
 method='JaxStraightLinePlan'
 method_kwargs={}
 optimizer='rmsprop'
-optimizer_kwargs={'learning_rate': #lr}
+optimizer_kwargs={'learning_rate': TUNABLE_LEARNING_RATE}
 
 [Training]
 train_seconds=30
@@ -212,7 +212,7 @@ print_progress=False
 train_on_reset=True
 ```
 
-would allow to tune the ``#weight`` sharpness of model relaxations, and the ``#lr`` learning rate of the optimizer.
+would allow to tune the sharpness of model relaxations, and the learning rate of the optimizer.
 
 Next, you must link the patterns in the config with concrete hyper-parameter ranges the tuner will understand:
 
@@ -232,8 +232,8 @@ def power_10(x):
     return 10.0 ** x
     
 hyperparams = [
-    Hyperparameter('#weight', -1., 5., power_10),  # tune #weight from 10^-1 ... 10^5
-    Hyperparameter('#lr', -5., 1., power_10),   # tune #lr from 10^-5 ... 10^1
+    Hyperparameter('TUNABLE_WEIGHT', -1., 5., power_10),  # tune weight from 10^-1 ... 10^5
+    Hyperparameter('TUNABLE_LEARNING_RATE', -5., 1., power_10),   # tune lr from 10^-5 ... 10^1
 ]
     
 # build the tuner and tune
