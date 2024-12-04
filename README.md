@@ -32,6 +32,7 @@ and was moved to the individual logic components which have their own unique wei
 - [Running from the Command Line](#running-from-the-command-line)
 - [Running from Another Python Application](#running-from-another-python-application)
 - [Configuring the Planner](#configuring-the-planner)
+- [JaxPlan Dashboard](#jaxplan-dashboard)
 - [Tuning the Planner](#tuning-the-planner)
 - [Simulation](#simulation)
 - [Citing JaxPlan](#citing-jaxplan)
@@ -165,6 +166,26 @@ planner = JaxBackpropPlanner(rddl=env.model, **planner_args)
 controller = JaxOfflineController(planner, **train_args)
 ...
 ```
+
+### JaxPlan Dashboard
+
+Since version 1.0, JaxPlan has an optional dashboard that allows keeping track of the planner performance across multiple runs, 
+and visualization of the policy or model, and other useful debugging features.
+
+<p align="middle">
+<img src="Images/dashboard.png" width="480" height="248" margin=0/>
+</p>
+
+To run the dashboard, add the following entry to your config file:
+
+```ini
+...
+[Training]
+dashboard=True
+...
+```
+
+More documentation about this and other new features will be coming soon.
 
 ### Tuning the Planner
 
