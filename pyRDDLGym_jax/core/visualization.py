@@ -9,6 +9,11 @@ from typing import Any, Dict, Optional, TYPE_CHECKING
 import warnings
 import webbrowser
 
+# prevent endless console prints
+import logging
+log = logging.getLogger('werkzeug')
+log.setLevel(logging.ERROR)
+
 import dash
 from dash.dcc import Interval, Graph, Store
 from dash.dependencies import Input, Output, State, ALL
@@ -813,12 +818,11 @@ class JaxPlannerDashboard:
         )
         def update_model_errors_state_graph(n, trigger, active_tab, state):
             if active_tab != 'tab-model': return dash.no_update
-            if not state: return dash.no_update
             fig = go.Figure()
             fig.update_layout(template='plotly_white')
+            if not state: return fig
             for (row, checked) in self.checked.copy().items():
-                if checked and row in self.train_state_fluents \
-                and state in self.train_state_fluents[row]:
+                if checked and row in self.train_state_fluents:
                     train_values = self.train_state_fluents[row][state]
                     test_values = self.test_state_fluents[row][state]
                     train_values = 1 * train_values.reshape(train_values.shape[:2] + (-1,))
