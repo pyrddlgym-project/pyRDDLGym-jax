@@ -19,7 +19,7 @@ long_description = (Path(__file__).parent / "README.md").read_text()
 
 setup(
       name='pyRDDLGym-jax',
-      version='0.5',
+      version='1.0',
       author="Michael Gimelfarb, Ayal Taitler, Scott Sanner",
       author_email="mike.gimelfarb@mail.utoronto.ca, ataitler@gmail.com, ssanner@mie.utoronto.ca",
       description="pyRDDLGym-jax: automatic differentiation for solving sequential planning problems in JAX.",
@@ -37,7 +37,8 @@ setup(
           'tensorflow-probability>=0.21.0'
       ],
       extras_require={
-          'extra': ['bayesian-optimization>=2.0.0', 'rddlrepository>=2.0']
+          'extra': ['bayesian-optimization>=2.0.0', 'rddlrepository>=2.0'],
+          'dashboard': ['dash>=2.18.0', 'dash-bootstrap-components>=1.6.0']
       },
       python_requires=">=3.9",
       package_data={'': ['*.cfg']},

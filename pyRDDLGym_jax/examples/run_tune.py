@@ -20,12 +20,19 @@ import os
 import sys
 
 import pyRDDLGym
-from pyRDDLGym.core.debug.exception import raise_warning
 
-from pyRDDLGym_jax.core.tuning import (
-    JaxParameterTuningDRP, JaxParameterTuningSLP, JaxParameterTuningSLPReplan
+from pyRDDLGym_jax.core.tuning import JaxParameterTuning, Hyperparameter
+from pyRDDLGym_jax.core.planner import (
+    load_config_from_string, JaxBackpropPlanner, 
+    JaxOfflineController, JaxOnlineController
 )
-from pyRDDLGym_jax.core.planner import load_config
+
+def power_2(x):
+    return int(2 ** x)
+
+
+def power_10(x):
+    return 10.0 ** x
 
 
 def main(domain, instance, method, trials=5, iters=20, workers=4):
@@ -35,31 +42,38 @@ def main(domain, instance, method, trials=5, iters=20, workers=4):
     
     # load the config file with planner settings
     abs_path = os.path.dirname(os.path.abspath(__file__))
-    config_path = os.path.join(abs_path, 'configs', f'{domain}_{method}.cfg')
-    if not os.path.isfile(config_path):
-        raise_warning(f'Config file {config_path} was not found, '
-                      f'using default_{method}.cfg.', 'red')
-        config_path = os.path.join(abs_path, 'configs', f'default_{method}.cfg') 
-    planner_args, plan_args, train_args = load_config(config_path)
+    config_path = os.path.join(abs_path, 'configs', f'tuning_{method}.cfg')
+    with open(config_path, 'r') as file:
+        config_template = file.read() 
     
-    # define algorithm to perform tuning
-    if method == 'slp':
-        tuning_class = JaxParameterTuningSLP        
-    elif method == 'drp':
-        tuning_class = JaxParameterTuningDRP    
-    elif method == 'replan':
-        tuning_class = JaxParameterTuningSLPReplan    
-    tuning = tuning_class(env=env,
-                          train_epochs=train_args['epochs'],
-                          timeout_training=train_args['train_seconds'],
-                          eval_trials=trials,
-                          planner_kwargs=planner_args,
-                          plan_kwargs=plan_args,
-                          num_workers=workers,
-                          gp_iters=iters)
+    # map parameters in the config that will be tuned
+    hyperparams = [
+        Hyperparameter('MODEL_WEIGHT_TUNE', -1., 5., power_10),
+        Hyperparameter('POLICY_WEIGHT_TUNE', -2., 2., power_10),
+        Hyperparameter('LEARNING_RATE_TUNE', -5., 1., power_10),
+        Hyperparameter('LAYER1_TUNE', 1, 8, power_2),
+        Hyperparameter('LAYER2_TUNE', 1, 8, power_2),
+        Hyperparameter('ROLLOUT_HORIZON_TUNE', 1, min(env.horizon, 100), int)       
+    ]
     
-    # perform tuning and report best parameters
-    tuning.tune(key=train_args['key'], filename=f'gp_{method}', save_plot=True)
+    # build the tuner and tune
+    tuning = JaxParameterTuning(env=env,
+                                config_template=config_template,
+                                hyperparams=hyperparams,
+                                online=method == 'replan',
+                                eval_trials=trials,
+                                num_workers=workers,
+                                gp_iters=iters)
+    tuning.tune(key=42, log_file=f'gp_{method}_{domain}_{instance}.csv')
+    tuning.save_plot(plot_file=f'{method}_{domain}_{instance}.pdf')
+    
+    # evaluate the agent on the best parameters
+    planner_args, _, train_args = load_config_from_string(tuning.best_config)
+    planner = JaxBackpropPlanner(rddl=env.model, **planner_args)
+    klass = JaxOnlineController if method == 'replan' else JaxOfflineController
+    controller = klass(planner, **train_args)
+    controller.evaluate(env, episodes=1, verbose=True, render=True)
+    env.close()
 
 
 if __name__ == "__main__":

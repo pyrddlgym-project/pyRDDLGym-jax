@@ -107,7 +107,7 @@ class JaxRDDLSimulator(RDDLSimulator):
         '''Throws an exception if the state invariants are not satisfied.'''
         for (i, invariant) in enumerate(self.invariants):
             loc = self.invariant_names[i]
-            sample, self.key, error = invariant(
+            sample, self.key, error, self.model_params = invariant(
                 self.subs, self.model_params, self.key)
             self.handle_error_code(error, loc)            
             if not bool(sample):
@@ -125,7 +125,8 @@ class JaxRDDLSimulator(RDDLSimulator):
         
         for (i, precond) in enumerate(self.preconds):
             loc = self.precond_names[i]
-            sample, self.key, error = precond(subs, self.model_params, self.key)
+            sample, self.key, error, self.model_params = precond(
+                subs, self.model_params, self.key)
             self.handle_error_code(error, loc)            
             if not bool(sample):
                 if not silent:
@@ -138,7 +139,7 @@ class JaxRDDLSimulator(RDDLSimulator):
         '''return True if a terminal state has been reached.'''
         for (i, terminal) in enumerate(self.terminals):
             loc = self.terminal_names[i]
-            sample, self.key, error = terminal(
+            sample, self.key, error, self.model_params = terminal(
                 self.subs, self.model_params, self.key)
             self.handle_error_code(error, loc)
             if bool(sample):
@@ -147,7 +148,7 @@ class JaxRDDLSimulator(RDDLSimulator):
     
     def sample_reward(self) -> float:
         '''Samples the current reward given the current state and action.'''
-        reward, self.key, error = self.reward(
+        reward, self.key, error, self.model_params = self.reward(
             self.subs, self.model_params, self.key)
         self.handle_error_code(error, 'reward function')
         return float(reward)
@@ -165,7 +166,8 @@ class JaxRDDLSimulator(RDDLSimulator):
         
         # compute CPFs in topological order
         for (cpf, expr, _) in self.cpfs:
-            subs[cpf], self.key, error = expr(subs, self.model_params, self.key)
+            subs[cpf], self.key, error, self.model_params = expr(
+                subs, self.model_params, self.key)
             self.handle_error_code(error, f'CPF <{cpf}>')            
                 
         # sample reward
