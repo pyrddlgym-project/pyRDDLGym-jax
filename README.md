@@ -16,6 +16,12 @@ Some demos of solved problems by JaxPlan:
 <img src="Images/reservoir.gif" width="120" height="120" margin=0/>
 </p>
 
+> [!WARNING]  
+> Starting in version 1.0 (major release), the ``weight`` parameter in the config file was removed, 
+and was moved to the individual logic components which have their own unique weight parameter assigned.
+> Furthermore, the tuning module has been redesigned from the ground up, and supports tuning arbitrary hyper-parameters via config templates!
+> Finally, the terrible visualizer for the planner was removed and replaced with an interactive real-time dashboard (similar to tensorboard, but custom designed for the planner)!
+
 > [!NOTE]  
 > While JaxPlan can support some discrete state/action problems through model relaxations, on some discrete problems it can perform poorly (though there is an ongoing effort to remedy this!).
 > If you find it is not making sufficient progress, check out the [PROST planner](https://github.com/pyrddlgym-project/pyRDDLGym-prost) (for discrete spaces) or the [deep reinforcement learning wrappers](https://github.com/pyrddlgym-project/pyRDDLGym-rl).
@@ -32,21 +38,28 @@ Some demos of solved problems by JaxPlan:
   
 ## Installation
 
-To use the compiler or planner without the automated hyper-parameter tuning, you will need the following packages installed: 
-- ``pyRDDLGym>=2.0``
-- ``tqdm>=4.66``
-- ``jax>=0.4.12``
-- ``optax>=0.1.9``
-- ``dm-haiku>=0.0.10``
-- ``tensorflow-probability>=0.21.0``
+To install the bare-bones version of JaxPlan with **minimum installation requirements**:
 
-Additionally, if you wish to run the examples, you need ``rddlrepository>=2``. 
-To run the automated tuning optimization, you will also need ``bayesian-optimization>=2.0.0``.
+```shell
+pip install pyRDDLGym-jax
+```
 
-You can install JaxPlan with all requirements using pip:
+To install JaxPlan with the **automatic hyper-parameter tuning** and rddlrepository:
 
 ```shell
 pip install pyRDDLGym-jax[extra]
+```
+
+To install JaxPlan with the **visualization dashboard**:
+
+```shell
+pip install pyRDDLGym-jax[dashboard]
+```
+
+To install JaxPlan with **all options**:
+
+```shell
+pip install pyRDDLGym-jax[extra,dashboard]
 ```
 
 ## Running from the Command Line
