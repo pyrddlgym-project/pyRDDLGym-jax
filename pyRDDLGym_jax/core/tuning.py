@@ -1,6 +1,7 @@
 import csv
 import datetime
-from multiprocessing import get_context
+import threading
+import multiprocessing
 import os
 import time
 from typing import Any, Callable, Dict, Iterable, Optional, Tuple
@@ -20,6 +21,16 @@ from pyRDDLGym_jax.core.planner import (
     JaxOnlineController,
     load_config_from_string
 )
+
+# try to load the dash board
+try:
+    from pyRDDLGym_jax.core.visualization import JaxPlannerDashboard
+except Exception:
+    raise_warning('Failed to load the dashboard visualization tool: '
+                  'please make sure you have installed the required packages.', 
+                  'red')
+    traceback.print_exc()
+    JaxPlannerDashboard = None
 
 
 class Hyperparameter:
@@ -163,12 +174,113 @@ class JaxParameterTuning:
     @property
     def best_config(self) -> str:
         return self.config_from_template(self.config_template, self.best_params)
+    
+    @staticmethod
+    def queue_listener(queue, dashboard):
+        while True:
+            args = queue.get()
+            if args is None:
+                break
+            elif len(args) == 3:
+                dashboard.register_experiment(*args)
+            else:
+                dashboard.update_experiment(*args)
+    
+    @staticmethod
+    def offline_trials(env, planner, train_args, key, iteration, index, num_trials, 
+                       verbose, queue):
+        average_reward = 0.0
+        for trial in range(num_trials):
+            key, subkey = jax.random.split(key)
+            experiment_id = f'iter={iteration}, worker={index}, trial={trial}'
+            if queue is not None:
+                queue.put((
+                    experiment_id, 
+                    JaxPlannerDashboard.get_planner_info(planner), 
+                    subkey[0]
+                ))
+            
+            # train the policy
+            callback = None
+            for callback in planner.optimize_generator(key=subkey, **train_args):
+                if queue is not None and queue.empty():
+                    queue.put((experiment_id, callback))
+            best_params = None if callback is None else callback['best_params']
+            
+            # evaluate the policy in the real environment
+            policy = JaxOfflineController(
+                planner=planner, key=subkey, tqdm_position=index, 
+                params=best_params, train_on_reset=False)
+            total_reward = policy.evaluate(env, seed=np.array(subkey)[0])['mean']
+            
+            # update average reward
+            if verbose:
+                iters = None if callback is None else callback['iteration']
+                print(f'    [{index}] trial {trial + 1}, key={subkey[0]}, '
+                      f'reward={total_reward:.6f}, iters={iters}', flush=True)
+            average_reward += total_reward / num_trials
+            
+        if verbose:
+            print(f'[{index}] average reward={average_reward:.6f}', flush=True)
+        return average_reward
+    
+    @staticmethod
+    def online_trials(env, planner, train_args, key, iteration, index, num_trials, 
+                      verbose, queue):
+        average_reward = 0.0
+        for trial in range(num_trials):
+            key, subkey = jax.random.split(key)
+            experiment_id = f'iter={iteration}, worker={index}, trial={trial}'
+            if queue is not None:
+                queue.put((
+                    experiment_id, 
+                    JaxPlannerDashboard.get_planner_info(planner), 
+                    subkey[0]
+                ))
+            
+            # initialize the online policy
+            policy = JaxOnlineController(
+                planner=planner, key=subkey, tqdm_position=index, **train_args)
+            
+            # evaluate the policy in the real environment
+            total_reward = 0.0
+            callback = None
+            state, _ = env.reset(seed=np.array(subkey)[0])
+            elapsed_time = 0.0
+            for step in range(env.horizon):
+                action = policy.sample_action(state)   
+                next_state, reward, terminated, truncated, _ = env.step(action)
+                total_reward += reward
+                done = terminated or truncated
+                state = next_state
+                callback = policy.callback
+                elapsed_time += callback['elapsed_time']
+                callback['iteration'] = step
+                callback['progress'] = int(100 * (step + 1.) / env.horizon)
+                callback['elapsed_time'] = elapsed_time
+                if queue is not None and queue.empty():
+                    queue.put((experiment_id, callback))
+                if done:
+                    break
+            
+            # update average reward
+            if verbose:
+                iters = None if callback is None else callback['iteration']
+                print(f'    [{index}] trial {trial + 1}, key={subkey[0]}, '
+                      f'reward={total_reward:.6f}, iters={iters}', flush=True)
+            average_reward += total_reward / num_trials
+        
+        if verbose:
+            print(f'[{index}] average reward={average_reward:.6f}', flush=True)
+        return average_reward            
         
     @staticmethod
     def objective_function(params: ParameterValues,
                            key: jax.random.PRNGKey,
-                           index: int,
-                           kwargs: Kwargs) -> Tuple[ParameterValues, float, int, int]:
+                           index: int, 
+                           iteration: int,
+                           kwargs: Kwargs, 
+                           queue: object) -> Tuple[ParameterValues, float, int, int]:
         '''A pickleable objective function to evaluate a single hyper-parameter 
         configuration.'''
         
@@ -192,28 +304,23 @@ class JaxParameterTuning:
         # initialize env for evaluation (need fresh copy to avoid concurrency)
         env = RDDLEnv(domain, instance, vectorized=True, enforce_action_constraints=False)
     
-        # initialize planning algorithm
+        # run planning algorithm
         planner = JaxBackpropPlanner(rddl=env.model, **planner_args)
-        klass = JaxOnlineController if online else JaxOfflineController
-        policy = klass(planner=planner, key=key, tqdm_position=index, **train_args)
-        
-        # perform training
-        average_reward = 0.0
-        for trial in range(num_trials):
-            key, subkey = jax.random.split(key)
-            total_reward = policy.evaluate(env, seed=np.array(subkey)[0])['mean']
-            if verbose:
-                iters = None if policy.callback is None else policy.callback['iteration']
-                print(f'    [{index}] trial {trial + 1}, key={subkey[0]}, '
-                      f'reward={total_reward:.6f}, iters={iters}', flush=True)
-            average_reward += total_reward / num_trials    
-        if verbose:
-            print(f'[{index}] average reward={average_reward:.6f}', flush=True)        
+        if online:
+            average_reward = JaxParameterTuning.online_trials(
+                env, planner, train_args, key, iteration, index, num_trials, 
+                verbose, queue
+            )
+        else:
+            average_reward = JaxParameterTuning.offline_trials(
+                env, planner, train_args, key, iteration, index, 
+                num_trials, verbose, queue
+            )
         
         pid = os.getpid()
         return params, average_reward, index, pid
     
-    def tune(self, key: int, log_file: str) -> ParameterValues:
+    def tune(self, key: int, log_file: str, show_dashboard: bool=False) -> ParameterValues:
         '''Tunes the hyper-parameters for Jax planner, returns the best found.'''
         
         self.summarize_hyperparameters()
@@ -223,6 +330,11 @@ class JaxParameterTuning:
             writer = csv.writer(file)
             writer.writerow(COLUMNS + list(self.hyperparams_dict.keys()))
         
+        # create a dash-board for visualizing experiment runs
+        if show_dashboard:
+            dashboard = JaxPlannerDashboard()
+            dashboard.launch()
+            
         # objective function auxiliary data
         obj_kwargs = {
             'hyperparams_dict': self.hyperparams_dict,
@@ -257,82 +369,101 @@ class JaxParameterTuning:
             suggested_params.append(probe) 
             acq_params.append(vars(optimizer.acquisition_function))
         
-        # start multiprocess evaluation
-        worker_ids = list(range(num_workers))
-        best_params, best_target = None, -np.inf
-        key = jax.random.PRNGKey(key)
-        start_time = time.time()
-        
-        for it in range(self.gp_iters): 
+        with multiprocessing.Manager() as manager:
             
-            # check if there is enough time left for another iteration
-            elapsed = time.time() - start_time
-            if elapsed >= self.timeout_tuning:
-                print(f'global time limit reached at iteration {it}, aborting')
-                break
+            # queue and parallel thread for handing render events
+            if show_dashboard:
+                queue = manager.Queue()
+                dashboard_thread = threading.Thread(
+                    target=JaxParameterTuning.queue_listener,
+                    args=(queue, dashboard)
+                )
+                dashboard_thread.start()
+            else:
+                queue = None
             
-            # continue with next iteration
-            print('\n' + '*' * 50 + 
-                  f'\n[{datetime.timedelta(seconds=elapsed)}] ' + 
-                  f'starting iteration {it + 1}' + 
-                  '\n' + '*' * 50)
-            key, *subkeys = jax.random.split(key, num=num_workers + 1)
-            rows = [None] * num_workers
-            old_best_target = best_target
+            # start multiprocess evaluation
+            worker_ids = list(range(num_workers))
+            best_params, best_target = None, -np.inf
+            key = jax.random.PRNGKey(key)
+            start_time = time.time()
             
-            # create worker pool: note each iteration must wait for all workers
-            # to finish before moving to the next
-            with get_context(self.pool_context).Pool(processes=num_workers) as pool:
+            for it in range(self.gp_iters): 
                 
-                # assign jobs to worker pool
-                results = [
-                    pool.apply_async(JaxParameterTuning.objective_function,
-                                     obj_args + (obj_kwargs,))
-                    for obj_args in zip(suggested_params, subkeys, worker_ids)
-                ]
-            
-                # wait for all workers to complete
-                while results:
-                    time.sleep(self.poll_frequency)
-                    
-                    # determine which jobs have completed
-                    jobs_done = []
-                    for (i, candidate) in enumerate(results):
-                        if candidate.ready():
-                            jobs_done.append(i)
-                    
-                    # get result from completed jobs
-                    for i in jobs_done[::-1]:
-                        
-                        # extract and register the new evaluation
-                        params, target, index, pid = results.pop(i).get()
-                        optimizer.register(params, target)
-                        
-                        # update acquisition function and suggest a new point
-                        suggested_params[index] = optimizer.suggest()
-                        old_acq_params = acq_params[index]
-                        acq_params[index] = vars(optimizer.acquisition_function)
-                        
-                        # transform suggestion back to natural space
-                        config_params = JaxParameterTuning.search_to_config_params(
-                            self.hyperparams_dict, params)
-                        
-                        # update the best suggestion so far
-                        if target > best_target:
-                            best_params, best_target = config_params, target
-                        
-                        rows[index] = [pid, index, it, target,
-                                       best_target, old_acq_params] + \
-                                       list(config_params.values())
-            
-            # print best parameter if found
-            if best_target > old_best_target:
-                print(f'* found new best average reward {best_target:.6f}')
+                # check if there is enough time left for another iteration
+                elapsed = time.time() - start_time
+                if elapsed >= self.timeout_tuning:
+                    print(f'global time limit reached at iteration {it}, aborting')
+                    break
                 
-            # write results of all processes in current iteration to file
-            with open(log_file, 'a', newline='') as file:
-                writer = csv.writer(file)
-                writer.writerows(rows)
+                # continue with next iteration
+                print('\n' + '*' * 80 + 
+                      f'\n[{datetime.timedelta(seconds=elapsed)}] ' + 
+                      f'starting iteration {it + 1}' + 
+                      '\n' + '*' * 80)
+                key, *subkeys = jax.random.split(key, num=num_workers + 1)
+                rows = [None] * num_workers
+                old_best_target = best_target
+                
+                # create worker pool: note each iteration must wait for all workers
+                # to finish before moving to the next
+                with multiprocessing.get_context(
+                    self.pool_context).Pool(processes=num_workers) as pool:
+                    
+                    # assign jobs to worker pool
+                    results = [
+                        pool.apply_async(JaxParameterTuning.objective_function,
+                                         obj_args + (it, obj_kwargs, queue))
+                        for obj_args in zip(suggested_params, subkeys, worker_ids)
+                    ]
+                
+                    # wait for all workers to complete
+                    while results:
+                        time.sleep(self.poll_frequency)
+                        
+                        # determine which jobs have completed
+                        jobs_done = []
+                        for (i, candidate) in enumerate(results):
+                            if candidate.ready():
+                                jobs_done.append(i)
+                        
+                        # get result from completed jobs
+                        for i in jobs_done[::-1]:
+                            
+                            # extract and register the new evaluation
+                            params, target, index, pid = results.pop(i).get()
+                            optimizer.register(params, target)
+                            
+                            # update acquisition function and suggest a new point
+                            suggested_params[index] = optimizer.suggest()
+                            old_acq_params = acq_params[index]
+                            acq_params[index] = vars(optimizer.acquisition_function)
+                            
+                            # transform suggestion back to natural space
+                            config_params = JaxParameterTuning.search_to_config_params(
+                                self.hyperparams_dict, params)
+                            
+                            # update the best suggestion so far
+                            if target > best_target:
+                                best_params, best_target = config_params, target
+                            
+                            rows[index] = [pid, index, it, target,
+                                           best_target, old_acq_params] + \
+                                           list(config_params.values())
+                
+                # print best parameter if found
+                if best_target > old_best_target:
+                    print(f'* found new best average reward {best_target:.6f}')
+                    
+                # write results of all processes in current iteration to file
+                with open(log_file, 'a', newline='') as file:
+                    writer = csv.writer(file)
+                    writer.writerows(rows)
+            
+            # stop the queue listener thread
+            if show_dashboard:
+                queue.put(None) 
+                dashboard_thread.join()
         
         # print summary of results
         elapsed = time.time() - start_time
