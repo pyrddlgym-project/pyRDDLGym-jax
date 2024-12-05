@@ -5,7 +5,7 @@ import math
 import numpy as np
 import time
 import threading
-from typing import Any, Dict, Optional, TYPE_CHECKING
+from typing import Any, Dict, Optional, Tuple, TYPE_CHECKING
 import warnings
 import webbrowser
 
@@ -38,7 +38,11 @@ PROGRESS_FOR_NEXT_RETURN_DIST = 2
 PROGRESS_FOR_NEXT_POLICY_DIST = 10
 REWARD_ERROR_DIST_SUBPLOTS = 20
 MODEL_STATE_ERROR_HEIGHT = 300
+TUNING_GP_HEIGHT = 400
 LOGO_FILE = os.path.join('assets', 'logo.png')
+
+PLOT_AXES_FONT_SIZE = 11
+EXPERIMENT_ENTRY_FONT_SIZE = 14
 
     
 class JaxPlannerDashboard:
@@ -72,6 +76,9 @@ class JaxPlannerDashboard:
         self.train_state_fluents = {}
         self.test_state_fluents = {}
         
+        self.tuning_gp_heatmaps = []
+        self.tuning_gp_update = False
+        
         # ======================================================================
         # CREATE PAGE LAYOUT
         # ======================================================================
@@ -92,7 +99,7 @@ class JaxPlannerDashboard:
                     dbc.Card(dbc.CardBody(
                         B('Experiment ID'), style={"padding": "0"}
                     ), className="border-0 bg-transparent"),
-                ], width=1),
+                ], width=2),
                 dbc.Col([
                     dbc.Card(dbc.CardBody(
                         B('Seed'), style={"padding": "0"}
@@ -107,7 +114,7 @@ class JaxPlannerDashboard:
                     dbc.Card(dbc.CardBody(
                         B('Duration'), style={"padding": "0"}
                     ), className="border-0 bg-transparent")
-                ], width=2),
+                ], width=1),
                 dbc.Col([
                     dbc.Card(dbc.CardBody(
                         B('Best Return'), style={"padding": "0"}
@@ -150,7 +157,7 @@ class JaxPlannerDashboard:
                                 dbc.CardBody(id, style={"padding": "0"}),
                                 className="border-0 bg-transparent"
                             )
-                        ], width=1),
+                        ], width=2),
                         dbc.Col([
                             dbc.Card(
                                 dbc.CardBody(self.seeds[id], style={"padding": "0"}),
@@ -168,7 +175,7 @@ class JaxPlannerDashboard:
                                 dbc.CardBody(f'{self.duration[id]:.3f}s', style={"padding": "0"}),
                                 className="border-0 bg-transparent"
                             ),
-                        ], width=2),
+                        ], width=1),
                         dbc.Col([
                             dbc.Card(
                                 dbc.CardBody(f'{(self.test_return[id] or [np.nan])[-1]:.3f}',
@@ -251,7 +258,8 @@ class JaxPlannerDashboard:
                 dbc.Col([
                     dbc.Card([
                         dbc.CardBody([
-                            Div(create_experiment_table(0), id='experiment-table'),
+                            Div(create_experiment_table(0), id='experiment-table',
+                                style={'fontSize': f'{EXPERIMENT_ENTRY_FONT_SIZE}px'}),
                             dbc.Pagination(id='experiment-pagination',
                                            active_page=1, max_value=1, size="sm")
                         ], style={'padding': '10px'})
@@ -303,8 +311,8 @@ class JaxPlannerDashboard:
                                     dbc.Col([
                                         dbc.Card([
                                             dbc.DropdownMenu(
-                                                [], 
-                                                label="RDDL Expression", 
+                                                [],
+                                                label="RDDL Expression",
                                                 id='model-params-dropdown'
                                             ),
                                             Graph(id='model-params-graph')
@@ -331,8 +339,8 @@ class JaxPlannerDashboard:
                                     dbc.Col([
                                         dbc.Card([
                                             dbc.DropdownMenu(
-                                                [], 
-                                                label="State-Fluent", 
+                                                [],
+                                                label="State-Fluent",
                                                 id='model-errors-state-dropdown'
                                             ),
                                             Graph(id='model-errors-state-graph')
@@ -352,7 +360,17 @@ class JaxPlannerDashboard:
                                 ]),
                             ]), className="border-0 bg-transparent"
                         ), label="Debug", tab_id='tab-debug'
-                        )
+                        ),
+                        
+                        # tuning
+                        dbc.Tab(dbc.Card(
+                            dbc.CardBody([
+                                dbc.Row([
+                                    dbc.Col(Graph(id='tuning-gp-graph'))
+                                ])
+                            ]), className="border-0 bg-transparent"
+                        ), label="Tuning", tab_id='tab-tuning'
+                        ),
                     ], id='tabs-main')
                 ], width=12)
             ]),
@@ -489,7 +507,7 @@ class JaxPlannerDashboard:
                 title=dict(text="Train Return"),
                 xaxis=dict(title=dict(text="Training Iteration")),
                 yaxis=dict(title=dict(text="Cumulative Reward")),
-                font=dict(size=11),
+                font=dict(size=PLOT_AXES_FONT_SIZE),
                 legend=dict(bgcolor='rgba(0,0,0,0)'),
                 template="plotly_white"
             )
@@ -516,7 +534,7 @@ class JaxPlannerDashboard:
                 title=dict(text="Test Return"),
                 xaxis=dict(title=dict(text="Training Iteration")),
                 yaxis=dict(title=dict(text="Cumulative Reward")),
-                font=dict(size=11),
+                font=dict(size=PLOT_AXES_FONT_SIZE),
                 legend=dict(bgcolor='rgba(0,0,0,0)'),
                 template="plotly_white"
             )
@@ -550,7 +568,7 @@ class JaxPlannerDashboard:
                         title=dict(text="Distribution of Return"),
                         xaxis=dict(title=dict(text="Training Iteration")),
                         yaxis=dict(title=dict(text="Cumulative Reward")),
-                        font=dict(size=11),
+                        font=dict(size=PLOT_AXES_FONT_SIZE),
                         showlegend=False,
                         yaxis_showgrid=False, yaxis_zeroline=False,
                         template="plotly_white"
@@ -589,21 +607,21 @@ class JaxPlannerDashboard:
                             z=action_values,
                             x=np.arange(action_values.shape[1]),
                             y=np.arange(action_values.shape[0]),
-                            colorscale='Blues', colorbar_x=0.45, 
+                            colorscale='Blues', colorbar_x=0.45,
                             colorbar_len=0.8 / num_plots,
                             colorbar_y=1 - (i + 0.5) / num_plots
                         ), row=i + 1, col=1)
                         fig.add_trace(go.Heatmap(
                             z=action_errors,
                             x=np.arange(action_errors.shape[1]),
-                            y=np.arange(action_errors.shape[0]), 
+                            y=np.arange(action_errors.shape[0]),
                             colorscale='Reds', colorbar_len=0.8 / num_plots,
                             colorbar_y=1 - (i + 0.5) / num_plots
                         ), row=i + 1, col=2)
                     fig.update_layout(
                         title="Values of Action-Fluents",
                         xaxis=dict(title=dict(text="Decision Epoch")),
-                        font=dict(size=11),
+                        font=dict(size=PLOT_AXES_FONT_SIZE),
                         height=ACTION_HEATMAP_HEIGHT * num_plots,
                         showlegend=False,
                         template="plotly_white"
@@ -662,7 +680,7 @@ class JaxPlannerDashboard:
                         orientation='h', side='positive', width=3, points=False)
                     fig.update_layout(
                         title="Distribution of Network Weight Parameters",
-                        font=dict(size=11),
+                        font=dict(size=PLOT_AXES_FONT_SIZE),
                         showlegend=False,
                         xaxis_showgrid=False, xaxis_zeroline=False,
                         height=POLICY_DIST_HEIGHT * n_rows,
@@ -718,7 +736,7 @@ class JaxPlannerDashboard:
             for (row, checked) in self.checked.copy().items():
                 if checked:
                     fig.add_trace(go.Scatter(
-                        x=self.xticks[row], 
+                        x=self.xticks[row],
                         y=self.relaxed_exprs_values[row][expr_id],
                         mode='lines+markers',
                         marker=dict(size=2), line=dict(width=2)
@@ -727,7 +745,7 @@ class JaxPlannerDashboard:
                         title=dict(text=f"Model Parameters for Expression {expr_id}"),
                         xaxis=dict(title=dict(text="Training Iteration")),
                         yaxis=dict(title=dict(text="Parameter Value")),
-                        font=dict(size=11),
+                        font=dict(size=PLOT_AXES_FONT_SIZE),
                         legend=dict(bgcolor='rgba(0,0,0,0)'),
                         template="plotly_white"
                     )
@@ -755,7 +773,7 @@ class JaxPlannerDashboard:
                     for epoch in range(0, num_epochs, step):
                         fig.add_trace(go.Violin(
                             y=self.train_reward_dist[row][:, epoch], x0=epoch,
-                            side='negative', line_color='red', 
+                            side='negative', line_color='red',
                             name=f'Train Epoch {epoch + 1}'
                         ))
                         fig.add_trace(go.Violin(
@@ -768,7 +786,7 @@ class JaxPlannerDashboard:
                         title=dict(text="Distribution of Reward in Relaxed Model vs True Model"),
                         xaxis=dict(title=dict(text="Decision Epoch")),
                         yaxis=dict(title=dict(text="Reward")),
-                        font=dict(size=11),
+                        font=dict(size=PLOT_AXES_FONT_SIZE),
                         violingap=0, violinmode='overlay', showlegend=False,
                         legend=dict(bgcolor='rgba(0,0,0,0)'),
                         template="plotly_white"
@@ -790,7 +808,7 @@ class JaxPlannerDashboard:
                     items = []
                     for name in self.train_state_fluents[row]:
                         items.append(dbc.DropdownMenuItem(
-                            [name], 
+                            [name],
                             id={'type': 'state-fluent-dropdown-item', 'index': name}
                         ))
                     break
@@ -838,7 +856,7 @@ class JaxPlannerDashboard:
                         for epoch in range(0, num_epochs, step):
                             fig.add_trace(go.Violin(
                                 y=train_values[:, epoch, istate], x0=epoch,
-                                side='negative', line_color='red', 
+                                side='negative', line_color='red',
                                 name=f'Train Epoch {epoch + 1}'
                             ), row=istate + 1, col=1)
                             fig.add_trace(go.Violin(
@@ -852,7 +870,7 @@ class JaxPlannerDashboard:
                                          f"in Relaxed Model vs True Model")),
                         xaxis=dict(title=dict(text="Decision Epoch")),
                         yaxis=dict(title=dict(text="State-Fluent Value")),
-                        font=dict(size=11),
+                        font=dict(size=PLOT_AXES_FONT_SIZE),
                         height=MODEL_STATE_ERROR_HEIGHT * num_states,
                         violingap=0, violinmode='overlay', showlegend=False,
                         legend=dict(bgcolor='rgba(0,0,0,0)'),
@@ -880,6 +898,46 @@ class JaxPlannerDashboard:
                     break            
             return result
         
+        # update the tuning result
+        @app.callback(
+            Output('tuning-gp-graph', 'figure'),
+            [Input('interval', 'n_intervals'),
+             Input('tabs-main', 'active_tab')]
+        )
+        def update_tuning_gp_graph(n, active_tab):
+            if (not self.tuning_gp_update) or active_tab != 'tab-tuning':
+                return dash.no_update
+            fig = make_subplots(
+                rows=len(self.tuning_gp_heatmaps), cols=2,
+                horizontal_spacing=0.15
+            )
+            titles = []
+            for (i, (p1, p2, p1v, p2v, mean, std)) in enumerate(self.tuning_gp_heatmaps):
+                fig.add_trace(go.Heatmap(
+                    z=mean, x=p1v, y=p2v, colorscale='Blues', showscale=False),
+                    row=i + 1, col=1
+                )
+                fig.add_trace(go.Heatmap(
+                    z=std, x=p1v, y=p2v, colorscale='Reds', showscale=False),
+                    row=i + 1, col=2
+                )
+                fig.update_xaxes(title_text=p1, row=i + 1, col=1)
+                fig.update_yaxes(title_text=p2, row=i + 1, col=1)
+                fig.update_xaxes(title_text=p1, row=i + 1, col=2)
+                fig.update_yaxes(title_text=p2, row=i + 1, col=2)
+                titles.append(f'Posterior Mean for {p1} vs {p2}')
+                titles.append(f'Posterior Uncertainty for {p1} vs {p2}')
+            fig.update_annotations(text=titles)
+            fig.update_layout(
+                title="Posterior Mean and Uncertainty of Gaussian Process",
+                font=dict(size=PLOT_AXES_FONT_SIZE),
+                height=TUNING_GP_HEIGHT * len(self.tuning_gp_heatmaps),
+                showlegend=False,
+                template="plotly_white"
+            )       
+            self.tuning_gp_update = False
+            return fig
+            
         self.app = app
     
     # ==========================================================================
@@ -1012,3 +1070,37 @@ class JaxPlannerDashboard:
         self.progress[experiment_id] = progress
         self.warnings = None
     
+    def update_tuning(self, optimizer: object,
+                      bounds: Dict[str, Tuple[float, float]]) -> None:
+        '''Updates the hyper-parameter tuning plots.'''
+        self.tuning_gp_heatmaps = []
+        self.tuning_gp_update = False
+        if not optimizer.res:
+            return
+        for (i1, param1) in enumerate(bounds):
+            for (i2, param2) in enumerate(bounds):
+                if i1 < i2:
+                    
+                    # Generate a grid for visualization
+                    p1_values = np.linspace(*bounds[param1], 100)
+                    p2_values = np.linspace(*bounds[param2], 100)
+                    P1, P2 = np.meshgrid(p1_values, p2_values)
+                    
+                    # Predict the mean and deviation of the surrogate model
+                    fixed_params = max(
+                        optimizer.res,
+                        key=lambda x: x['target'])['params'].copy()
+                    fixed_params.pop(param1)
+                    fixed_params.pop(param2)
+                    param_grid = []
+                    for p1, p2 in zip(np.ravel(P1), np.ravel(P2)):
+                        params = {param1: p1, param2: p2}
+                        params.update(fixed_params)
+                        param_grid.append([params[key] for key in bounds])
+                    param_grid = np.array(param_grid)
+                    mean, std = optimizer._gp.predict(param_grid, return_std=True)
+                    mean = mean.reshape(P1.shape)
+                    std = std.reshape(P1.shape)
+                    self.tuning_gp_heatmaps.append(
+                        (param1, param2, p1_values, p2_values, mean, std))
+        self.tuning_gp_update = True
