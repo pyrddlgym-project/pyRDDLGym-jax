@@ -5,7 +5,7 @@ import math
 import numpy as np
 import time
 import threading
-from typing import Any, Dict, Optional, Tuple, TYPE_CHECKING
+from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
 import warnings
 import webbrowser
 
@@ -77,6 +77,7 @@ class JaxPlannerDashboard:
         self.test_state_fluents = {}
         
         self.tuning_gp_heatmaps = None
+        self.tuning_gp_targets = []
         self.tuning_gp_update = False
         
         # ======================================================================
@@ -365,6 +366,14 @@ class JaxPlannerDashboard:
                         # tuning
                         dbc.Tab(dbc.Card(
                             dbc.CardBody([
+                                dbc.Row([
+                                    dbc.Col(Graph(id='tuning-target-graph'))
+                                ]),
+                                dbc.Row([
+                                    dbc.Col([
+                                        Hr(className='my-4')
+                                    ])
+                                ]),
                                 dbc.Row([
                                     dbc.Col(Graph(id='tuning-gp-mean-graph'))
                                 ]),
@@ -903,7 +912,8 @@ class JaxPlannerDashboard:
         
         # update the tuning result
         @app.callback(
-            [Output('tuning-gp-mean-graph', 'figure'),
+            [Output('tuning-target-graph', 'figure'),
+             Output('tuning-gp-mean-graph', 'figure'),
              Output('tuning-gp-unc-graph', 'figure')],
             [Input('interval', 'n_intervals'),
              Input('tabs-main', 'active_tab')]
@@ -911,6 +921,23 @@ class JaxPlannerDashboard:
         def update_tuning_gp_graph(n, active_tab):
             if not self.tuning_gp_update: return dash.no_update
             
+            # tuning target trend
+            fig0 = go.Figure()
+            fig0.add_trace(go.Scatter(
+                x=np.arange(len(self.tuning_gp_targets)), y=self.tuning_gp_targets,
+                mode='lines+markers',
+                marker=dict(size=2), line=dict(width=2)
+            ))
+            fig0.update_layout(
+                title=dict(text="Target Values"),
+                xaxis=dict(title=dict(text="Trial Point")),
+                yaxis=dict(title=dict(text="Target Value")),
+                font=dict(size=PLOT_AXES_FONT_SIZE),
+                legend=dict(bgcolor='rgba(0,0,0,0)'),
+                template="plotly_white"
+            )
+            
+            # tuning posterior plot
             num_cols = len(self.tuning_gp_heatmaps)
             num_rows = len(self.tuning_gp_heatmaps[0])            
             fig1 = make_subplots(rows=num_rows, cols=num_cols)
@@ -924,19 +951,10 @@ class JaxPlannerDashboard:
                     fig2.add_trace(go.Heatmap(
                         z=std, x=p1v, y=p2v, colorscale='Reds', showscale=False
                     ), row=row + 1, col=col + 1)       
-                    if row == len(data_col) - 1: 
-                        fig1.update_xaxes(title_text=p1, row=row + 1, col=col + 1)
-                        fig2.update_xaxes(title_text=p1, row=row + 1, col=col + 1)
-                    else:
-                        fig1.update_xaxes(title_text='', row=row + 1, col=col + 1)
-                        fig2.update_xaxes(title_text='', row=row + 1, col=col + 1)
-                    if col == 0:
-                        fig1.update_yaxes(title_text=p2, row=row + 1, col=col + 1)
-                        fig2.update_yaxes(title_text=p2, row=row + 1, col=col + 1)   
-                    else:
-                        fig1.update_yaxes(title_text='', row=row + 1, col=col + 1)
-                        fig2.update_yaxes(title_text='', row=row + 1, col=col + 1)   
-                       
+                    fig1.update_xaxes(title_text=p1, row=row + 1, col=col + 1)
+                    fig2.update_xaxes(title_text=p1, row=row + 1, col=col + 1)
+                    fig1.update_yaxes(title_text=p2, row=row + 1, col=col + 1)
+                    fig2.update_yaxes(title_text=p2, row=row + 1, col=col + 1)                          
             fig1.update_layout(
                 title="Posterior Mean of Gaussian Process",
                 font=dict(size=PLOT_AXES_FONT_SIZE),
@@ -953,7 +971,7 @@ class JaxPlannerDashboard:
             )
                      
             self.tuning_gp_update = False
-            return (fig1, fig2)
+            return (fig0, fig1, fig2)
             
         self.app = app
     
@@ -1088,12 +1106,16 @@ class JaxPlannerDashboard:
         self.warnings = None
     
     def update_tuning(self, optimizer: object,
-                      bounds: Dict[str, Tuple[float, float]]) -> None:
+                      bounds: Dict[str, Tuple[float, float]],
+                      iteration_info: List[List[Any]]) -> None:
         '''Updates the hyper-parameter tuning plots.'''
+        
         self.tuning_gp_heatmaps = []
         self.tuning_gp_update = False
-        if not optimizer.res:
-            return
+        if not optimizer.res: return
+        
+        self.tuning_gp_targets.extend((x[3] for x in iteration_info))
+        
         for (i1, param1) in enumerate(bounds):
             self.tuning_gp_heatmaps.append([])
             for (i2, param2) in enumerate(bounds):
