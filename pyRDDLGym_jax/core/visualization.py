@@ -38,7 +38,7 @@ PROGRESS_FOR_NEXT_RETURN_DIST = 2
 PROGRESS_FOR_NEXT_POLICY_DIST = 10
 REWARD_ERROR_DIST_SUBPLOTS = 20
 MODEL_STATE_ERROR_HEIGHT = 300
-TUNING_GP_HEIGHT = 400
+TUNING_GP_HEIGHT = 300
 LOGO_FILE = os.path.join('assets', 'logo.png')
 
 PLOT_AXES_FONT_SIZE = 11
@@ -76,7 +76,7 @@ class JaxPlannerDashboard:
         self.train_state_fluents = {}
         self.test_state_fluents = {}
         
-        self.tuning_gp_heatmaps = []
+        self.tuning_gp_heatmaps = None
         self.tuning_gp_update = False
         
         # ======================================================================
@@ -366,7 +366,10 @@ class JaxPlannerDashboard:
                         dbc.Tab(dbc.Card(
                             dbc.CardBody([
                                 dbc.Row([
-                                    dbc.Col(Graph(id='tuning-gp-graph'))
+                                    dbc.Col(Graph(id='tuning-gp-mean-graph'))
+                                ]),
+                                dbc.Row([
+                                    dbc.Col(Graph(id='tuning-gp-unc-graph'))
                                 ])
                             ]), className="border-0 bg-transparent"
                         ), label="Tuning", tab_id='tab-tuning'
@@ -900,43 +903,57 @@ class JaxPlannerDashboard:
         
         # update the tuning result
         @app.callback(
-            Output('tuning-gp-graph', 'figure'),
+            [Output('tuning-gp-mean-graph', 'figure'),
+             Output('tuning-gp-unc-graph', 'figure')],
             [Input('interval', 'n_intervals'),
              Input('tabs-main', 'active_tab')]
         )
         def update_tuning_gp_graph(n, active_tab):
-            if (not self.tuning_gp_update) or active_tab != 'tab-tuning':
-                return dash.no_update
-            fig = make_subplots(
-                rows=len(self.tuning_gp_heatmaps), cols=2,
-                horizontal_spacing=0.15
-            )
-            titles = []
-            for (i, (p1, p2, p1v, p2v, mean, std)) in enumerate(self.tuning_gp_heatmaps):
-                fig.add_trace(go.Heatmap(
-                    z=mean, x=p1v, y=p2v, colorscale='Blues', showscale=False),
-                    row=i + 1, col=1
-                )
-                fig.add_trace(go.Heatmap(
-                    z=std, x=p1v, y=p2v, colorscale='Reds', showscale=False),
-                    row=i + 1, col=2
-                )
-                fig.update_xaxes(title_text=p1, row=i + 1, col=1)
-                fig.update_yaxes(title_text=p2, row=i + 1, col=1)
-                fig.update_xaxes(title_text=p1, row=i + 1, col=2)
-                fig.update_yaxes(title_text=p2, row=i + 1, col=2)
-                titles.append(f'Posterior Mean for {p1} vs {p2}')
-                titles.append(f'Posterior Uncertainty for {p1} vs {p2}')
-            fig.update_annotations(text=titles)
-            fig.update_layout(
-                title="Posterior Mean and Uncertainty of Gaussian Process",
+            if not self.tuning_gp_update: return dash.no_update
+            
+            num_cols = len(self.tuning_gp_heatmaps)
+            num_rows = len(self.tuning_gp_heatmaps[0])            
+            fig1 = make_subplots(rows=num_rows, cols=num_cols)
+            fig2 = make_subplots(rows=num_rows, cols=num_cols)            
+            for col, data_col in enumerate(self.tuning_gp_heatmaps):
+                for row, data in enumerate(data_col):
+                    p1, p2, p1v, p2v, mean, std = data
+                    fig1.add_trace(go.Heatmap(
+                        z=mean, x=p1v, y=p2v, colorscale='Blues', showscale=False
+                    ), row=row + 1, col=col + 1)
+                    fig2.add_trace(go.Heatmap(
+                        z=std, x=p1v, y=p2v, colorscale='Reds', showscale=False
+                    ), row=row + 1, col=col + 1)       
+                    if row == len(data_col) - 1: 
+                        fig1.update_xaxes(title_text=p1, row=row + 1, col=col + 1)
+                        fig2.update_xaxes(title_text=p1, row=row + 1, col=col + 1)
+                    else:
+                        fig1.update_xaxes(title_text='', row=row + 1, col=col + 1)
+                        fig2.update_xaxes(title_text='', row=row + 1, col=col + 1)
+                    if col == 0:
+                        fig1.update_yaxes(title_text=p2, row=row + 1, col=col + 1)
+                        fig2.update_yaxes(title_text=p2, row=row + 1, col=col + 1)   
+                    else:
+                        fig1.update_yaxes(title_text='', row=row + 1, col=col + 1)
+                        fig2.update_yaxes(title_text='', row=row + 1, col=col + 1)   
+                       
+            fig1.update_layout(
+                title="Posterior Mean of Gaussian Process",
                 font=dict(size=PLOT_AXES_FONT_SIZE),
-                height=TUNING_GP_HEIGHT * len(self.tuning_gp_heatmaps),
+                height=TUNING_GP_HEIGHT * num_rows,
                 showlegend=False,
                 template="plotly_white"
             )       
+            fig2.update_layout(
+                title="Posterior Uncertainty of Gaussian Process",
+                font=dict(size=PLOT_AXES_FONT_SIZE),
+                height=TUNING_GP_HEIGHT * num_rows,
+                showlegend=False,
+                template="plotly_white"
+            )
+                     
             self.tuning_gp_update = False
-            return fig
+            return (fig1, fig2)
             
         self.app = app
     
@@ -1078,8 +1095,9 @@ class JaxPlannerDashboard:
         if not optimizer.res:
             return
         for (i1, param1) in enumerate(bounds):
+            self.tuning_gp_heatmaps.append([])
             for (i2, param2) in enumerate(bounds):
-                if i1 < i2:
+                if i2 > i1:
                     
                     # Generate a grid for visualization
                     p1_values = np.linspace(*bounds[param1], 100)
@@ -1101,6 +1119,6 @@ class JaxPlannerDashboard:
                     mean, std = optimizer._gp.predict(param_grid, return_std=True)
                     mean = mean.reshape(P1.shape)
                     std = std.reshape(P1.shape)
-                    self.tuning_gp_heatmaps.append(
+                    self.tuning_gp_heatmaps[-1].append(
                         (param1, param2, p1_values, p2_values, mean, std))
         self.tuning_gp_update = True

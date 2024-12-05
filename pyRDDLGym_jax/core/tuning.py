@@ -119,7 +119,7 @@ class JaxParameterTuning:
             gp_init_kwargs = {}
         self.gp_init_kwargs = gp_init_kwargs
         if gp_params is None:
-            gp_params = {'n_restarts_optimizer': 10}
+            gp_params = {'n_restarts_optimizer': 20}
         self.gp_params = gp_params
         if acquisition is None:
             num_samples = self.gp_iters * self.num_workers
