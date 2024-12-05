@@ -900,9 +900,20 @@ class JaxPlannerDashboard:
         dash_thread = threading.Thread(target=run_dash)
         dash_thread.daemon = daemon
         dash_thread.start()
+    
+    @staticmethod
+    def get_planner_info(planner: 'JaxBackpropPlanner') -> Dict[str, Any]:
+        '''Some additional info directly from the planner that is required by
+        the dashboard.'''        
+        return {
+            'rddl': planner.rddl,
+            'string': str(planner),
+            'model_parameter_info': planner.compiled.model_parameter_info(),
+            'trace_info': planner.compiled.traced
+        }
         
     def register_experiment(self, experiment_id: str,
-                            planner: 'JaxBackpropPlanner',
+                            planner_info: Dict[str, Any],
                             key: Optional[int]=None) -> str:
         '''Starts monitoring a new experiment.'''
         
@@ -920,8 +931,8 @@ class JaxPlannerDashboard:
         self.status[experiment_id] = 'N/A'  
         self.progress[experiment_id] = 0
         self.warnings = []
-        self.rddl[experiment_id] = planner.rddl
-        self.planner_info[experiment_id] = str(planner)        
+        self.rddl[experiment_id] = planner_info['rddl']
+        self.planner_info[experiment_id] = planner_info['string']        
         self.checked[experiment_id] = False
         
         self.xticks[experiment_id] = []
@@ -936,8 +947,8 @@ class JaxPlannerDashboard:
         decompiler = RDDLDecompiler()
         self.relaxed_exprs[experiment_id] = {}
         self.relaxed_exprs_values[experiment_id] = {}
-        for info in planner.compiled.model_parameter_info().values():
-            expr = planner.compiled.traced.lookup(info['id'])
+        for info in planner_info['model_parameter_info'].values():
+            expr = planner_info['trace_info'].lookup(info['id'])
             compiled_expr = decompiler.decompile_expr(expr)
             self.relaxed_exprs[experiment_id][info['id']] = compiled_expr
             self.relaxed_exprs_values[experiment_id][info['id']] = []
