@@ -38,7 +38,6 @@ PROGRESS_FOR_NEXT_RETURN_DIST = 2
 PROGRESS_FOR_NEXT_POLICY_DIST = 10
 REWARD_ERROR_DIST_SUBPLOTS = 20
 MODEL_STATE_ERROR_HEIGHT = 300
-TUNING_GP_HEIGHT = 300
 LOGO_FILE = os.path.join('assets', 'logo.png')
 
 PLOT_AXES_FONT_SIZE = 11
@@ -209,6 +208,7 @@ class JaxPlannerDashboard:
             Store(id='refresh-interval'),
             Store(id='model-params-dropdown-expr', data=''),
             Store(id='model-errors-state-dropdown-selected', data=''),
+            Div(id='viewport-sizer', style={'display': 'none'}),
             
             # navbar
             dbc.Navbar(
@@ -395,6 +395,20 @@ class JaxPlannerDashboard:
             ),
             Div(id='trigger-experiment-check', style={'display': 'none'})
         ], fluid=True, className="dbc")
+        
+        # JavaScript to retrieve the viewport dimensions 
+        app.clientside_callback( 
+            """
+            function(n_intervals) { 
+                return { 
+                    'height': window.innerHeight, 
+                    'width': window.innerWidth 
+                }; 
+            } 
+            """, 
+            Output('viewport-sizer', 'children'), 
+            Input('interval', 'n_intervals')
+        )
         
         # ======================================================================
         # CREATE EVENTS
@@ -916,10 +930,12 @@ class JaxPlannerDashboard:
              Output('tuning-gp-mean-graph', 'figure'),
              Output('tuning-gp-unc-graph', 'figure')],
             [Input('interval', 'n_intervals'),
-             Input('tabs-main', 'active_tab')]
+             Input('tabs-main', 'active_tab'),
+             Input('viewport-sizer', 'children')]
         )
-        def update_tuning_gp_graph(n, active_tab):
+        def update_tuning_gp_graph(n, active_tab, viewport_size):
             if not self.tuning_gp_update: return dash.no_update
+            if not viewport_size: return dash.no_update
             
             # tuning target trend
             fig0 = go.Figure()
@@ -954,18 +970,23 @@ class JaxPlannerDashboard:
                     fig1.update_xaxes(title_text=p1, row=row + 1, col=col + 1)
                     fig2.update_xaxes(title_text=p1, row=row + 1, col=col + 1)
                     fig1.update_yaxes(title_text=p2, row=row + 1, col=col + 1)
-                    fig2.update_yaxes(title_text=p2, row=row + 1, col=col + 1)                          
+                    fig2.update_yaxes(title_text=p2, row=row + 1, col=col + 1)
+            subplot_width = viewport_size['width'] // num_cols                                    
             fig1.update_layout(
                 title="Posterior Mean of Gaussian Process",
                 font=dict(size=PLOT_AXES_FONT_SIZE),
-                height=TUNING_GP_HEIGHT * num_rows,
+                height=subplot_width * num_rows,
+                width=subplot_width * num_cols,
+                autosize=False,
                 showlegend=False,
                 template="plotly_white"
             )       
             fig2.update_layout(
                 title="Posterior Uncertainty of Gaussian Process",
                 font=dict(size=PLOT_AXES_FONT_SIZE),
-                height=TUNING_GP_HEIGHT * num_rows,
+                height=subplot_width * num_rows,
+                width=subplot_width * num_cols,
+                autosize=False,
                 showlegend=False,
                 template="plotly_white"
             )
