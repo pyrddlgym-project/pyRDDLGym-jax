@@ -459,6 +459,10 @@ class JaxParameterTuning:
                 with open(log_file, 'a', newline='') as file:
                     writer = csv.writer(file)
                     writer.writerows(rows)
+                    
+                # update the dashboard tuning
+                if show_dashboard:
+                    dashboard.update_tuning(optimizer, hyperparams_bounds)
             
             # stop the queue listener thread
             if show_dashboard:
