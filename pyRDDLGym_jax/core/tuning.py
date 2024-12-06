@@ -320,6 +320,10 @@ class JaxParameterTuning:
         pid = os.getpid()
         return params, average_reward, index, pid
     
+    def tune_optimizer(self, optimizer) -> None:
+        '''Tunes the Bayesian optimization algorithm hyper-parameters.'''
+        pass
+        
     def tune(self, key: int, log_file: str, show_dashboard: bool=False) -> ParameterValues:
         '''Tunes the hyper-parameters for Jax planner, returns the best found.'''
         
@@ -456,6 +460,9 @@ class JaxParameterTuning:
                 # print best parameter if found
                 if best_target > old_best_target:
                     print(f'* found new best average reward {best_target:.6f}')
+                
+                # tune the optimizer here
+                self.tune_optimizer(optimizer)
                 
                 # write results of all processes in current iteration to file
                 with open(log_file, 'a', newline='') as file:
