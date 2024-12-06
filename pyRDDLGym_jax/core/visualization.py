@@ -78,6 +78,7 @@ class JaxPlannerDashboard:
         self.tuning_gp_heatmaps = None
         self.tuning_gp_targets = None
         self.tuning_gp_predicted = None
+        self.tuning_gp_params = None
         self.tuning_gp_update = False
         
         # ======================================================================
@@ -529,7 +530,7 @@ class JaxPlannerDashboard:
                         x=self.xticks[row], y=self.train_return[row],
                         name=f'id={row}',
                         mode='lines+markers',
-                        marker=dict(size=4), line=dict(width=2)
+                        marker=dict(size=3), line=dict(width=2)
                     ))
             fig.update_layout(
                 title=dict(text="Train Return"),
@@ -556,7 +557,7 @@ class JaxPlannerDashboard:
                         x=self.xticks[row], y=self.test_return[row],
                         name=f'id={row}',
                         mode='lines+markers',
-                        marker=dict(size=4), line=dict(width=2)
+                        marker=dict(size=3), line=dict(width=2)
                     ))
             fig.update_layout(
                 title=dict(text="Test Return"),
@@ -767,7 +768,7 @@ class JaxPlannerDashboard:
                         x=self.xticks[row],
                         y=self.relaxed_exprs_values[row][expr_id],
                         mode='lines+markers',
-                        marker=dict(size=4), line=dict(width=2)
+                        marker=dict(size=3), line=dict(width=2)
                     ))
                     fig.update_layout(
                         title=dict(text=f"Model Parameters for Expression {expr_id}"),
@@ -945,7 +946,7 @@ class JaxPlannerDashboard:
             fig1.add_trace(go.Scatter(
                 x=np.arange(len(self.tuning_gp_targets)), y=self.tuning_gp_targets,
                 mode='lines+markers',
-                marker=dict(size=4), line=dict(width=2)
+                marker=dict(size=3), line=dict(width=2)
             ))
             fig1.update_layout(
                 title=dict(text="Target Values of Trial Points"),
@@ -960,7 +961,7 @@ class JaxPlannerDashboard:
             fig2 = go.Figure()
             fig2.add_trace(go.Scatter(
                 x=self.tuning_gp_targets, y=self.tuning_gp_predicted,
-                mode='markers', marker=dict(size=4)
+                mode='markers', marker=dict(size=5)
             ))
             fig2.add_shape(
                 type="line", 
@@ -992,7 +993,21 @@ class JaxPlannerDashboard:
                     ), row=row + 1, col=col + 1)
                     fig4.add_trace(go.Heatmap(
                         z=std, x=p1v, y=p2v, colorscale='Reds', showscale=False
-                    ), row=row + 1, col=col + 1)       
+                    ), row=row + 1, col=col + 1)
+                    fig3.add_trace(go.Scatter(
+                        x=self.tuning_gp_params[p1], 
+                        y=self.tuning_gp_params[p2],
+                        opacity=1,
+                        mode='markers', 
+                        marker=dict(size=5, color='green', symbol='x')
+                    ), row=row + 1, col=col + 1)     
+                    fig4.add_trace(go.Scatter(
+                        x=self.tuning_gp_params[p1], 
+                        y=self.tuning_gp_params[p2],
+                        opacity=1,
+                        mode='markers', 
+                        marker=dict(size=5, color='green', symbol='x')
+                    ), row=row + 1, col=col + 1)    
                     fig3.update_xaxes(title_text=p1, row=row + 1, col=col + 1)
                     fig4.update_xaxes(title_text=p1, row=row + 1, col=col + 1)
                     fig3.update_yaxes(title_text=p2, row=row + 1, col=col + 1)
@@ -1163,6 +1178,8 @@ class JaxPlannerDashboard:
         self.tuning_gp_targets = optimizer.space.target.reshape((-1,))
         self.tuning_gp_predicted = \
             optimizer._gp.predict(optimizer.space.params).reshape((-1,))
+        self.tuning_gp_params = {name: optimizer.space.params[:, i] 
+                                 for (i, name) in enumerate(optimizer.space.keys)}
         
         for (i1, param1) in enumerate(optimizer.space.keys):
             self.tuning_gp_heatmaps.append([])
