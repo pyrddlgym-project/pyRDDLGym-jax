@@ -490,29 +490,3 @@ class JaxParameterTuning:
         self.optimizer = optimizer
         self.log_file = log_file
         return best_params
-
-    def save_plot(self, plot_file: str) -> None:
-        import matplotlib.pyplot as plt
-        from sklearn.manifold import MDS
-        
-        # load the log file and normalize target values
-        with open(self.log_file, 'r') as file:
-            data_iter = csv.reader(file, delimiter=',')
-            data = [row for row in data_iter]
-        data = np.asarray(data, dtype=object)
-        hparam = data[1:, len(COLUMNS):].astype(np.float64)
-        target = data[1:, 3].astype(np.float64)
-        target = (target - np.min(target)) / (np.max(target) - np.min(target))
-        
-        # embed the parameter vectors in a low dimensional space
-        embedding = MDS(n_components=2, normalized_stress='auto')
-        hparam_low = embedding.fit_transform(hparam)
-        sc = plt.scatter(hparam_low[:, 0], hparam_low[:, 1], c=target, s=5,
-                         cmap='seismic', edgecolor='gray', linewidth=0)
-        ax = plt.gca()
-        for i in range(len(target)):
-            ax.annotate(str(i), (hparam_low[i, 0], hparam_low[i, 1]), fontsize=3)         
-        plt.colorbar(sc)
-        plt.savefig(plot_file)
-        plt.clf()
-        plt.close()
