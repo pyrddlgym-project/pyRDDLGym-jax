@@ -320,9 +320,6 @@ class JaxParameterTuning:
         pid = os.getpid()
         return params, average_reward, index, pid
     
-    def tune_gp_hyperparams(self, optimizer, bounds, xs, ys) -> None:
-        pass
-    
     def tune(self, key: int, log_file: str, show_dashboard: bool=False) -> ParameterValues:
         '''Tunes the hyper-parameters for Jax planner, returns the best found.'''
         
@@ -363,7 +360,6 @@ class JaxParameterTuning:
             **self.gp_init_kwargs
         )
         optimizer.set_gp_params(**self.gp_params)
-        xs, ys = [], []
         
         # suggest initial parameters to evaluate
         num_workers = self.num_workers
@@ -437,6 +433,8 @@ class JaxParameterTuning:
                             # extract and register the new evaluation
                             params, target, index, pid = results.pop(i).get()
                             optimizer.register(params, target)
+                            optimizer._gp.fit(
+                                optimizer.space.params, optimizer.space.target)
                             
                             # update acquisition function and suggest a new point
                             suggested_params[index] = optimizer.suggest()
@@ -458,12 +456,6 @@ class JaxParameterTuning:
                 # print best parameter if found
                 if best_target > old_best_target:
                     print(f'* found new best average reward {best_target:.6f}')
-                
-                # update hyper-parameters of GP
-                for row in rows:
-                    xs.append(row[6:])
-                    ys.append(row[3])
-                self.tune_gp_hyperparams(optimizer, hyperparams_bounds, xs, ys)
                 
                 # write results of all processes in current iteration to file
                 with open(log_file, 'a', newline='') as file:

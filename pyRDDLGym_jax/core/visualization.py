@@ -1137,9 +1137,9 @@ class JaxPlannerDashboard:
         
         self.tuning_gp_targets.extend((x[3] for x in iteration_info))
         
-        for (i1, param1) in enumerate(bounds):
+        for (i1, param1) in enumerate(optimizer.space.keys):
             self.tuning_gp_heatmaps.append([])
-            for (i2, param2) in enumerate(bounds):
+            for (i2, param2) in enumerate(optimizer.space.keys):
                 if i2 > i1:
                     
                     # Generate a grid for visualization
@@ -1157,7 +1157,8 @@ class JaxPlannerDashboard:
                     for p1, p2 in zip(np.ravel(P1), np.ravel(P2)):
                         params = {param1: p1, param2: p2}
                         params.update(fixed_params)
-                        param_grid.append([params[key] for key in bounds])
+                        param_grid.append(
+                            [params[key] for key in optimizer.space.keys])
                     param_grid = np.array(param_grid)
                     mean, std = optimizer._gp.predict(param_grid, return_std=True)
                     mean = mean.reshape(P1.shape)
