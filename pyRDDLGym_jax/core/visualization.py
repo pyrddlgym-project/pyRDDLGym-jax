@@ -529,7 +529,7 @@ class JaxPlannerDashboard:
                         x=self.xticks[row], y=self.train_return[row],
                         name=f'id={row}',
                         mode='lines+markers',
-                        marker=dict(size=2), line=dict(width=2)
+                        marker=dict(size=4), line=dict(width=2)
                     ))
             fig.update_layout(
                 title=dict(text="Train Return"),
@@ -556,7 +556,7 @@ class JaxPlannerDashboard:
                         x=self.xticks[row], y=self.test_return[row],
                         name=f'id={row}',
                         mode='lines+markers',
-                        marker=dict(size=2), line=dict(width=2)
+                        marker=dict(size=4), line=dict(width=2)
                     ))
             fig.update_layout(
                 title=dict(text="Test Return"),
@@ -767,7 +767,7 @@ class JaxPlannerDashboard:
                         x=self.xticks[row],
                         y=self.relaxed_exprs_values[row][expr_id],
                         mode='lines+markers',
-                        marker=dict(size=2), line=dict(width=2)
+                        marker=dict(size=4), line=dict(width=2)
                     ))
                     fig.update_layout(
                         title=dict(text=f"Model Parameters for Expression {expr_id}"),
@@ -945,7 +945,7 @@ class JaxPlannerDashboard:
             fig1.add_trace(go.Scatter(
                 x=np.arange(len(self.tuning_gp_targets)), y=self.tuning_gp_targets,
                 mode='lines+markers',
-                marker=dict(size=2), line=dict(width=2)
+                marker=dict(size=4), line=dict(width=2)
             ))
             fig1.update_layout(
                 title=dict(text="Target Values of Trial Points"),
