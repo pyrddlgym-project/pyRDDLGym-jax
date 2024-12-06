@@ -76,7 +76,8 @@ class JaxPlannerDashboard:
         self.test_state_fluents = {}
         
         self.tuning_gp_heatmaps = None
-        self.tuning_gp_targets = []
+        self.tuning_gp_targets = None
+        self.tuning_gp_predicted = None
         self.tuning_gp_update = False
         
         # ======================================================================
@@ -367,7 +368,8 @@ class JaxPlannerDashboard:
                         dbc.Tab(dbc.Card(
                             dbc.CardBody([
                                 dbc.Row([
-                                    dbc.Col(Graph(id='tuning-target-graph'))
+                                    dbc.Col(Graph(id='tuning-target-graph'), width=6),
+                                    dbc.Col(Graph(id='tuning-scatter-graph'), width=6)
                                 ]),
                                 dbc.Row([
                                     dbc.Col([
@@ -927,6 +929,7 @@ class JaxPlannerDashboard:
         # update the tuning result
         @app.callback(
             [Output('tuning-target-graph', 'figure'),
+             Output('tuning-scatter-graph', 'figure'),
              Output('tuning-gp-mean-graph', 'figure'),
              Output('tuning-gp-unc-graph', 'figure')],
             [Input('interval', 'n_intervals'),
@@ -938,16 +941,39 @@ class JaxPlannerDashboard:
             if not viewport_size: return dash.no_update
             
             # tuning target trend
-            fig0 = go.Figure()
-            fig0.add_trace(go.Scatter(
+            fig1 = go.Figure()
+            fig1.add_trace(go.Scatter(
                 x=np.arange(len(self.tuning_gp_targets)), y=self.tuning_gp_targets,
                 mode='lines+markers',
                 marker=dict(size=2), line=dict(width=2)
             ))
-            fig0.update_layout(
-                title=dict(text="Target Values"),
+            fig1.update_layout(
+                title=dict(text="Target Values of Trial Points"),
                 xaxis=dict(title=dict(text="Trial Point")),
                 yaxis=dict(title=dict(text="Target Value")),
+                font=dict(size=PLOT_AXES_FONT_SIZE),
+                legend=dict(bgcolor='rgba(0,0,0,0)'),
+                template="plotly_white"
+            )
+            
+            # tuning scatter actual and predicted
+            fig2 = go.Figure()
+            fig2.add_trace(go.Scatter(
+                x=self.tuning_gp_targets, y=self.tuning_gp_predicted,
+                mode='markers', marker=dict(size=4)
+            ))
+            fig2.add_shape(
+                type="line", 
+                x0=np.min(self.tuning_gp_targets), 
+                y0=np.min(self.tuning_gp_targets), 
+                x1=np.max(self.tuning_gp_targets), 
+                y1=np.max(self.tuning_gp_targets),
+                line=dict(dash="dot", color='gray')
+            )
+            fig2.update_layout(
+                title=dict(text="Gaussian Process Goodness-of-Fit Plot"),
+                xaxis=dict(title=dict(text="Actual Target Value")),
+                yaxis=dict(title=dict(text="Predicted Target Value")),
                 font=dict(size=PLOT_AXES_FONT_SIZE),
                 legend=dict(bgcolor='rgba(0,0,0,0)'),
                 template="plotly_white"
@@ -956,23 +982,23 @@ class JaxPlannerDashboard:
             # tuning posterior plot
             num_cols = len(self.tuning_gp_heatmaps)
             num_rows = len(self.tuning_gp_heatmaps[0])            
-            fig1 = make_subplots(rows=num_rows, cols=num_cols)
-            fig2 = make_subplots(rows=num_rows, cols=num_cols)            
+            fig3 = make_subplots(rows=num_rows, cols=num_cols)
+            fig4 = make_subplots(rows=num_rows, cols=num_cols)            
             for col, data_col in enumerate(self.tuning_gp_heatmaps):
                 for row, data in enumerate(data_col):
                     p1, p2, p1v, p2v, mean, std = data
-                    fig1.add_trace(go.Heatmap(
+                    fig3.add_trace(go.Heatmap(
                         z=mean, x=p1v, y=p2v, colorscale='Blues', showscale=False
                     ), row=row + 1, col=col + 1)
-                    fig2.add_trace(go.Heatmap(
+                    fig4.add_trace(go.Heatmap(
                         z=std, x=p1v, y=p2v, colorscale='Reds', showscale=False
                     ), row=row + 1, col=col + 1)       
-                    fig1.update_xaxes(title_text=p1, row=row + 1, col=col + 1)
-                    fig2.update_xaxes(title_text=p1, row=row + 1, col=col + 1)
-                    fig1.update_yaxes(title_text=p2, row=row + 1, col=col + 1)
-                    fig2.update_yaxes(title_text=p2, row=row + 1, col=col + 1)
+                    fig3.update_xaxes(title_text=p1, row=row + 1, col=col + 1)
+                    fig4.update_xaxes(title_text=p1, row=row + 1, col=col + 1)
+                    fig3.update_yaxes(title_text=p2, row=row + 1, col=col + 1)
+                    fig4.update_yaxes(title_text=p2, row=row + 1, col=col + 1)
             subplot_width = viewport_size['width'] // num_cols                                    
-            fig1.update_layout(
+            fig3.update_layout(
                 title="Posterior Mean of Gaussian Process",
                 font=dict(size=PLOT_AXES_FONT_SIZE),
                 height=subplot_width * num_rows,
@@ -981,7 +1007,7 @@ class JaxPlannerDashboard:
                 showlegend=False,
                 template="plotly_white"
             )       
-            fig2.update_layout(
+            fig4.update_layout(
                 title="Posterior Uncertainty of Gaussian Process",
                 font=dict(size=PLOT_AXES_FONT_SIZE),
                 height=subplot_width * num_rows,
@@ -992,7 +1018,7 @@ class JaxPlannerDashboard:
             )
                      
             self.tuning_gp_update = False
-            return (fig0, fig1, fig2)
+            return (fig1, fig2, fig3, fig4)
             
         self.app = app
     
@@ -1127,15 +1153,16 @@ class JaxPlannerDashboard:
         self.warnings = None
     
     def update_tuning(self, optimizer: object,
-                      bounds: Dict[str, Tuple[float, float]],
-                      iteration_info: List[List[Any]]) -> None:
+                      bounds: Dict[str, Tuple[float, float]]) -> None:
         '''Updates the hyper-parameter tuning plots.'''
         
         self.tuning_gp_heatmaps = []
         self.tuning_gp_update = False
         if not optimizer.res: return
         
-        self.tuning_gp_targets.extend((x[3] for x in iteration_info))
+        self.tuning_gp_targets = optimizer.space.target.reshape((-1,))
+        self.tuning_gp_predicted = \
+            optimizer._gp.predict(optimizer.space.params).reshape((-1,))
         
         for (i1, param1) in enumerate(optimizer.space.keys):
             self.tuning_gp_heatmaps.append([])

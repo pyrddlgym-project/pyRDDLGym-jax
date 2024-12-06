@@ -464,7 +464,7 @@ class JaxParameterTuning:
                     
                 # update the dashboard tuning
                 if show_dashboard:
-                    dashboard.update_tuning(optimizer, hyperparams_bounds, rows)
+                    dashboard.update_tuning(optimizer, hyperparams_bounds)
             
             # stop the queue listener thread
             if show_dashboard:
