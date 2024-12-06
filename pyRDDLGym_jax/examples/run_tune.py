@@ -65,7 +65,6 @@ def main(domain, instance, method, trials=5, iters=20, workers=4):
                                 num_workers=workers,
                                 gp_iters=iters)
     tuning.tune(key=42, log_file=f'gp_{method}_{domain}_{instance}.csv')
-    tuning.save_plot(plot_file=f'{method}_{domain}_{instance}.pdf')
     
     # evaluate the agent on the best parameters
     planner_args, _, train_args = load_config_from_string(tuning.best_config)
