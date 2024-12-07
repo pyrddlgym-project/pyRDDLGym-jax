@@ -125,7 +125,7 @@ class JaxParameterTuning:
             gp_params = {'n_restarts_optimizer': 20}
         self.gp_params = gp_params
         if gp_kernel_params is None:
-            gp_kernel_params = {'length_scale_bounds': (0.3, 30.)}
+            gp_kernel_params = {'length_scale_bounds': (0.2, 20.)}
         self.gp_kernel_params = gp_kernel_params
         if acquisition is None:
             num_samples = self.gp_iters * self.num_workers
