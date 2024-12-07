@@ -125,7 +125,7 @@ class JaxParameterTuning:
             gp_params = {'n_restarts_optimizer': 20}
         self.gp_params = gp_params
         if gp_kernel_params is None:
-            gp_kernel_params = {'length_scale_bounds': (0.4, 40.)}
+            gp_kernel_params = {'length_scale_bounds': (0.3, 30.)}
         self.gp_kernel_params = gp_kernel_params
         if acquisition is None:
             num_samples = self.gp_iters * self.num_workers
@@ -153,7 +153,7 @@ class JaxParameterTuning:
         
     @staticmethod
     def annealing_acquisition(n_samples: int, n_delay_samples: int=0,
-                              kappa1: float=5.0, kappa2: float=1.0) -> UpperConfidenceBound:
+                              kappa1: float=10.0, kappa2: float=1.0) -> UpperConfidenceBound:
         acq_fn = UpperConfidenceBound(
             kappa=kappa1,
             exploration_decay=(kappa2 / kappa1) ** (1.0 / (n_samples - n_delay_samples)),
