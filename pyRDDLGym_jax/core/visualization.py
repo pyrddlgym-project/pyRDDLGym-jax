@@ -961,7 +961,7 @@ class JaxPlannerDashboard:
             fig2 = go.Figure()
             fig2.add_trace(go.Scatter(
                 x=self.tuning_gp_targets, y=self.tuning_gp_predicted,
-                mode='markers', marker=dict(size=5)
+                mode='markers', marker=dict(size=6)
             ))
             fig2.add_shape(
                 type="line", 
