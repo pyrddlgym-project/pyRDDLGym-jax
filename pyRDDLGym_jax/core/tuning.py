@@ -71,7 +71,8 @@ class JaxParameterTuning:
                  gp_iters: int=25,
                  acquisition: Optional[AcquisitionFunction]=None,
                  gp_init_kwargs: Optional[Kwargs]=None,
-                 gp_params: Optional[Kwargs]=None) -> None:
+                 gp_params: Optional[Kwargs]=None,
+                 gp_kernel_params: Optional[Kwargs]=None) -> None:
         '''Creates a new instance for tuning hyper-parameters for Jax planners
         on the given RDDL domain and instance.
         
@@ -97,6 +98,8 @@ class JaxParameterTuning:
         during initialization  
         :param gp_params: additional parameters to feed to Bayesian optimizer 
         after initialization optimization
+        :param gp_kernel_params: additional parameters to feed to the kernel of
+        the Bayesian optimizer
         '''        
         # objective parameters
         self.env = env
@@ -121,6 +124,9 @@ class JaxParameterTuning:
         if gp_params is None:
             gp_params = {'n_restarts_optimizer': 20}
         self.gp_params = gp_params
+        if gp_kernel_params is None:
+            gp_kernel_params = {'length_scale_bounds': (0.4, 40.)}
+        self.gp_kernel_params = gp_kernel_params
         if acquisition is None:
             num_samples = self.gp_iters * self.num_workers
             acquisition = JaxParameterTuning.annealing_acquisition(num_samples)
@@ -134,7 +140,8 @@ class JaxParameterTuning:
         print(f'hyperparameter optimizer parameters:\n'
               f'    tuned_hyper_parameters    =\n{hyper_params_table}\n'
               f'    initialization_args       ={self.gp_init_kwargs}\n'
-              f'    additional_args           ={self.gp_params}\n'
+              f'    gp_params                 ={self.gp_params}\n'
+              f'    gp_kernel_params          ={self.gp_kernel_params}\n'
               f'    tuning_iterations         ={self.gp_iters}\n'
               f'    tuning_timeout            ={self.timeout_tuning}\n'
               f'    tuning_batch_size         ={self.num_workers}\n'
@@ -320,9 +327,10 @@ class JaxParameterTuning:
         pid = os.getpid()
         return params, average_reward, index, pid
     
-    def tune_optimizer(self, optimizer) -> None:
+    def tune_optimizer(self, optimizer: BayesianOptimization) -> None:
         '''Tunes the Bayesian optimization algorithm hyper-parameters.'''
-        pass
+        print('\n' + f'The kernel length_scale was set to '
+              f'{optimizer._gp.kernel_.length_scale}.')
         
     def tune(self, key: int, log_file: str, show_dashboard: bool=False) -> ParameterValues:
         '''Tunes the hyper-parameters for Jax planner, returns the best found.'''
@@ -394,6 +402,11 @@ class JaxParameterTuning:
             
             for it in range(self.gp_iters): 
                 
+                # set the kernel parameters to user requested
+                optimizer._gp.kernel.set_params(**self.gp_kernel_params)
+                if hasattr(optimizer._gp, 'kernel_'):
+                    optimizer._gp.kernel_.set_params(**self.gp_kernel_params)
+            
                 # check if there is enough time left for another iteration
                 elapsed = time.time() - start_time
                 if elapsed >= self.timeout_tuning:
