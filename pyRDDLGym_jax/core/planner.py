@@ -1800,7 +1800,7 @@ r"""
         # initialize dash board 
         if dashboard is not None:
             dashboard_id = dashboard.register_experiment(
-                dashboard_id, self, key=dash_key)
+                dashboard_id, dashboard.get_planner_info(self), key=dash_key)
         
         # ======================================================================
         # MAIN TRAINING LOOP BEGINS
