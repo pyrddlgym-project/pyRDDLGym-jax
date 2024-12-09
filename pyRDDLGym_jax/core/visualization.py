@@ -334,18 +334,18 @@ class JaxPlannerDashboard:
                                                      dbc.DropdownMenuItem('Every 4 Frames', id='viz-skip-4'),
                                                      dbc.DropdownMenuItem('Every 5 Frames', id='viz-skip-5'),
                                                      dbc.DropdownMenuItem('Every 10 Frames', id='viz-skip-10')],
-                                                    label="Render Frequency",
+                                                    label="Render: Every 5 Frames",
                                                     id='viz-skip-dropdown'
                                                 ),
                                             ], width='auto'),
                                             dbc.Col([
                                                 dbc.DropdownMenu(
-                                                    [dbc.DropdownMenuItem('1 Trajectories', id='viz-num-1'),
-                                                     dbc.DropdownMenuItem('2 Trajectories', id='viz-num-2'),
-                                                     dbc.DropdownMenuItem('3 Trajectories', id='viz-num-3'),
-                                                     dbc.DropdownMenuItem('4 Trajectories', id='viz-num-4'),
-                                                     dbc.DropdownMenuItem('5 Trajectories', id='viz-num-5')],
-                                                    label="Max. Number of Rendered Trajectories",
+                                                    [dbc.DropdownMenuItem('1', id='viz-num-1'),
+                                                     dbc.DropdownMenuItem('2', id='viz-num-2'),
+                                                     dbc.DropdownMenuItem('3', id='viz-num-3'),
+                                                     dbc.DropdownMenuItem('4', id='viz-num-4'),
+                                                     dbc.DropdownMenuItem('5', id='viz-num-5')],
+                                                    label="Max. Trajectories: 3",
                                                     id='viz-num-dropdown'
                                                 ),
                                             ], width='auto'),
@@ -843,9 +843,9 @@ class JaxPlannerDashboard:
         )
         def update_viz_skip_dropdown_text(viz_skip):
             if viz_skip == 1:
-                return 'Every Frame'
+                return 'Render: Every Frame'
             else:
-                return f'Every {viz_skip} Frames'
+                return f'Render: Every {viz_skip} Frames'
         
         # modify viz count
         @app.callback(
@@ -879,10 +879,7 @@ class JaxPlannerDashboard:
             [Input('viz-num-trajectories', 'data')]
         )
         def update_viz_num_dropdown_text(viz_num):
-            if viz_num == 1:
-                return '1 Trajectory'
-            else:
-                return f'{viz_num} Trajectories'
+            return f'Max. Trajectories: {viz_num}'
             
         # update the policy viz
         @app.callback(
