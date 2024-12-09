@@ -33,7 +33,6 @@ if TYPE_CHECKING:
 POLICY_DIST_HEIGHT = 400
 POLICY_DIST_PLOTS_PER_ROW = 6
 ACTION_HEATMAP_HEIGHT = 400
-EXPERIMENT_PER_PAGE = 10
 PROGRESS_FOR_NEXT_RETURN_DIST = 2
 PROGRESS_FOR_NEXT_POLICY_DIST = 10
 REWARD_ERROR_DIST_SUBPLOTS = 20
@@ -87,7 +86,7 @@ class JaxPlannerDashboard:
         # CREATE PAGE LAYOUT
         # ======================================================================
         
-        def create_experiment_table(active_page, page_size=EXPERIMENT_PER_PAGE):
+        def create_experiment_table(active_page, page_size):
             start = (active_page - 1) * page_size
             end = start + page_size
             rows = []
@@ -210,6 +209,7 @@ class JaxPlannerDashboard:
         
         app.layout = dbc.Container([
             Store(id='refresh-interval', data=2000),
+            Store(id='experiment-num-per-page', data=10),
             Store(id='model-params-dropdown-expr', data=''),
             Store(id='model-errors-state-dropdown-selected', data=''),
             Store(id='viz-skip-frequency', data=5),
@@ -256,6 +256,17 @@ class JaxPlannerDashboard:
                             id='refresh-rate-dropdown',
                             nav=True
                         )
+                    ], navbar=True),
+                    dbc.Nav([                        
+                        dbc.DropdownMenu(
+                            [dbc.DropdownMenuItem("5", id='5pp'),
+                             dbc.DropdownMenuItem("10", id='10pp'),
+                             dbc.DropdownMenuItem("25", id='25pp'),
+                             dbc.DropdownMenuItem("50", id='50pp')],
+                            label="Exp. Per Page: 10",
+                            id='experiment-num-per-page-dropdown',
+                            nav=True
+                        )
                     ], navbar=True)
                 ], fluid=True)
             ),
@@ -265,7 +276,7 @@ class JaxPlannerDashboard:
                 dbc.Col([
                     dbc.Card([
                         dbc.CardBody([
-                            Div(create_experiment_table(0), id='experiment-table',
+                            Div(create_experiment_table(0, 10), id='experiment-table',
                                 style={'fontSize': f'{EXPERIMENT_ENTRY_FONT_SIZE}px'}),
                             dbc.Pagination(id='experiment-pagination',
                                            active_page=1, max_value=1, size="sm")
@@ -532,21 +543,54 @@ class JaxPlannerDashboard:
             else:
                 return 'Refresh: 2s'
         
+        # update the experiments per page
+        @app.callback(
+            Output("experiment-num-per-page", "data"),
+            [Input("5pp", "n_clicks"),
+             Input("10pp", "n_clicks"),
+             Input("25pp", "n_clicks"),
+             Input("50pp", "n_clicks")],
+            [State('experiment-num-per-page', 'data')]
+        )
+        def click_experiments_per_page(n5, n10, n25, n50, data):
+            ctx = dash.callback_context 
+            if not ctx.triggered: 
+                return data 
+            button_id = ctx.triggered[0]['prop_id'].split('.')[0]
+            if button_id == '5pp':
+                return 5
+            elif button_id == '10pp':
+                return 10
+            elif button_id == '25pp':
+                return 25
+            elif button_id == '50pp':
+                return 50
+            return data
+        
+        @app.callback(
+            Output('experiment-num-per-page-dropdown', 'label'),
+            [Input('experiment-num-per-page', 'data')]
+        )
+        def update_experiments_per_page(selected_num):
+            return f'Exp. Per Page: {selected_num}'
+        
         # update the experiment table
         @app.callback(
             Output('experiment-table', 'children'),
             [Input('interval', 'n_intervals'),
-             Input('experiment-pagination', 'active_page')]
+             Input('experiment-pagination', 'active_page')],
+            State('experiment-num-per-page', 'data')
         ) 
-        def update_experiment_table(n, active_page): 
-            return create_experiment_table(active_page)
+        def update_experiment_table(n, active_page, npp): 
+            return create_experiment_table(active_page, npp)
         
         @app.callback(
             Output('experiment-pagination', 'max_value'),
-            Input('interval', 'n_intervals')
+            Input('interval', 'n_intervals'),
+            State('experiment-num-per-page', 'data')
         ) 
-        def update_experiment_max_pages(n): 
-            return (len(self.checked) + EXPERIMENT_PER_PAGE - 1) // EXPERIMENT_PER_PAGE            
+        def update_experiment_max_pages(n, npp): 
+            return (len(self.checked) + npp - 1) // npp            
         
         @app.callback(
             Output('trigger-experiment-check', 'children'),
