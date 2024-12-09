@@ -38,6 +38,7 @@ PROGRESS_FOR_NEXT_RETURN_DIST = 2
 PROGRESS_FOR_NEXT_POLICY_DIST = 10
 REWARD_ERROR_DIST_SUBPLOTS = 20
 MODEL_STATE_ERROR_HEIGHT = 300
+POLICY_STATE_VIZ_MAX_HEIGHT = 800
 LOGO_FILE = os.path.join('assets', 'logo.png')
 
 PLOT_AXES_FONT_SIZE = 11
@@ -67,6 +68,7 @@ class JaxPlannerDashboard:
         self.action_output = {}
         self.policy_params = {}
         self.policy_params_ticks = {}
+        self.policy_viz = {}
         
         self.relaxed_exprs = {}
         self.relaxed_exprs_values = {}
@@ -210,6 +212,8 @@ class JaxPlannerDashboard:
             Store(id='refresh-interval'),
             Store(id='model-params-dropdown-expr', data=''),
             Store(id='model-errors-state-dropdown-selected', data=''),
+            Store(id='viz-skip-frequency', data=1),
+            Store(id='viz-num-trajectories', data=1),
             Div(id='viewport-sizer', style={'display': 'none'}),
             
             # navbar
@@ -302,7 +306,48 @@ class JaxPlannerDashboard:
                                 ]),
                                 dbc.Row([
                                     Graph(id='policy-params'),
-                                ])
+                                ]),
+                                dbc.Row([
+                                    dbc.Col([
+                                        Hr(className='my-4')
+                                    ])
+                                ]),
+                                dbc.Row([
+                                    dbc.Col([
+                                        dbc.Row([
+                                            dbc.Col([
+                                                dbc.DropdownMenu(
+                                                    [dbc.DropdownMenuItem('Every Frame', id='viz-skip-1'),
+                                                     dbc.DropdownMenuItem('Every 2 Frames', id='viz-skip-2'),
+                                                     dbc.DropdownMenuItem('Every 3 Frames', id='viz-skip-3'),
+                                                     dbc.DropdownMenuItem('Every 4 Frames', id='viz-skip-4'),
+                                                     dbc.DropdownMenuItem('Every 5 Frames', id='viz-skip-5'),
+                                                     dbc.DropdownMenuItem('Every 10 Frames', id='viz-skip-10')],
+                                                    label="Render Frequency",
+                                                    id='viz-skip-dropdown'
+                                                ),
+                                            ], width='auto'),
+                                            dbc.Col([
+                                                dbc.DropdownMenu(
+                                                    [dbc.DropdownMenuItem('1 Trajectories', id='viz-num-1'),
+                                                     dbc.DropdownMenuItem('2 Trajectories', id='viz-num-2'),
+                                                     dbc.DropdownMenuItem('3 Trajectories', id='viz-num-3'),
+                                                     dbc.DropdownMenuItem('4 Trajectories', id='viz-num-4'),
+                                                     dbc.DropdownMenuItem('5 Trajectories', id='viz-num-5')],
+                                                    label="Max. Number of Rendered Trajectories",
+                                                    id='viz-num-dropdown'
+                                                ),
+                                            ], width='auto'),
+                                            dbc.Col([
+                                                dbc.Button('Run Policy Visualization',
+                                                           id='policy-viz-button'),
+                                            ], width='auto')
+                                        ]),
+                                        dbc.Row([
+                                            Graph(id='policy-viz')
+                                        ])
+                                    ])
+                                ]),
                             ]), className="border-0 bg-transparent"
                         ), label="Policy", tab_id='tab-policy'
                         ),
@@ -718,6 +763,138 @@ class JaxPlannerDashboard:
                     break
             return fig
         
+        # modify viz skip rate
+        @app.callback(
+            Output("viz-skip-frequency", "data"),
+            [Input("viz-skip-1", "n_clicks"),
+             Input("viz-skip-2", "n_clicks"),
+             Input("viz-skip-3", "n_clicks"),
+             Input("viz-skip-4", "n_clicks"),
+             Input("viz-skip-5", "n_clicks"),
+             Input("viz-skip-10", "n_clicks")],
+            [State('viz-skip-frequency', 'data')]
+        )
+        def click_viz_skip_rate(v1, v2, v3, v4, v5, v10, data):
+            ctx = dash.callback_context 
+            if not ctx.triggered: 
+                return data 
+            button_id = ctx.triggered[0]['prop_id'].split('.')[0]
+            if button_id == 'viz-skip-1':
+                return 1
+            elif button_id == 'viz-skip-2':
+                return 2
+            elif button_id == 'viz-skip-3':
+                return 3
+            elif button_id == 'viz-skip-4':
+                return 4
+            elif button_id == 'viz-skip-5':
+                return 5
+            elif button_id == 'viz-skip-10':
+                return 10
+            return data            
+        
+        @app.callback(
+            Output('viz-skip-dropdown', 'label'),
+            [Input('viz-skip-frequency', 'data')]
+        )
+        def update_viz_skip_dropdown_text(viz_skip):
+            if viz_skip == 1:
+                return 'Every Frame'
+            else:
+                return f'Every {viz_skip} Frames'
+        
+        # modify viz count
+        @app.callback(
+            Output("viz-num-trajectories", "data"),
+            [Input("viz-num-1", "n_clicks"),
+             Input("viz-num-2", "n_clicks"),
+             Input("viz-num-3", "n_clicks"),
+             Input("viz-num-4", "n_clicks"),
+             Input("viz-num-5", "n_clicks")],
+            [State('viz-num-trajectories', 'data')]
+        )
+        def click_viz_num_render(v1, v2, v3, v4, v5, data):
+            ctx = dash.callback_context 
+            if not ctx.triggered: 
+                return data 
+            button_id = ctx.triggered[0]['prop_id'].split('.')[0]
+            if button_id == 'viz-num-1':
+                return 1
+            elif button_id == 'viz-num-2':
+                return 2
+            elif button_id == 'viz-num-3':
+                return 3
+            elif button_id == 'viz-num-4':
+                return 4
+            elif button_id == 'viz-num-5':
+                return 5
+            return data            
+        
+        @app.callback(
+            Output('viz-num-dropdown', 'label'),
+            [Input('viz-num-trajectories', 'data')]
+        )
+        def update_viz_num_dropdown_text(viz_num):
+            if viz_num == 1:
+                return '1 Trajectory'
+            else:
+                return f'{viz_num} Trajectories'
+            
+        # update the policy viz
+        @app.callback(
+            Output('policy-viz', 'figure'),
+            Input("policy-viz-button", "n_clicks"),
+            [State('viewport-sizer', 'children'),
+             State("viz-skip-frequency", "data"),
+             State("viz-num-trajectories", "data")]
+        )
+        def update_policy_viz(n_clicks, viewport_size, skip_freq, viz_num):
+            if not viewport_size: return dash.no_update
+            if not n_clicks: return dash.no_update
+            
+            for (row, checked) in self.checked.copy().items():
+                viz = self.policy_viz[row]
+                if checked and viz is not None:
+                    states = self.train_state_fluents[row]
+                    lookahead = next(iter(states.values())).shape[1]
+                    batch_idx = self.representative_trajectories(states, k=viz_num)
+                    policy_viz_frames = []
+                    for idx in batch_idx:
+                        avg_image = 0.
+                        num_image = 0
+                        viz.__init__(self.rddl[row])
+                        for t in range(0, lookahead, skip_freq):
+                            state_t = {name: values[idx, t]
+                                       for (name, values) in states.items()}
+                            state_t = self.rddl[row].ground_vars_with_values(state_t)
+                            print(f'rendering {idx}, {t}')
+                            avg_image += np.array(viz.render(state_t))
+                            num_image += 1
+                        avg_image /= num_image
+                        policy_viz_frames.append(avg_image)
+                        
+                    subplot_width = min(
+                        viewport_size['width'] // len(policy_viz_frames), 
+                        POLICY_STATE_VIZ_MAX_HEIGHT)
+                    fig = make_subplots(
+                        rows=1, cols=len(policy_viz_frames)
+                    )
+                    for (col, frame) in enumerate(policy_viz_frames):
+                        fig.add_trace(go.Image(z=frame, hoverinfo='skip'),
+                                      row=1, col=1 + col)
+                    fig.update_layout( 
+                        title="Representative Trajectories",
+                        font=dict(size=PLOT_AXES_FONT_SIZE),
+                        xaxis=dict(showticklabels=False), 
+                        yaxis=dict(showticklabels=False),
+                        width=subplot_width * len(policy_viz_frames),
+                        height=subplot_width * 1,
+                        showlegend=False,
+                        template="plotly_white"
+                    )
+                    return fig
+            return dash.no_update
+        
         # update the model parameter information
         @app.callback(
             Output('model-params-dropdown', 'children'),
@@ -1069,7 +1246,8 @@ class JaxPlannerDashboard:
         
     def register_experiment(self, experiment_id: str,
                             planner_info: Dict[str, Any],
-                            key: Optional[int]=None) -> str:
+                            key: Optional[int]=None,
+                            viz: Optional[Any]=None) -> str:
         '''Starts monitoring a new experiment.'''
         
         # make sure experiment id does not exist
@@ -1098,6 +1276,7 @@ class JaxPlannerDashboard:
         self.action_output[experiment_id] = None
         self.policy_params[experiment_id] = []
         self.policy_params_ticks[experiment_id] = []
+        self.policy_viz[experiment_id] = viz
         
         decompiler = RDDLDecompiler()
         self.relaxed_exprs[experiment_id] = {}
@@ -1110,6 +1289,29 @@ class JaxPlannerDashboard:
         
         return experiment_id
     
+    @staticmethod
+    def representative_trajectories(trajectories, k, max_iter=300):
+        n = next(iter(trajectories.values())).shape[0]
+        points = np.concatenate([
+            np.reshape(1. * values, (n, -1)) 
+            for values in trajectories.values()
+        ], axis=1)
+        
+        k = min(k, n)
+        centroids = points[np.random.choice(n, k, replace=False)]    
+        for _ in range(max_iter):
+            distances = np.linalg.norm(
+                points[:, None, :] - centroids[None, :, :], axis=-1)
+            cluster_assignment = np.argmin(distances, axis=1)
+            new_centroids = np.stack([
+                np.mean(points[cluster_assignment == i], axis=0)
+                for i in range(k)
+            ], axis=0)
+            if np.allclose(new_centroids, centroids):
+                break
+            centroids = new_centroids
+        return np.unique(np.argmin(distances, axis=0))
+
     def update_experiment(self, experiment_id: str, callback: Dict[str, Any]) -> None:
         '''Pass new information and update the dashboard for a given experiment.'''
         
@@ -1157,7 +1359,7 @@ class JaxPlannerDashboard:
             for name in rddl.state_fluents or name in rddl.observ_fluents
         }
         self.test_state_fluents[experiment_id] = {
-            name: callback['fluents'][name]
+            name: np.asarray(callback['fluents'][name])
             for name in self.train_state_fluents[experiment_id]
         }
         
@@ -1167,7 +1369,7 @@ class JaxPlannerDashboard:
         self.progress[experiment_id] = progress
         self.warnings = None
     
-    def update_tuning(self, optimizer: object,
+    def update_tuning(self, optimizer: Any,
                       bounds: Dict[str, Tuple[float, float]]) -> None:
         '''Updates the hyper-parameter tuning plots.'''
         
