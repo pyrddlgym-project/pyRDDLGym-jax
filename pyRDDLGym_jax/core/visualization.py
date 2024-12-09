@@ -209,11 +209,11 @@ class JaxPlannerDashboard:
         app = dash.Dash(__name__, external_stylesheets=[theme])
         
         app.layout = dbc.Container([
-            Store(id='refresh-interval'),
+            Store(id='refresh-interval', data=2000),
             Store(id='model-params-dropdown-expr', data=''),
             Store(id='model-errors-state-dropdown-selected', data=''),
-            Store(id='viz-skip-frequency', data=1),
-            Store(id='viz-num-trajectories', data=1),
+            Store(id='viz-skip-frequency', data=5),
+            Store(id='viz-num-trajectories', data=3),
             Div(id='viewport-sizer', style={'display': 'none'}),
             
             # navbar
