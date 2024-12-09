@@ -1169,7 +1169,8 @@ class JaxBackpropPlanner:
                  utility_kwargs: Optional[Kwargs]=None,
                  cpfs_without_grad: Optional[Set[str]]=None,
                  compile_non_fluent_exact: bool=True,
-                 logger: Optional[Logger]=None) -> None:
+                 logger: Optional[Logger]=None,
+                 dashboard_viz: Optional[Any]=None) -> None:
         '''Creates a new gradient-based algorithm for optimizing action sequences
         (plan) in the given RDDL. Some operations will be converted to their
         differentiable counterparts; the specific operations can be customized
@@ -1206,6 +1207,8 @@ class JaxBackpropPlanner:
         :param compile_non_fluent_exact: whether non-fluent expressions 
         are always compiled using exact JAX expressions
         :param logger: to log information about compilation to file
+        :param dashboard_viz: optional visualizer object from the environment
+        to pass to the dashboard to visualize the policy
         '''
         self.rddl = rddl
         self.plan = plan
@@ -1277,6 +1280,7 @@ class JaxBackpropPlanner:
         self.cpfs_without_grad = cpfs_without_grad
         self.compile_non_fluent_exact = compile_non_fluent_exact
         self.logger = logger
+        self.dashboard_viz = dashboard_viz
         
         self._jax_compile_rddl()        
         self._jax_compile_optimizer()
@@ -1800,7 +1804,8 @@ r"""
         # initialize dash board 
         if dashboard is not None:
             dashboard_id = dashboard.register_experiment(
-                dashboard_id, dashboard.get_planner_info(self), key=dash_key)
+                dashboard_id, dashboard.get_planner_info(self), 
+                key=dash_key, viz=self.dashboard_viz)
         
         # ======================================================================
         # MAIN TRAINING LOOP BEGINS

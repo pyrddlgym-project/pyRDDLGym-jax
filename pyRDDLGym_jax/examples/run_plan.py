@@ -42,7 +42,8 @@ def main(domain, instance, method, episodes=1):
     if 'dashboard' in train_args: train_args['dashboard'].launch()
     
     # create the planning algorithm
-    planner = JaxBackpropPlanner(rddl=env.model, **planner_args)
+    planner = JaxBackpropPlanner(
+        rddl=env.model, dashboard_viz=env._visualizer, **planner_args)
     
     # evaluate the controller   
     if method == 'replan':
