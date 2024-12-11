@@ -188,10 +188,10 @@ class JaxParameterTuning:
             args = queue.get()
             if args is None:
                 break
-            elif len(args) == 3:
-                dashboard.register_experiment(*args)
-            else:
+            elif len(args) == 2:
                 dashboard.update_experiment(*args)
+            else:
+                dashboard.register_experiment(*args)
     
     @staticmethod
     def offline_trials(env, planner, train_args, key, iteration, index, num_trials, 
@@ -307,6 +307,9 @@ class JaxParameterTuning:
             print(f'[{index}] key={key[0]}, {config_param_str}', flush=True)
         config_string = JaxParameterTuning.config_from_template(config_template, config_params)
         planner_args, _, train_args = load_config_from_string(config_string)
+        
+        # remove keywords that should not be in the tuner
+        train_args.pop('dashboard', None)
     
         # initialize env for evaluation (need fresh copy to avoid concurrency)
         env = RDDLEnv(domain, instance, vectorized=True, enforce_action_constraints=False)

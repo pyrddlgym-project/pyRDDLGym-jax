@@ -38,6 +38,7 @@ PROGRESS_FOR_NEXT_POLICY_DIST = 10
 REWARD_ERROR_DIST_SUBPLOTS = 20
 MODEL_STATE_ERROR_HEIGHT = 300
 POLICY_STATE_VIZ_MAX_HEIGHT = 800
+GP_POSTERIOR_MAX_HEIGHT = 800
 LOGO_FILE = os.path.join('assets', 'logo.png')
 
 PLOT_AXES_FONT_SIZE = 11
@@ -64,9 +65,11 @@ class JaxPlannerDashboard:
         self.train_return = {}
         self.return_dist = {}
         self.return_dist_ticks = {}
+        self.return_dist_last_progress = {}
         self.action_output = {}
         self.policy_params = {}
         self.policy_params_ticks = {}
+        self.policy_params_last_progress = {}
         self.policy_viz = {}
         
         self.relaxed_exprs = {}
@@ -1097,7 +1100,8 @@ class JaxPlannerDashboard:
                     if num_epochs > REWARD_ERROR_DIST_SUBPLOTS:
                         step = num_epochs // REWARD_ERROR_DIST_SUBPLOTS
                     fig = make_subplots(
-                        rows=num_states, cols=1, shared_xaxes=True
+                        rows=num_states, cols=1, shared_xaxes=True,
+                        subplot_titles=self.rddl[row].variable_groundings[state]
                     )
                     for istate in range(num_states):
                         for epoch in range(0, num_epochs, step):
@@ -1230,7 +1234,8 @@ class JaxPlannerDashboard:
                     fig4.update_xaxes(title_text=p1, row=row + 1, col=col + 1)
                     fig3.update_yaxes(title_text=p2, row=row + 1, col=col + 1)
                     fig4.update_yaxes(title_text=p2, row=row + 1, col=col + 1)
-            subplot_width = viewport_size['width'] // num_cols                                    
+            subplot_width = min(
+                GP_POSTERIOR_MAX_HEIGHT, viewport_size['width'] // num_cols)                         
             fig3.update_layout(
                 title="Posterior Mean of Gaussian Process",
                 font=dict(size=PLOT_AXES_FONT_SIZE),
@@ -1313,10 +1318,12 @@ class JaxPlannerDashboard:
         self.train_return[experiment_id] = []
         self.test_return[experiment_id] = []
         self.return_dist_ticks[experiment_id] = []
+        self.return_dist_last_progress[experiment_id] = 0
         self.return_dist[experiment_id] = []
         self.action_output[experiment_id] = None
         self.policy_params[experiment_id] = []
         self.policy_params_ticks[experiment_id] = []
+        self.policy_params_last_progress[experiment_id] = 0
         self.policy_viz[experiment_id] = viz
         
         decompiler = RDDLDecompiler()
@@ -1364,11 +1371,12 @@ class JaxPlannerDashboard:
         
         # data for return distributions
         progress = callback['progress']
-        if progress % PROGRESS_FOR_NEXT_RETURN_DIST == 0 \
-        and progress != self.progress[experiment_id]:
+        if progress - self.return_dist_last_progress[experiment_id] \
+            >= PROGRESS_FOR_NEXT_RETURN_DIST:
             self.return_dist_ticks[experiment_id].append(iteration)
             self.return_dist[experiment_id].append(
                 np.sum(np.asarray(callback['reward']), axis=1))
+            self.return_dist_last_progress[experiment_id] = progress
         
         # data for action heatmaps
         action_output = []
@@ -1383,10 +1391,11 @@ class JaxPlannerDashboard:
         self.action_output[experiment_id] = action_output
         
         # data for policy weight distributions
-        if progress % PROGRESS_FOR_NEXT_POLICY_DIST == 0 \
-        and progress != self.progress[experiment_id]:
+        if progress - self.policy_params_last_progress[experiment_id] \
+            >= PROGRESS_FOR_NEXT_POLICY_DIST:
             self.policy_params_ticks[experiment_id].append(iteration)
             self.policy_params[experiment_id].append(callback['best_params'])
+            self.policy_params_last_progress[experiment_id] = progress
         
         # data for model relaxations
         model_params = callback['model_params']
