@@ -26,7 +26,6 @@ from plotly.subplots import make_subplots
 
 from pyRDDLGym.core.debug.decompiler import RDDLDecompiler
 
-from pyRDDLGym_jax import __version__
 if TYPE_CHECKING:
     from pyRDDLGym_jax.core.planner import JaxBackpropPlanner
     
@@ -39,7 +38,6 @@ REWARD_ERROR_DIST_SUBPLOTS = 20
 MODEL_STATE_ERROR_HEIGHT = 300
 POLICY_STATE_VIZ_MAX_HEIGHT = 800
 GP_POSTERIOR_MAX_HEIGHT = 800
-LOGO_FILE = os.path.join('assets', 'logo.png')
 
 PLOT_AXES_FONT_SIZE = 11
 EXPERIMENT_ENTRY_FONT_SIZE = 14
@@ -209,6 +207,7 @@ class JaxPlannerDashboard:
             return rows
         
         app = dash.Dash(__name__, external_stylesheets=[theme])
+        app.title = 'JaxPlan Dashboard'
         
         app.layout = dbc.Container([
             Store(id='refresh-interval', data=2000),
@@ -222,8 +221,8 @@ class JaxPlannerDashboard:
             # navbar
             dbc.Navbar(
                 dbc.Container([
-                    Img(src=LOGO_FILE, height="30px", style={'margin-right': '10px'}),
-                    dbc.NavbarBrand(f"JaxPlan Version {__version__}"),
+                    # Img(src=LOGO_FILE, height="30px", style={'margin-right': '10px'}),
+                    dbc.NavbarBrand(f"JaxPlan Dashboard"),
                     dbc.Nav([
                         dbc.NavItem(
                             dbc.NavLink(
@@ -912,7 +911,7 @@ class JaxPlannerDashboard:
                                        for (name, values) in states.items()}
                             state_t = self.rddl[row].ground_vars_with_values(state_t)
                             print(f'rendering {idx}, {t}')
-                            avg_image += np.array(viz.render(state_t))
+                            avg_image += np.asarray(viz.render(state_t))
                             num_image += 1
                         avg_image /= num_image
                         policy_viz_frames.append(avg_image)
@@ -1285,7 +1284,7 @@ class JaxPlannerDashboard:
         the dashboard.'''        
         return {
             'rddl': planner.rddl,
-            'string': str(planner),
+            'string': planner.summarize_system() + str(planner),
             'model_parameter_info': planner.compiled.model_parameter_info(),
             'trace_info': planner.compiled.traced
         }
@@ -1405,7 +1404,7 @@ class JaxPlannerDashboard:
         self.train_reward_dist[experiment_id] = callback['train_log']['reward']
         self.test_reward_dist[experiment_id] = callback['reward']
         self.train_state_fluents[experiment_id] = {
-            name: callback['train_log']['fluents'][name] 
+            name: np.asarray(callback['train_log']['fluents'][name])
             for name in rddl.state_fluents or name in rddl.observ_fluents
         }
         self.test_state_fluents[experiment_id] = {
@@ -1455,7 +1454,7 @@ class JaxPlannerDashboard:
                         params.update(fixed_params)
                         param_grid.append(
                             [params[key] for key in optimizer.space.keys])
-                    param_grid = np.array(param_grid)
+                    param_grid = np.asarray(param_grid)
                     mean, std = optimizer._gp.predict(param_grid, return_std=True)
                     mean = mean.reshape(P1.shape)
                     std = std.reshape(P1.shape)
