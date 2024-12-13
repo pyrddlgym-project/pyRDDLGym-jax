@@ -1285,7 +1285,7 @@ class JaxBackpropPlanner:
         self._jax_compile_rddl()        
         self._jax_compile_optimizer()
     
-    def summarize_system(self) -> None:
+    def summarize_system(self) -> str:
         try:
             jaxlib_version = jax._src.lib.version_str
         except Exception as _:
@@ -1304,14 +1304,14 @@ r"""
 \/_____/ \/_/\/_/ \/_/\/_/ \/_/    \/_____/ \/_/\/_/ \/_/ \/_/ 
 """
                    
-        print('\n'
-              f'{LOGO}\n'
-              f'Version {__version__}\n' 
-              f'Python {sys.version}\n'
-              f'jax {jax.version.__version__}, jaxlib {jaxlib_version}, '
-              f'optax {optax.__version__}, haiku {hk.__version__}, '
-              f'numpy {np.__version__}\n'
-              f'devices: {devices_short}\n')
+        return ('\n'
+                f'{LOGO}\n'
+                f'Version {__version__}\n' 
+                f'Python {sys.version}\n'
+                f'jax {jax.version.__version__}, jaxlib {jaxlib_version}, '
+                f'optax {optax.__version__}, haiku {hk.__version__}, '
+                f'numpy {np.__version__}\n'
+                f'devices: {devices_short}\n')
     
     def __str__(self) -> str:
         result = (f'objective hyper-parameters:\n'
@@ -1732,7 +1732,7 @@ r"""
             
         # print summary of parameters:
         if print_summary:
-            self.summarize_system()
+            print(self.summarize_system())
             self.summarize_hyperparameters()
             print(f'optimize() call hyper-parameters:\n'
                   f'    PRNG key           ={key}\n'
