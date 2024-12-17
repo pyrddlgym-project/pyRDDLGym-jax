@@ -195,7 +195,7 @@ class JaxParameterTuning:
     
     @staticmethod
     def offline_trials(env, planner, train_args, key, iteration, index, num_trials, 
-                       verbose, queue):
+                       verbose, viz, queue):
         average_reward = 0.0
         for trial in range(num_trials):
             key, subkey = jax.random.split(key)
@@ -204,7 +204,8 @@ class JaxParameterTuning:
                 queue.put((
                     experiment_id, 
                     JaxPlannerDashboard.get_planner_info(planner), 
-                    subkey[0]
+                    subkey[0],
+                    viz
                 ))
             
             # train the policy
@@ -233,7 +234,7 @@ class JaxParameterTuning:
     
     @staticmethod
     def online_trials(env, planner, train_args, key, iteration, index, num_trials, 
-                      verbose, queue):
+                      verbose, viz, queue):
         average_reward = 0.0
         for trial in range(num_trials):
             key, subkey = jax.random.split(key)
@@ -242,7 +243,8 @@ class JaxParameterTuning:
                 queue.put((
                     experiment_id, 
                     JaxPlannerDashboard.get_planner_info(planner), 
-                    subkey[0]
+                    subkey[0],
+                    viz
                 ))
             
             # initialize the online policy
@@ -297,6 +299,7 @@ class JaxParameterTuning:
         domain = kwargs['domain']
         instance = kwargs['instance']
         num_trials = kwargs['eval_trials']
+        viz = kwargs['viz']
         verbose = kwargs['verbose']
         
         # config string substitution and parsing
@@ -319,12 +322,12 @@ class JaxParameterTuning:
         if online:
             average_reward = JaxParameterTuning.online_trials(
                 env, planner, train_args, key, iteration, index, num_trials, 
-                verbose, queue
+                verbose, viz, queue
             )
         else:
             average_reward = JaxParameterTuning.offline_trials(
                 env, planner, train_args, key, iteration, index, 
-                num_trials, verbose, queue
+                num_trials, verbose, viz, queue
             )
         
         pid = os.getpid()
@@ -358,6 +361,7 @@ class JaxParameterTuning:
             'domain': self.env.domain_text,
             'instance': self.env.instance_text,
             'eval_trials': self.eval_trials,
+            'viz': self.env._visualizer,
             'verbose': self.verbose
         }
         
