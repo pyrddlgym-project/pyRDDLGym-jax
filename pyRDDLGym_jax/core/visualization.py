@@ -910,7 +910,6 @@ class JaxPlannerDashboard:
                             state_t = {name: values[idx, t]
                                        for (name, values) in states.items()}
                             state_t = self.rddl[row].ground_vars_with_values(state_t)
-                            print(f'rendering {idx}, {t}')
                             avg_image += np.asarray(viz.render(state_t))
                             num_image += 1
                         avg_image /= num_image
