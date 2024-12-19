@@ -1231,6 +1231,7 @@ class JaxBackpropPlanner:
             optimizer_kwargs = {'learning_rate': 0.1}
         self._optimizer_kwargs = optimizer_kwargs
         self.clip_grad = clip_grad
+        self.ls_params = line_search_params
         self.noise_grad_eta = noise_grad_eta
         self.noise_grad_gamma = noise_grad_gamma
         
@@ -1333,6 +1334,7 @@ r"""
                   f'    optimizer         ={self._optimizer_name}\n'
                   f'    optimizer args    ={self._optimizer_kwargs}\n'
                   f'    clip_gradient     ={self.clip_grad}\n'
+                  f'    line_search_params={self.ls_params}\n'
                   f'    noise_grad_eta    ={self.noise_grad_eta}\n'
                   f'    noise_grad_gamma  ={self.noise_grad_gamma}\n'
                   f'    batch_size_train  ={self.batch_size_train}\n'
