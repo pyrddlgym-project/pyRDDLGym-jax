@@ -1161,6 +1161,7 @@ class JaxBackpropPlanner:
                  optimizer: Callable[..., optax.GradientTransformation]=optax.rmsprop,
                  optimizer_kwargs: Optional[Kwargs]=None,
                  clip_grad: Optional[float]=None,
+                 line_search_params: Optional[Kwargs]=None,
                  noise_grad_eta: float=0.0,
                  noise_grad_gamma: float=1.0,
                  logic: Logic=FuzzyLogic(),
@@ -1190,6 +1191,8 @@ class JaxBackpropPlanner:
         :param optimizer_kwargs: a dictionary of parameters to pass to the SGD
         factory (e.g. which parameters are controllable externally)
         :param clip_grad: maximum magnitude of gradient updates
+        :param line_search_params: parameters to pass to optional line search
+        method to scale learning rate
         :param noise_grad_eta: scale of the gradient noise variance
         :param noise_grad_gamma: decay rate of the gradient noise variance
         :param logic: a subclass of Logic for mapping exact mathematical
@@ -1239,14 +1242,17 @@ class JaxBackpropPlanner:
                 f'Failed to inject hyperparameters into optax optimizer {optimizer}, '
                 'rolling back to safer method: please note that modification of '
                 'optimizer hyperparameters will not work.', 'red')
-            optimizer = optimizer(**optimizer_kwargs)     
-        if clip_grad is None:
-            self.optimizer = optimizer
-        else:
-            self.optimizer = optax.chain(
-                optax.clip(clip_grad),
-                optimizer
-            )
+            optimizer = optimizer(**optimizer_kwargs)   
+        
+        # apply optimizer chain of transformations
+        pipeline = []  
+        if clip_grad is not None:
+            pipeline.append(optax.clip(clip_grad))
+        pipeline.append(optimizer)
+        self._use_ls = line_search_params is not None
+        if self._use_ls:
+            pipeline.append(optax.scale_by_zoom_linesearch(**line_search_params))
+        self.optimizer = optax.chain(*pipeline)
         
         # set utility
         if isinstance(utility, str):
@@ -1486,7 +1492,15 @@ r"""
                 key, policy_params, policy_hyperparams, subs, model_params)  
             sigma = opt_aux.get('noise_sigma', 0.0)
             grad = _jax_wrapped_gaussian_param_noise(key, grad, sigma)
-            updates, opt_state = optimizer.update(grad, opt_state, params=policy_params) 
+            if self._use_ls:
+                value_fn = lambda params_: loss(
+                    key, params_, policy_hyperparams, subs, model_params)[0]
+                updates, opt_state = optimizer.update(
+                    grad, opt_state, params=policy_params, 
+                    value=loss_val, grad=grad, value_fn=value_fn) 
+            else:
+                updates, opt_state = optimizer.update(
+                    grad, opt_state, params=policy_params) 
             policy_params = optax.apply_updates(policy_params, updates)
             policy_params, converged = projection(policy_params, policy_hyperparams)
             log['grad'] = grad
@@ -2054,107 +2068,6 @@ r"""
         actions = jax.tree_map(np.asarray, actions)
         return actions      
     
-
-class JaxLineSearchPlanner(JaxBackpropPlanner):
-    '''A class for optimizing an action sequence in the given RDDL MDP using 
-    linear search gradient descent, with the Armijo condition.'''
-    
-    def __init__(self, *args,
-                 decay: float=0.8,
-                 c: float=0.1,
-                 step_max: float=1.0,
-                 step_min: float=1e-6,
-                 **kwargs) -> None:
-        '''Creates a new gradient-based algorithm for optimizing action sequences
-        (plan) in the given RDDL using line search. All arguments are the
-        same as in the parent class, except:
-        
-        :param decay: reduction factor of learning rate per line search iteration
-        :param c: positive coefficient in Armijo condition, should be in (0, 1)
-        :param step_max: initial learning rate for line search
-        :param step_min: minimum possible learning rate (line search halts)
-        '''
-        self.decay = decay
-        self.c = c
-        self.step_max = step_max
-        self.step_min = step_min
-        if 'clip_grad' in kwargs:
-            raise_warning('clip_grad parameter conflicts with '
-                          'line search planner and will be ignored.', 'red')
-            del kwargs['clip_grad']
-        super(JaxLineSearchPlanner, self).__init__(*args, **kwargs)
-    
-    def __str__(self) -> str:
-        result = super().__str__()
-        result += (f'\n' 
-                   f'linesearch hyper-parameters:\n'
-                   f'    decay   ={self.decay}\n'
-                   f'    c       ={self.c}\n'
-                   f'    lr_range=({self.step_min}, {self.step_max})')
-        return result
-    
-    def _jax_update(self, loss):
-        optimizer = self.optimizer
-        projection = self.plan.projection
-        decay, c, lrmax, lrmin = self.decay, self.c, self.step_max, self.step_min
-        
-        # initialize the line search routine
-        @jax.jit
-        def _jax_wrapped_line_search_init(key, policy_params, policy_hyperparams,
-                                          subs, model_params):
-            value_and_grad_fn = jax.value_and_grad(loss, argnums=1, has_aux=True)
-            (f, (log, model_params)), grad = value_and_grad_fn(
-                key, policy_params, policy_hyperparams, subs, model_params)     
-            gnorm2 = jax.tree_map(lambda x: jnp.sum(jnp.square(x)), grad)
-            gnorm2 = jax.tree_util.tree_reduce(jnp.add, gnorm2)
-            log['grad'] = grad
-            return f, grad, gnorm2, log, model_params
-            
-        # compute the next trial solution
-        @jax.jit
-        def _jax_wrapped_line_search_trial(step, grad, key, policy_params, 
-                                           policy_hyperparams, subs, 
-                                           model_params, opt_state):
-            opt_state.hyperparams['learning_rate'] = step
-            updates, new_opt_state = optimizer.update(grad, opt_state, params=policy_params)
-            new_policy_params = optax.apply_updates(policy_params, updates)
-            new_policy_params, _ = projection(new_policy_params, policy_hyperparams)
-            f_step, (_, model_params) = loss(
-                key, new_policy_params, policy_hyperparams, subs, model_params)
-            return f_step, new_policy_params, new_opt_state, model_params
-        
-        # main iteration of line search     
-        def _jax_wrapped_plan_update(key, policy_params, policy_hyperparams,
-                                     subs, model_params, opt_state, opt_aux):
-            
-            # initialize the line search
-            f, grad, gnorm2, log, model_params = _jax_wrapped_line_search_init(
-                key, policy_params, policy_hyperparams, subs, model_params)            
-            
-            # continue to reduce the learning rate until the Armijo condition holds
-            trials = 0
-            step = lrmax / decay
-            f_step = np.inf
-            best_f, best_step, best_params, best_state = np.inf, None, None, None
-            while (f_step > f - c * step * gnorm2 and step * decay >= lrmin) \
-            or not trials:
-                trials += 1
-                step *= decay
-                f_step, new_params, new_state, model_params = _jax_wrapped_line_search_trial(
-                    step, grad, key, policy_params, policy_hyperparams, subs,
-                    model_params, opt_state)
-                if f_step < best_f:
-                    best_f, best_step, best_params, best_state = \
-                        f_step, step, new_params, new_state
-            
-            log['updates'] = None
-            log['line_search_iters'] = trials
-            log['learning_rate'] = best_step
-            opt_aux['best_step'] = best_step
-            return best_params, True, best_state, opt_aux, best_f, log, model_params
-            
-        return _jax_wrapped_plan_update
-
 
 # ***********************************************************************
 # ALL VERSIONS OF RISK FUNCTIONS
