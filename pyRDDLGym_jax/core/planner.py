@@ -1485,6 +1485,10 @@ r"""
         
         # calculate the plan gradient w.r.t. return loss and update optimizer
         # also perform a projection step to satisfy constraints on actions
+        def _jax_wrapped_loss_swapped(policy_params, key, policy_hyperparams,
+                                      subs, model_params):
+            return loss(key, policy_params, policy_hyperparams, subs, model_params)[0]
+            
         def _jax_wrapped_plan_update(key, policy_params, policy_hyperparams,
                                      subs, model_params, opt_state, opt_aux):
             grad_fn = jax.value_and_grad(loss, argnums=1, has_aux=True)
@@ -1493,11 +1497,11 @@ r"""
             sigma = opt_aux.get('noise_sigma', 0.0)
             grad = _jax_wrapped_gaussian_param_noise(key, grad, sigma)
             if self._use_ls:
-                value_fn = lambda params_: loss(
-                    key, params_, policy_hyperparams, subs, model_params)[0]
                 updates, opt_state = optimizer.update(
                     grad, opt_state, params=policy_params, 
-                    value=loss_val, grad=grad, value_fn=value_fn) 
+                    value=loss_val, grad=grad, value_fn=_jax_wrapped_loss_swapped,
+                    key=key, policy_hyperparams=policy_hyperparams, subs=subs,
+                    model_params=model_params)
             else:
                 updates, opt_state = optimizer.update(
                     grad, opt_state, params=policy_params) 
