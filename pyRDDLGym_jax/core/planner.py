@@ -1162,8 +1162,7 @@ class JaxBackpropPlanner:
                  optimizer_kwargs: Optional[Kwargs]=None,
                  clip_grad: Optional[float]=None,
                  line_search_params: Optional[Kwargs]=None,
-                 noise_grad_eta: float=0.0,
-                 noise_grad_gamma: float=1.0,
+                 noise_params: Optional[Kwargs]=None,
                  logic: Logic=FuzzyLogic(),
                  use_symlog_reward: bool=False,
                  utility: Union[Callable[[jnp.ndarray], float], str]='mean',
@@ -1193,8 +1192,7 @@ class JaxBackpropPlanner:
         :param clip_grad: maximum magnitude of gradient updates
         :param line_search_params: parameters to pass to optional line search
         method to scale learning rate
-        :param noise_grad_eta: scale of the gradient noise variance
-        :param noise_grad_gamma: decay rate of the gradient noise variance
+        :param noise_params: parameters of optional gradient noise
         :param logic: a subclass of Logic for mapping exact mathematical
         operations to their differentiable counterparts 
         :param use_symlog_reward: whether to use the symlog transform on the 
@@ -1232,8 +1230,7 @@ class JaxBackpropPlanner:
         self._optimizer_kwargs = optimizer_kwargs
         self.clip_grad = clip_grad
         self.ls_params = line_search_params
-        self.noise_grad_eta = noise_grad_eta
-        self.noise_grad_gamma = noise_grad_gamma
+        self.noise_params = noise_params
         
         # set optimizer
         try:
@@ -1249,6 +1246,8 @@ class JaxBackpropPlanner:
         pipeline = []  
         if clip_grad is not None:
             pipeline.append(optax.clip(clip_grad))
+        if noise_params is not None:
+            pipeline.append(optax.add_noise(**noise_params))
         pipeline.append(optimizer)
         self._use_ls = line_search_params is not None
         if self._use_ls:
@@ -1335,8 +1334,7 @@ r"""
                   f'    optimizer args    ={self._optimizer_kwargs}\n'
                   f'    clip_gradient     ={self.clip_grad}\n'
                   f'    line_search_params={self.ls_params}\n'
-                  f'    noise_grad_eta    ={self.noise_grad_eta}\n'
-                  f'    noise_grad_gamma  ={self.noise_grad_gamma}\n'
+                  f'    noise_params      ={self.noise_params}\n'
                   f'    batch_size_train  ={self.batch_size_train}\n'
                   f'    batch_size_test   ={self.batch_size_test}')
         result += '\n' + str(self.plan)
@@ -1472,19 +1470,6 @@ r"""
         optimizer = self.optimizer
         projection = self.plan.projection
         
-        # add Gaussian gradient noise per Neelakantan et al., 2016.
-        def _jax_wrapped_gaussian_param_noise(key, grads, sigma):
-            treedef = jax.tree_util.tree_structure(grads)
-            keys_flat = random.split(key, num=treedef.num_leaves)            
-            keys_tree = jax.tree_util.tree_unflatten(treedef, keys_flat)
-            new_grads = jax.tree_map(
-                lambda g, k: g + sigma * random.normal(
-                    key=k, shape=g.shape, dtype=g.dtype),
-                grads,
-                keys_tree
-            )
-            return new_grads
-        
         # calculate the plan gradient w.r.t. return loss and update optimizer
         # also perform a projection step to satisfy constraints on actions
         def _jax_wrapped_loss_swapped(policy_params, key, policy_hyperparams,
@@ -1495,9 +1480,7 @@ r"""
                                      subs, model_params, opt_state, opt_aux):
             grad_fn = jax.value_and_grad(loss, argnums=1, has_aux=True)
             (loss_val, (log, model_params)), grad = grad_fn(
-                key, policy_params, policy_hyperparams, subs, model_params)  
-            sigma = opt_aux.get('noise_sigma', 0.0)
-            grad = _jax_wrapped_gaussian_param_noise(key, grad, sigma)
+                key, policy_params, policy_hyperparams, subs, model_params)
             if self._use_ls:
                 updates, opt_state = optimizer.update(
                     grad, opt_state, params=policy_params, 
@@ -1843,11 +1826,6 @@ r"""
             
             status = JaxPlannerStatus.NORMAL
             
-            # gradient noise schedule
-            noise_var = self.noise_grad_eta / (1. + it) ** self.noise_grad_gamma
-            noise_sigma = np.sqrt(noise_var)
-            opt_aux['noise_sigma'] = noise_sigma
-            
             # update the parameters of the plan
             key, subkey = random.split(key)
             (policy_params, converged, opt_state, opt_aux, 
@@ -1909,7 +1887,6 @@ r"""
                 'last_iteration_improved': last_iter_improve,
                 'grad': train_log['grad'],
                 'best_grad': best_grad,
-                'noise_sigma': noise_sigma,
                 'updates': train_log['updates'],
                 'elapsed_time': elapsed,
                 'key': key,
