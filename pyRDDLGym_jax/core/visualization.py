@@ -417,7 +417,8 @@ class JaxPlannerDashboard:
                         dbc.Tab(dbc.Card(
                             dbc.CardBody([
                                 dbc.Row([
-                                    dbc.Alert(id="planner-info", color="light", dismissable=False)
+                                    dbc.Alert(id="planner-info", color="light", dismissable=False,
+                                              style={"fontFamily": "Courier, monospace"})
                                 ]),
                             ]), className="border-0 bg-transparent"
                         ), label="Debug", tab_id='tab-debug'
