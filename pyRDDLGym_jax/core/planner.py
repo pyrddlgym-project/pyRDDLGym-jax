@@ -1236,10 +1236,9 @@ class JaxBackpropPlanner:
             optimizer = optax.inject_hyperparams(optimizer)(**optimizer_kwargs)
         except Exception as _:
             raise_warning(
-                'Failed to inject hyperparameters into optax optimizer, '
+                f'Failed to inject hyperparameters into optax optimizer {optimizer}, '
                 'rolling back to safer method: please note that modification of '
-                'optimizer hyperparameters will not work, and it is '
-                'recommended to update optax and related packages.', 'red')
+                'optimizer hyperparameters will not work.', 'red')
             optimizer = optimizer(**optimizer_kwargs)     
         if clip_grad is None:
             self.optimizer = optimizer
@@ -1325,7 +1324,7 @@ r"""
                   f'    cpfs_no_gradient  ={self.cpfs_without_grad}\n'
                   f'optimizer hyper-parameters:\n'
                   f'    use_64_bit        ={self.use64bit}\n'
-                  f'    optimizer         ={self._optimizer_name.__name__}\n'
+                  f'    optimizer         ={self._optimizer_name}\n'
                   f'    optimizer args    ={self._optimizer_kwargs}\n'
                   f'    clip_gradient     ={self.clip_grad}\n'
                   f'    noise_grad_eta    ={self.noise_grad_eta}\n'
@@ -1487,7 +1486,7 @@ r"""
                 key, policy_params, policy_hyperparams, subs, model_params)  
             sigma = opt_aux.get('noise_sigma', 0.0)
             grad = _jax_wrapped_gaussian_param_noise(key, grad, sigma)
-            updates, opt_state = optimizer.update(grad, opt_state) 
+            updates, opt_state = optimizer.update(grad, opt_state, params=policy_params) 
             policy_params = optax.apply_updates(policy_params, updates)
             policy_params, converged = projection(policy_params, policy_hyperparams)
             log['grad'] = grad
@@ -2117,7 +2116,7 @@ class JaxLineSearchPlanner(JaxBackpropPlanner):
                                            policy_hyperparams, subs, 
                                            model_params, opt_state):
             opt_state.hyperparams['learning_rate'] = step
-            updates, new_opt_state = optimizer.update(grad, opt_state)
+            updates, new_opt_state = optimizer.update(grad, opt_state, params=policy_params)
             new_policy_params = optax.apply_updates(policy_params, updates)
             new_policy_params, _ = projection(new_policy_params, policy_hyperparams)
             f_step, (_, model_params) = loss(
