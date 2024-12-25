@@ -51,13 +51,13 @@ To install JaxPlan with the **automatic hyper-parameter tuning** and rddlreposit
 pip install pyRDDLGym-jax[extra]
 ```
 
-(Coming soon to pip) To install JaxPlan with the **visualization dashboard**:
+(Since version 1.0) To install JaxPlan with the **visualization dashboard**:
 
 ```shell
 pip install pyRDDLGym-jax[dashboard]
 ```
 
-(Coming soon to pip) To install JaxPlan with **all options**:
+(Since version 1.0) To install JaxPlan with **all options**:
 
 ```shell
 pip install pyRDDLGym-jax[extra,dashboard]
