@@ -64,6 +64,7 @@ class JaxParameterTuning:
                  hyperparams: Hyperparameters,
                  online: bool,
                  eval_trials: int=5,
+                 rollouts_per_trial: int=1,
                  verbose: bool=True,
                  timeout_tuning: float=np.inf,
                  pool_context: str='spawn',
@@ -87,6 +88,8 @@ class JaxParameterTuning:
         hyperparameters in general (in seconds)
         :param eval_trials: how many trials to perform independent training
         in order to estimate the return for each set of hyper-parameters
+        :param rollouts_per_trial: how many rollouts to perform during evaluation
+        at the end of each training trial (only applies when online=False)
         :param verbose: whether to print intermediate results of tuning
         :param pool_context: context for multiprocessing pool (default "spawn")
         :param num_workers: how many points to evaluate in parallel
@@ -108,6 +111,7 @@ class JaxParameterTuning:
         self.hyperparams_dict = hyperparams_dict
         self.online = online
         self.eval_trials = eval_trials
+        self.rollouts_per_trial = rollouts_per_trial
         self.verbose = verbose
         
         # Bayesian parameters
@@ -154,6 +158,7 @@ class JaxParameterTuning:
               f'    mp_pool_poll_frequency    ={self.poll_frequency}\n'
               f'meta-objective parameters:\n'
               f'    planning_trials_per_iter  ={self.eval_trials}\n'
+              f'    rollouts_per_trial        ={self.rollouts_per_trial}\n'
               f'    acquisition_fn            ={self.acquisition}')
         
     @staticmethod
@@ -200,12 +205,14 @@ class JaxParameterTuning:
     
     @staticmethod
     def offline_trials(env, planner, train_args, key, iteration, index, num_trials, 
-                       verbose, viz, queue):
+                       rollouts_per_trial, verbose, viz, queue):
         average_reward = 0.0
         for trial in range(num_trials):
             key, subkey = jax.random.split(key)
+            
+            # for the dashboard
             experiment_id = f'iter={iteration}, worker={index}, trial={trial}'
-            if queue is not None:
+            if queue is not None and JaxPlannerDashboard is not None:
                 queue.put((
                     experiment_id, 
                     JaxPlannerDashboard.get_planner_info(planner), 
@@ -224,7 +231,8 @@ class JaxParameterTuning:
             policy = JaxOfflineController(
                 planner=planner, key=subkey, tqdm_position=index, 
                 params=best_params, train_on_reset=False)
-            total_reward = policy.evaluate(env, seed=np.array(subkey)[0])['mean']
+            total_reward = policy.evaluate(env, episodes=rollouts_per_trial, 
+                                           seed=np.array(subkey)[0])['mean']
             
             # update average reward
             if verbose:
@@ -243,8 +251,10 @@ class JaxParameterTuning:
         average_reward = 0.0
         for trial in range(num_trials):
             key, subkey = jax.random.split(key)
+            
+            # for the dashboard
             experiment_id = f'iter={iteration}, worker={index}, trial={trial}'
-            if queue is not None:
+            if queue is not None and JaxPlannerDashboard is not None:
                 queue.put((
                     experiment_id, 
                     JaxPlannerDashboard.get_planner_info(planner), 
@@ -304,6 +314,7 @@ class JaxParameterTuning:
         domain = kwargs['domain']
         instance = kwargs['instance']
         num_trials = kwargs['eval_trials']
+        rollouts_per_trial = kwargs['rollouts_per_trial']
         viz = kwargs['viz']
         verbose = kwargs['verbose']
         
@@ -332,7 +343,7 @@ class JaxParameterTuning:
         else:
             average_reward = JaxParameterTuning.offline_trials(
                 env, planner, train_args, key, iteration, index, 
-                num_trials, verbose, viz, queue
+                num_trials, rollouts_per_trial, verbose, viz, queue
             )
         
         pid = os.getpid()
@@ -353,7 +364,7 @@ class JaxParameterTuning:
             writer.writerow(COLUMNS + list(self.hyperparams_dict.keys()))
         
         # create a dash-board for visualizing experiment runs
-        if show_dashboard:
+        if show_dashboard and JaxPlannerDashboard is not None:
             dashboard = JaxPlannerDashboard()
             dashboard.launch()
             
@@ -365,6 +376,7 @@ class JaxParameterTuning:
             'domain': self.env.domain_text,
             'instance': self.env.instance_text,
             'eval_trials': self.eval_trials,
+            'rollouts_per_trial': self.rollouts_per_trial,
             'viz': self.env._visualizer,
             'verbose': self.verbose
         }
