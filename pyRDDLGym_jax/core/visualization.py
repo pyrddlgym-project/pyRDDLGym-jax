@@ -1405,7 +1405,7 @@ class JaxPlannerDashboard:
         self.test_reward_dist[experiment_id] = callback['reward']
         self.train_state_fluents[experiment_id] = {
             name: np.asarray(callback['train_log']['fluents'][name])
-            for name in rddl.state_fluents or name in rddl.observ_fluents
+            for name in rddl.state_fluents
         }
         self.test_state_fluents[experiment_id] = {
             name: np.asarray(callback['fluents'][name])
