@@ -4,6 +4,7 @@ import threading
 import multiprocessing
 import os
 import time
+import traceback
 from typing import Any, Callable, Dict, Iterable, Optional, Tuple
 import warnings
 warnings.filterwarnings("ignore")
@@ -14,6 +15,7 @@ from bayes_opt.acquisition import AcquisitionFunction, UpperConfidenceBound
 import jax
 import numpy as np
 
+from pyRDDLGym.core.debug.exception import raise_warning
 from pyRDDLGym.core.env import RDDLEnv
 
 from pyRDDLGym_jax.core.planner import (
