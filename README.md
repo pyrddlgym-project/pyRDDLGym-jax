@@ -1,6 +1,15 @@
 # pyRDDLGym-jax
 
-**pyRDDLGym-jax (known in the literature as JaxPlan) is an efficient gradient-based/differentiable planning algorithm in JAX.** It provides:
+![Python Version](https://img.shields.io/badge/python-3.9%2B-blue)
+[![PyPI Version](https://img.shields.io/pypi/v/pyRDDLGym-jax.svg)](https://pypi.org/project/pyRDDLGym-jax/)
+[![Documentation Status](https://readthedocs.org/projects/pyrddlgym/badge/?version=latest)](https://pyrddlgym.readthedocs.io/en/latest/jax.html)
+![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)
+
+[Installation](#installation) | [Run cmd](#running-from-the-command-line) | [Run python](#running-from-another-python-application) | [Configuration](#configuring-the-planner) | [Dashboard](#jaxplan-dashboard) | [Tuning](#tuning-the-planner) | [Simulation](#simulation) | [Citing](#citing-jaxplan)
+
+**pyRDDLGym-jax (known in the literature as JaxPlan) is an efficient gradient-based/differentiable planning algorithm in JAX.** 
+
+Purpose:
 
 1. automatic translation of any RDDL description file into a differentiable simulator in JAX
 2. flexible policy class representations, automatic model relaxations for working in discrete and hybrid domains, and Bayesian hyper-parameter tuning.
@@ -25,17 +34,6 @@ and was moved to the individual logic components which have their own unique wei
 > [!NOTE]  
 > While JaxPlan can support some discrete state/action problems through model relaxations, on some discrete problems it can perform poorly (though there is an ongoing effort to remedy this!).
 > If you find it is not making sufficient progress, check out the [PROST planner](https://github.com/pyrddlgym-project/pyRDDLGym-prost) (for discrete spaces) or the [deep reinforcement learning wrappers](https://github.com/pyrddlgym-project/pyRDDLGym-rl).
-
-## Contents
-
-- [Installation](#installation)
-- [Running from the Command Line](#running-from-the-command-line)
-- [Running from Another Python Application](#running-from-another-python-application)
-- [Configuring the Planner](#configuring-the-planner)
-- [JaxPlan Dashboard](#jaxplan-dashboard)
-- [Tuning the Planner](#tuning-the-planner)
-- [Simulation](#simulation)
-- [Citing JaxPlan](#citing-jaxplan)
   
 ## Installation
 
