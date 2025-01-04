@@ -1661,7 +1661,7 @@ r"""
     def optimize_generator(self, key: Optional[random.PRNGKey]=None,
                            epochs: int=999999,
                            train_seconds: float=120.,
-                           dashboard: Optional[JaxPlannerDashboard]=None,
+                           dashboard: Optional[Any]=None,
                            dashboard_id: Optional[str]=None,
                            model_params: Optional[Dict[str, Any]]=None,
                            policy_hyperparams: Optional[Dict[str, Any]]=None,
