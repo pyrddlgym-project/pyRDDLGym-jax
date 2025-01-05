@@ -65,9 +65,8 @@ def _parse_config_file(path: str):
     config = configparser.RawConfigParser()
     config.optionxform = str 
     config.read(path)
-    args = {k: literal_eval(v) 
-            for section in config.sections()
-            for (k, v) in config.items(section)}
+    args = {section: {k: literal_eval(v) for (k, v) in config.items(section)}
+            for section in config.sections()}
     return config, args
 
 
@@ -75,9 +74,8 @@ def _parse_config_string(value: str):
     config = configparser.RawConfigParser()
     config.optionxform = str 
     config.read_string(value)
-    args = {k: literal_eval(v) 
-            for section in config.sections()
-            for (k, v) in config.items(section)}
+    args = {section: {k: literal_eval(v) for (k, v) in config.items(section)}
+            for section in config.sections()}
     return config, args
 
 
@@ -90,9 +88,9 @@ def _getattr_any(packages, item):
 
 
 def _load_config(config, args):
-    model_args = {k: args[k] for (k, _) in config.items('Model')}
-    planner_args = {k: args[k] for (k, _) in config.items('Optimizer')}
-    train_args = {k: args[k] for (k, _) in config.items('Training')}    
+    model_args = {k: args['Model'][k] for (k, _) in config.items('Model')}
+    planner_args = {k: args['Optimizer'][k] for (k, _) in config.items('Optimizer')}
+    train_args = {k: args['Training'][k] for (k, _) in config.items('Training')}    
     
     # read the model settings
     logic_name = model_args.get('logic', 'FuzzyLogic')
