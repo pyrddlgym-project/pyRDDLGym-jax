@@ -75,8 +75,7 @@ def main(domain, instance, method, trials=5, iters=20, workers=4):
     env.close()
 
 
-if __name__ == "__main__":
-    args = sys.argv[1:]
+def run_from_args(args):
     if len(args) < 3:
         print('python run_tune.py <domain> <instance> <method> [<trials>] [<iters>] [<workers>]')
         exit(1)
@@ -88,4 +87,7 @@ if __name__ == "__main__":
     if len(args) >= 5: kwargs['iters'] = int(args[4])
     if len(args) >= 6: kwargs['workers'] = int(args[5])
     main(**kwargs) 
-    
+
+
+if __name__ == "__main__":
+    run_from_args(sys.argv[1:])

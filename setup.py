@@ -43,6 +43,9 @@ setup(
       python_requires=">=3.9",
       package_data={'': ['*.cfg', '*.ico']},
       include_package_data=True,
+      entry_points={ 
+          'console_scripts': [ 'jaxplan=pyRDDLGym_jax.entry_point:main'],
+      },
       classifiers=[
         "Development Status :: 5 - Production/Stable",
         "Intended Audience :: Science/Research",

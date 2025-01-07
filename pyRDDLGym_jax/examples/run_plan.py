@@ -54,9 +54,8 @@ def main(domain, instance, method, episodes=1):
     controller.evaluate(env, episodes=episodes, verbose=True, render=True)
     env.close()
         
-        
-if __name__ == "__main__":
-    args = sys.argv[1:]
+
+def run_from_args(args):
     if len(args) < 3:
         print('python run_plan.py <domain> <instance> <method> [<episodes>]')
         exit(1)
@@ -66,4 +65,8 @@ if __name__ == "__main__":
     kwargs = {'domain': args[0], 'instance': args[1], 'method': args[2]}
     if len(args) >= 4: kwargs['episodes'] = int(args[3])
     main(**kwargs)
+
+
+if __name__ == "__main__":
+    run_from_args(sys.argv[1:])
     
