@@ -41,7 +41,7 @@ setup(
           'dashboard': ['dash>=2.18.0', 'dash-bootstrap-components>=1.6.0']
       },
       python_requires=">=3.9",
-      package_data={'': ['*.cfg']},
+      package_data={'': ['*.cfg', '*.ico']},
       include_package_data=True,
       classifiers=[
         "Development Status :: 5 - Production/Stable",
