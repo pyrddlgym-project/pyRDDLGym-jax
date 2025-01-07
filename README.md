@@ -73,15 +73,16 @@ jaxplan plan <domain> <instance> <method> <episodes>
 where:
 - ``domain`` is the domain identifier as specified in rddlrepository (i.e. Wildfire_MDP_ippc2014), or a path pointing to a valid ``domain.rddl`` file
 - ``instance`` is the instance identifier (i.e. 1, 2, ... 10), or a path pointing to a valid ``instance.rddl`` file
-- ``method`` is the planning method to use (i.e. drp, slp, replan)
+- ``method`` is the planning method to use (i.e. drp, slp, replan) or a path to a valid .cfg file (see section below)
 - ``episodes`` is the (optional) number of episodes to evaluate the learned policy.
 
-The ``method`` parameter supports three possible modes:
+The ``method`` parameter supports four possible modes:
 - ``slp`` is the basic straight line planner described [in this paper](https://proceedings.neurips.cc/paper_files/paper/2017/file/98b17f068d5d9b7668e19fb8ae470841-Paper.pdf)
 - ``drp`` is the deep reactive policy network described [in this paper](https://ojs.aaai.org/index.php/AAAI/article/view/4744)
-- ``replan`` is the same as ``slp`` except the plan is recalculated at every decision time step.
+- ``replan`` is the same as ``slp`` except the plan is recalculated at every decision time step
+- any other argument is interpreted as a file path to a valid configuration file.
    
-For example, the following will train JaxPlan on the Quadcopter domain with 4 drones:
+For example, the following will train JaxPlan on the Quadcopter domain with 4 drones (with default config):
 
 ```shell
 jaxplan plan Quadcopter 1 slp
