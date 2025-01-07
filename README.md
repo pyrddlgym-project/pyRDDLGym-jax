@@ -64,10 +64,10 @@ pip install pyRDDLGym-jax[extra,dashboard]
 
 ## Running from the Command Line
 
-A basic run script is provided to run JaxPlan on any domain in ``rddlrepository`` from the install directory of pyRDDLGym-jax:
+A basic run script is provided to train JaxPlan on any RDDL problem:
 
 ```shell
-python -m pyRDDLGym_jax.examples.run_plan <domain> <instance> <method> <episodes>
+jaxplan plan <domain> <instance> <method> <episodes>
 ```
 
 where:
@@ -84,7 +84,7 @@ The ``method`` parameter supports three possible modes:
 For example, the following will train JaxPlan on the Quadcopter domain with 4 drones:
 
 ```shell
-python -m pyRDDLGym_jax.examples.run_plan Quadcopter 1 slp
+jaxplan plan Quadcopter 1 slp
 ```
 
 ## Running from Another Python Application
@@ -249,7 +249,7 @@ tuning.tune(key=42, log_file='path/to/log.csv')
 A basic run script is provided to run the automatic hyper-parameter tuning for the most sensitive parameters of JaxPlan:
 
 ```shell
-python -m pyRDDLGym_jax.examples.run_tune <domain> <instance> <method> <trials> <iters> <workers>
+jaxplan tune <domain> <instance> <method> <trials> <iters> <workers>
 ```
 
 where:
