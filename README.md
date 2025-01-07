@@ -166,7 +166,7 @@ controller = JaxOfflineController(planner, **train_args)
 ...
 ```
 
-### JaxPlan Dashboard
+## JaxPlan Dashboard
 
 Since version 1.0, JaxPlan has an optional dashboard that allows keeping track of the planner performance across multiple runs, 
 and visualization of the policy or model, and other useful debugging features.
@@ -186,7 +186,7 @@ dashboard=True
 
 More documentation about this and other new features will be coming soon.
 
-### Tuning the Planner
+## Tuning the Planner
 
 It is easy to tune the planner's hyper-parameters efficiently and automatically using Bayesian optimization.
 To do this, first create a config file template with patterns replacing concrete parameter values that you want to tune, e.g.:
