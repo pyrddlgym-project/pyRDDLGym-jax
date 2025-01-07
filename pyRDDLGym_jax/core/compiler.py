@@ -51,65 +51,65 @@ class JaxRDDLCompiler:
             return func
         return exact_func
         
-    EXACT_RDDL_TO_JAX_NEGATIVE = wrap_logic(ExactLogic.exact_unary_function(jnp.negative))
+    EXACT_RDDL_TO_JAX_NEGATIVE = wrap_logic.__func__(ExactLogic.exact_unary_function(jnp.negative))
     EXACT_RDDL_TO_JAX_ARITHMETIC = {
-        '+': wrap_logic(ExactLogic.exact_binary_function(jnp.add)),
-        '-': wrap_logic(ExactLogic.exact_binary_function(jnp.subtract)),
-        '*': wrap_logic(ExactLogic.exact_binary_function(jnp.multiply)),
-        '/': wrap_logic(ExactLogic.exact_binary_function(jnp.divide))
+        '+': wrap_logic.__func__(ExactLogic.exact_binary_function(jnp.add)),
+        '-': wrap_logic.__func__(ExactLogic.exact_binary_function(jnp.subtract)),
+        '*': wrap_logic.__func__(ExactLogic.exact_binary_function(jnp.multiply)),
+        '/': wrap_logic.__func__(ExactLogic.exact_binary_function(jnp.divide))
     }            
     
     EXACT_RDDL_TO_JAX_RELATIONAL = {
-        '>=': wrap_logic(ExactLogic.exact_binary_function(jnp.greater_equal)),
-        '<=': wrap_logic(ExactLogic.exact_binary_function(jnp.less_equal)),
-        '<': wrap_logic(ExactLogic.exact_binary_function(jnp.less)),
-        '>': wrap_logic(ExactLogic.exact_binary_function(jnp.greater)),
-        '==': wrap_logic(ExactLogic.exact_binary_function(jnp.equal)),
-        '~=': wrap_logic(ExactLogic.exact_binary_function(jnp.not_equal))
+        '>=': wrap_logic.__func__(ExactLogic.exact_binary_function(jnp.greater_equal)),
+        '<=': wrap_logic.__func__(ExactLogic.exact_binary_function(jnp.less_equal)),
+        '<': wrap_logic.__func__(ExactLogic.exact_binary_function(jnp.less)),
+        '>': wrap_logic.__func__(ExactLogic.exact_binary_function(jnp.greater)),
+        '==': wrap_logic.__func__(ExactLogic.exact_binary_function(jnp.equal)),
+        '~=': wrap_logic.__func__(ExactLogic.exact_binary_function(jnp.not_equal))
     }        
     
-    EXACT_RDDL_TO_JAX_LOGICAL_NOT = wrap_logic(ExactLogic.exact_unary_function(jnp.logical_not))
+    EXACT_RDDL_TO_JAX_LOGICAL_NOT = wrap_logic.__func__(ExactLogic.exact_unary_function(jnp.logical_not))
     EXACT_RDDL_TO_JAX_LOGICAL = {
-        '^': wrap_logic(ExactLogic.exact_binary_function(jnp.logical_and)),
-        '&': wrap_logic(ExactLogic.exact_binary_function(jnp.logical_and)),
-        '|': wrap_logic(ExactLogic.exact_binary_function(jnp.logical_or)),
-        '~': wrap_logic(ExactLogic.exact_binary_function(jnp.logical_xor)),
-        '=>': wrap_logic(ExactLogic.exact_binary_implies),
-        '<=>': wrap_logic(ExactLogic.exact_binary_function(jnp.equal))
+        '^': wrap_logic.__func__(ExactLogic.exact_binary_function(jnp.logical_and)),
+        '&': wrap_logic.__func__(ExactLogic.exact_binary_function(jnp.logical_and)),
+        '|': wrap_logic.__func__(ExactLogic.exact_binary_function(jnp.logical_or)),
+        '~': wrap_logic.__func__(ExactLogic.exact_binary_function(jnp.logical_xor)),
+        '=>': wrap_logic.__func__(ExactLogic.exact_binary_implies),
+        '<=>': wrap_logic.__func__(ExactLogic.exact_binary_function(jnp.equal))
     }    
     
     EXACT_RDDL_TO_JAX_AGGREGATION = {
-        'sum': wrap_logic(ExactLogic.exact_aggregation(jnp.sum)),
-        'avg': wrap_logic(ExactLogic.exact_aggregation(jnp.mean)),
-        'prod': wrap_logic(ExactLogic.exact_aggregation(jnp.prod)),
-        'minimum': wrap_logic(ExactLogic.exact_aggregation(jnp.min)),
-        'maximum': wrap_logic(ExactLogic.exact_aggregation(jnp.max)),
-        'forall': wrap_logic(ExactLogic.exact_aggregation(jnp.all)),
-        'exists': wrap_logic(ExactLogic.exact_aggregation(jnp.any)),
-        'argmin': wrap_logic(ExactLogic.exact_aggregation(jnp.argmin)),
-        'argmax': wrap_logic(ExactLogic.exact_aggregation(jnp.argmax))
+        'sum': wrap_logic.__func__(ExactLogic.exact_aggregation(jnp.sum)),
+        'avg': wrap_logic.__func__(ExactLogic.exact_aggregation(jnp.mean)),
+        'prod': wrap_logic.__func__(ExactLogic.exact_aggregation(jnp.prod)),
+        'minimum': wrap_logic.__func__(ExactLogic.exact_aggregation(jnp.min)),
+        'maximum': wrap_logic.__func__(ExactLogic.exact_aggregation(jnp.max)),
+        'forall': wrap_logic.__func__(ExactLogic.exact_aggregation(jnp.all)),
+        'exists': wrap_logic.__func__(ExactLogic.exact_aggregation(jnp.any)),
+        'argmin': wrap_logic.__func__(ExactLogic.exact_aggregation(jnp.argmin)),
+        'argmax': wrap_logic.__func__(ExactLogic.exact_aggregation(jnp.argmax))
     }
     
     EXACT_RDDL_TO_JAX_UNARY = {        
-        'abs': wrap_logic(ExactLogic.exact_unary_function(jnp.abs)),
-        'sgn': wrap_logic(ExactLogic.exact_unary_function(jnp.sign)),
-        'round': wrap_logic(ExactLogic.exact_unary_function(jnp.round)),
-        'floor': wrap_logic(ExactLogic.exact_unary_function(jnp.floor)),
-        'ceil': wrap_logic(ExactLogic.exact_unary_function(jnp.ceil)),
-        'cos': wrap_logic(ExactLogic.exact_unary_function(jnp.cos)),
-        'sin': wrap_logic(ExactLogic.exact_unary_function(jnp.sin)),
-        'tan': wrap_logic(ExactLogic.exact_unary_function(jnp.tan)),
-        'acos': wrap_logic(ExactLogic.exact_unary_function(jnp.arccos)),
-        'asin': wrap_logic(ExactLogic.exact_unary_function(jnp.arcsin)),
-        'atan': wrap_logic(ExactLogic.exact_unary_function(jnp.arctan)),
-        'cosh': wrap_logic(ExactLogic.exact_unary_function(jnp.cosh)),
-        'sinh': wrap_logic(ExactLogic.exact_unary_function(jnp.sinh)),
-        'tanh': wrap_logic(ExactLogic.exact_unary_function(jnp.tanh)),
-        'exp': wrap_logic(ExactLogic.exact_unary_function(jnp.exp)),
-        'ln': wrap_logic(ExactLogic.exact_unary_function(jnp.log)),
-        'sqrt': wrap_logic(ExactLogic.exact_unary_function(jnp.sqrt)),
-        'lngamma': wrap_logic(ExactLogic.exact_unary_function(scipy.special.gammaln)),
-        'gamma': wrap_logic(ExactLogic.exact_unary_function(scipy.special.gamma))
+        'abs': wrap_logic.__func__(ExactLogic.exact_unary_function(jnp.abs)),
+        'sgn': wrap_logic.__func__(ExactLogic.exact_unary_function(jnp.sign)),
+        'round': wrap_logic.__func__(ExactLogic.exact_unary_function(jnp.round)),
+        'floor': wrap_logic.__func__(ExactLogic.exact_unary_function(jnp.floor)),
+        'ceil': wrap_logic.__func__(ExactLogic.exact_unary_function(jnp.ceil)),
+        'cos': wrap_logic.__func__(ExactLogic.exact_unary_function(jnp.cos)),
+        'sin': wrap_logic.__func__(ExactLogic.exact_unary_function(jnp.sin)),
+        'tan': wrap_logic.__func__(ExactLogic.exact_unary_function(jnp.tan)),
+        'acos': wrap_logic.__func__(ExactLogic.exact_unary_function(jnp.arccos)),
+        'asin': wrap_logic.__func__(ExactLogic.exact_unary_function(jnp.arcsin)),
+        'atan': wrap_logic.__func__(ExactLogic.exact_unary_function(jnp.arctan)),
+        'cosh': wrap_logic.__func__(ExactLogic.exact_unary_function(jnp.cosh)),
+        'sinh': wrap_logic.__func__(ExactLogic.exact_unary_function(jnp.sinh)),
+        'tanh': wrap_logic.__func__(ExactLogic.exact_unary_function(jnp.tanh)),
+        'exp': wrap_logic.__func__(ExactLogic.exact_unary_function(jnp.exp)),
+        'ln': wrap_logic.__func__(ExactLogic.exact_unary_function(jnp.log)),
+        'sqrt': wrap_logic.__func__(ExactLogic.exact_unary_function(jnp.sqrt)),
+        'lngamma': wrap_logic.__func__(ExactLogic.exact_unary_function(scipy.special.gammaln)),
+        'gamma': wrap_logic.__func__(ExactLogic.exact_unary_function(scipy.special.gamma))
     }              
     
     @staticmethod
@@ -117,23 +117,23 @@ class JaxRDDLCompiler:
         return jnp.log(x) / jnp.log(y), params
     
     EXACT_RDDL_TO_JAX_BINARY = {
-        'div': wrap_logic(ExactLogic.exact_binary_function(jnp.floor_divide)),
-        'mod': wrap_logic(ExactLogic.exact_binary_function(jnp.mod)),
-        'fmod': wrap_logic(ExactLogic.exact_binary_function(jnp.mod)),
-        'min': wrap_logic(ExactLogic.exact_binary_function(jnp.minimum)),
-        'max': wrap_logic(ExactLogic.exact_binary_function(jnp.maximum)),
-        'pow': wrap_logic(ExactLogic.exact_binary_function(jnp.power)),
-        'log': wrap_logic(_jax_wrapped_calc_log_exact),
-        'hypot': wrap_logic(ExactLogic.exact_binary_function(jnp.hypot)),
+        'div': wrap_logic.__func__(ExactLogic.exact_binary_function(jnp.floor_divide)),
+        'mod': wrap_logic.__func__(ExactLogic.exact_binary_function(jnp.mod)),
+        'fmod': wrap_logic.__func__(ExactLogic.exact_binary_function(jnp.mod)),
+        'min': wrap_logic.__func__(ExactLogic.exact_binary_function(jnp.minimum)),
+        'max': wrap_logic.__func__(ExactLogic.exact_binary_function(jnp.maximum)),
+        'pow': wrap_logic.__func__(ExactLogic.exact_binary_function(jnp.power)),
+        'log': wrap_logic.__func__(_jax_wrapped_calc_log_exact.__func__),
+        'hypot': wrap_logic.__func__(ExactLogic.exact_binary_function(jnp.hypot)),
     }
     
-    EXACT_RDDL_TO_JAX_IF = wrap_logic(ExactLogic.exact_if_then_else)
-    EXACT_RDDL_TO_JAX_SWITCH = wrap_logic(ExactLogic.exact_switch)
+    EXACT_RDDL_TO_JAX_IF = wrap_logic.__func__(ExactLogic.exact_if_then_else)
+    EXACT_RDDL_TO_JAX_SWITCH = wrap_logic.__func__(ExactLogic.exact_switch)
     
-    EXACT_RDDL_TO_JAX_BERNOULLI = wrap_logic(ExactLogic.exact_bernoulli)
-    EXACT_RDDL_TO_JAX_DISCRETE = wrap_logic(ExactLogic.exact_discrete)
-    EXACT_RDDL_TO_JAX_POISSON = wrap_logic(ExactLogic.exact_poisson)
-    EXACT_RDDL_TO_JAX_GEOMETRIC = wrap_logic(ExactLogic.exact_geometric)
+    EXACT_RDDL_TO_JAX_BERNOULLI = wrap_logic.__func__(ExactLogic.exact_bernoulli)
+    EXACT_RDDL_TO_JAX_DISCRETE = wrap_logic.__func__(ExactLogic.exact_discrete)
+    EXACT_RDDL_TO_JAX_POISSON = wrap_logic.__func__(ExactLogic.exact_poisson)
+    EXACT_RDDL_TO_JAX_GEOMETRIC = wrap_logic.__func__(ExactLogic.exact_geometric)
 
     def __init__(self, rddl: RDDLLiftedModel,
                  allow_synchronous_state: bool=True,
