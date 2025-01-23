@@ -13,6 +13,7 @@ import jax.numpy as jnp
 
 import pyRDDLGym
 from pyRDDLGym.core.compiler.model import RDDLLiftedModel
+from pyRDDLGym.core.policy import BaseAgent
 
 from pyRDDLGym_jax.core.compiler import JaxRDDLCompiler
 from pyRDDLGym_jax.core.logic import Logic, FuzzyLogic
@@ -375,7 +376,7 @@ class JaxMCTSPlanner:
             added = False
         return vD2, added, key
 
-    def _grad_update(self, vD, vC, actions, length, subs):
+    def _grad_update(self, vD, vC, actions, length, subs, key):
         plan = {name: action[np.newaxis, ...] 
                 for (name, action) in vC.action.value.items()}
         length = min(length + 1, self.T)
@@ -423,7 +424,7 @@ class JaxMCTSPlanner:
         vD.update_statistic(vC, R)
        
         # perform an optional gradient update on the immediate action
-        actions, length, gupdate = self._grad_update(vD, vC, actions, length, subs0)
+        actions, length, gupdate = self._grad_update(vD, vC, actions, length, subs0, key)
         total_gupdates += gupdate
 
         return R, key, actions, length, \
@@ -533,30 +534,59 @@ class JaxMCTSPlanner:
         return callback
 
 
+class JaxMCTSController(BaseAgent):
+    '''A container class for a Jax MCTS controller continuously updated using state 
+    feedback.'''
+    
+    use_tensor_obs = True
+    
+    def __init__(self, planner: JaxMCTSPlanner,
+                 key: Optional[random.PRNGKey]=None,
+                 **train_kwargs) -> None:
+        '''Creates a new JAX MCTS control policy that is trained online in a closed-
+        loop fashion.
+        
+        :param planner: underlying MCTS algorithm for optimizing actions
+        :param key: the RNG key to seed randomness (derives from clock if not
+        provided)
+        :param **train_kwargs: any keyword arguments to be passed to the planner
+        for optimization
+        '''
+        self.planner = planner
+        if key is None:
+            key = random.PRNGKey(round(time.time() * 1000))
+        self.key = key
+        self.train_kwargs = train_kwargs
+        self.reset()
+     
+    def sample_action(self, state: StateType) -> ActionType:
+        planner = self.planner
+        self.key, subkey = random.split(self.key)
+        self.callback = planner.optimize(
+            key=subkey,
+            subs=state,
+            **self.train_kwargs
+        )
+        return self.callback['action']
+        
+    def reset(self) -> None:
+        self.callback = None
+
+
 if __name__ == '__main__':
-    env = pyRDDLGym.make('Wildfire_MDP_ippc2014', '1', vectorized=True)
+    env = pyRDDLGym.make('Pong_arcade', '0', vectorized=True)
     rddl = env.model
     
     world = env
-    planner = JaxMCTSPlanner(
-        rddl, 
-        rollout_horizon=5, 
-        alpha=0.6, 
-        beta=0.5,
-        delta=0.1,
-        learning_rate=0.001
+    agent = JaxMCTSController(
+        JaxMCTSPlanner(
+            rddl, 
+            rollout_horizon=30, 
+            alpha=0.6, 
+            beta=0.5,
+            delta=0.1,
+            learning_rate=0.01),
+        train_seconds=1.0
     )
     
-    state, _ = world.reset()
-    key = random.PRNGKey(42)
-    total_reward = 0
-    for step in range(rddl.horizon):        
-        env.render()
-        key, subkey = random.split(key)
-        callback = planner.optimize(key=key, subs=state, train_seconds=1.0)
-        state, reward, done, *_ = world.step(callback["action"])
-        print(f'reward = {reward}')
-        total_reward += reward
-        if done:
-            break
-    print(f'total reward {total_reward}')
+    agent.evaluate(env, episodes=1, verbose=True, render=True)
