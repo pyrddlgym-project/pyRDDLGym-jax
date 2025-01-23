@@ -1,5 +1,3 @@
-from typing import Optional, Set
-
 import jax
 import jax.numpy as jnp
 import jax.random as random
