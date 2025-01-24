@@ -72,6 +72,8 @@ class DecisionNode:
         self.tr = tr
         self.N = 0
         self.children = {}
+        self.n_chance_subnodes = 0
+        self.n_decision_subnodes = 0
     
     def uct(self, c: float) -> 'ChanceNode':
         logN = math.log(self.N)
@@ -105,7 +107,7 @@ class JaxMCTSPlanner:
                  alpha: float=0.5,
                  beta: float=0.5,
                  c: float=math.sqrt(2.0),
-                 grad_updates: bool=True,
+                 grad_updates: bool=False,
                  adapt_c: bool=True,
                  learning_rate: float=0.001,
                  delta: float=0.1,
@@ -266,7 +268,8 @@ class JaxMCTSPlanner:
             mean_return = jnp.mean(jnp.sum(rewards, axis=1))
             actions = {name: log['fluents'][name][0, ...] 
                        for name in rddl.action_fluents}
-            return mean_return, key, actions
+            length = self.T
+            return mean_return, key, actions, length
 
         return jax.jit(_jax_wrapped_return)    
 
@@ -409,47 +412,33 @@ class JaxMCTSPlanner:
         subs0 = subs
         subs, r, done = vD2.tr
         total_depth = 1
-        total_dnodes = int(added)
-        total_cnodes = int(rollout)
-        total_gupdates = 0
+        total_d_subnodes = int(added)
+        total_c_subnodes = int(rollout)
+        total_grad_updates = 0
         if done:
             R2, actions, length = 0.0, None, 0
         elif rollout:
-            R2, key, actions = self.rollout_fn(subs, t + 1, key)
-            length = self.T
+            R2, key, actions, length = self.rollout_fn(subs, t + 1, key)
         else:
-            R2, key, actions, length, depth, dnodes, cnodes, gup = \
+            R2, key, actions, length, depth, d_subnodes, c_subnodes, grad_updates = \
                 self._simulate(subs, vD2, t + 1, c, key)
             total_depth += depth
-            total_dnodes += dnodes
-            total_cnodes += cnodes
-            total_gupdates += gup
+            total_d_subnodes += d_subnodes
+            total_c_subnodes += c_subnodes
+            total_grad_updates += grad_updates
         R = r + self.rddl.discount * R2
         vD.update_statistic(vC, R)
+        vD.n_decision_subnodes += total_d_subnodes
+        vD.n_chance_subnodes += total_c_subnodes
        
         # perform an optional gradient update on the immediate action
-        actions, length, gupdate = self._grad_update(vD, vC, actions, length, subs0, key)
-        total_gupdates += gupdate
+        actions, length, updates = self._grad_update(vD, vC, actions, length, subs0, key)
+        total_grad_updates += updates
 
         return R, key, actions, length, \
-                total_depth, total_dnodes, total_cnodes, total_gupdates
+            total_depth, total_d_subnodes, total_c_subnodes, total_grad_updates
     
-    def optimize_generator(self, key: Optional[random.PRNGKey]=None,  
-                           epochs: int=999999,
-                           train_seconds: float=1.0,
-                           subs: Optional[Fluents]=None) -> Generator[Callback, None, None]:
-        '''Performs a search using the current planner, and returns a generator.
-        
-        :param key: jax RNG key
-        :param epochs: how many iterations of MCTS to perform
-        :param train_seconds: how many seconds to limit training
-        :param subs: initial pvariables (e.g. state, non-fluents) to begin from
-        '''
-        # if PRNG key is not provided
-        if key is None:
-            key = random.PRNGKey(round(time.time() * 1000))
-
-        # prepare initial subs
+    def _state_to_subs(self, subs):
         rddl = self.rddl
         if subs is None:
             subs = {}
@@ -460,16 +449,35 @@ class JaxMCTSPlanner:
                 subs[var] = value
             shape = rddl.object_counts(rddl.variable_params[var])
             subs[var] = np.reshape(subs[var], shape)
+        return subs
+
+    def optimize_generator(self, key: Optional[random.PRNGKey]=None,  
+                           epochs: int=999999,
+                           train_seconds: float=1.0,
+                           subs: Optional[Fluents]=None,
+                           c_guess: Optional[float]=None,
+                           root: Optional[DecisionNode]=None) -> Generator[Callback, None, None]:
+        '''Performs a search using the current planner, and returns a generator.
+        
+        :param key: jax RNG key
+        :param epochs: how many iterations of MCTS to perform
+        :param train_seconds: how many seconds to limit training
+        :param subs: initial pvariables (e.g. state, non-fluents) to begin from
+        :param c_guess: initialize the c parameter to this value
+        :param root: initialize the root of the tree to this value
+        '''
+        # if PRNG key is not provided
+        if key is None:
+            key = random.PRNGKey(round(time.time() * 1000))
         
         # initialization of MCTS tree
-        vD = DecisionNode()
-        c = self.c
+        subs = self._state_to_subs(subs)
+        vD = DecisionNode() if root is None else root
+        c = self.c if c_guess is None else c_guess
 
         # initialize statistics
         avg_depth = 0
-        total_dnodes = 1
-        total_cnodes = 0
-        total_gupdates = 0
+        total_grad_updates = 0
         start_time = time.time()
         elapsed_outside_loop = 0
 
@@ -478,15 +486,13 @@ class JaxMCTSPlanner:
         for it in iters:
 
             # update MCTS tree
-            R, key, _, _, depth, dnodes, cnodes, gup = self._simulate(subs, vD, 0, c, key)
+            R, key, _, _, depth, _, _, grad_updates = self._simulate(subs, vD, 0, c, key)
             if self.adapt_c:
                 c += (abs(R) - c) / (it + 1)
             
             # update statistics
             avg_depth += (depth - avg_depth) / (it + 1)
-            total_dnodes += dnodes
-            total_cnodes += cnodes
-            total_gupdates += gup
+            total_grad_updates += grad_updates
 
             # update progress bar
             elapsed = time.time() - start_time - elapsed_outside_loop
@@ -494,7 +500,8 @@ class JaxMCTSPlanner:
             iters.set_description(
                 f'{it:6} it / {R:14.4f} reward / {c:14.4f} c / '
                 f'{len(vD.children):3} width / {avg_depth:6.2f} depth / '
-                f'{total_dnodes:6} nD / {total_cnodes:6} nC / {total_gupdates:6} grad'
+                f'{vD.n_decision_subnodes:6} nD / {vD.n_chance_subnodes:6} nC / '
+                f'{total_grad_updates:6} grad'
             )
             iters.n = progress_percent
 
@@ -517,14 +524,16 @@ class JaxMCTSPlanner:
                 break
             if elapsed >= train_seconds:
                 break
-    
+            
     def optimize(self, *args, **kwargs) -> Callback: 
-        '''Performs a search using the current planner, and returns a generator.
+        '''Performs a search using the current planner.
         
         :param key: jax RNG key
         :param epochs: how many iterations of MCTS to perform
         :param train_seconds: how many seconds to limit training
         :param subs: initial pvariables (e.g. state, non-fluents) to begin from
+        :param c_guess: initialize the c parameter to this value
+        :param root: initialize the root of the tree to this value
         '''
         it = self.optimize_generator(*args, **kwargs)
         callback = None
@@ -536,6 +545,20 @@ class JaxMCTSPlanner:
             for callback in it:
                 pass
         return callback
+    
+    def next_epoch_root(self, vC: ChanceNode, state: StateType) -> Optional[DecisionNode]:
+        rddl = self.rddl
+        state = self._state_to_subs(state)
+        for (key, vD2) in vC.children.items():
+            equal = True
+            for (name, value) in state.items():
+                if rddl.variable_types[name] in ('state-fluent', 'observ-fluent') and \
+                not np.allclose(value, key.value[name]):
+                    equal = False
+                    break
+            if equal:
+                return vD2
+        return None
 
 
 class JaxMCTSController(BaseAgent):
@@ -546,6 +569,7 @@ class JaxMCTSController(BaseAgent):
     
     def __init__(self, planner: JaxMCTSPlanner,
                  key: Optional[random.PRNGKey]=None,
+                 warm_start: bool=True,
                  **train_kwargs) -> None:
         '''Creates a new JAX MCTS control policy that is trained online in a closed-
         loop fashion.
@@ -553,6 +577,8 @@ class JaxMCTSController(BaseAgent):
         :param planner: underlying MCTS algorithm for optimizing actions
         :param key: the RNG key to seed randomness (derives from clock if not
         provided)
+        :param warm_start: whether to use the previous decision epoch search tree
+        to warm the next decision epoch
         :param **train_kwargs: any keyword arguments to be passed to the planner
         for optimization
         '''
@@ -560,15 +586,31 @@ class JaxMCTSController(BaseAgent):
         if key is None:
             key = random.PRNGKey(round(time.time() * 1000))
         self.key = key
+        self.warm_start = warm_start
         self.train_kwargs = train_kwargs
         self.reset()
      
     def sample_action(self, state: StateType) -> ActionType:
         planner = self.planner
         self.key, subkey = random.split(self.key)
+        if self.callback is None: 
+            c_guess = None
+            root = None
+        else:
+            c_guess = self.callback['c']
+            if self.warm_start:
+                root = self.planner.next_epoch_root(self.callback['best'], state)
+                if root is not None:
+                    print(f'Warm starting with search sub-tree containing '
+                          f'{root.n_decision_subnodes} decision nodes '
+                          f'and {root.n_chance_subnodes} chance nodes.')
+            else:
+                root = None
         self.callback = planner.optimize(
             key=subkey,
             subs=state,
+            c_guess=c_guess,
+            root=root,
             **self.train_kwargs
         )
         return self.callback['action']
@@ -578,19 +620,21 @@ class JaxMCTSController(BaseAgent):
 
 
 if __name__ == '__main__':
-    env = pyRDDLGym.make('Pong_arcade', '0', vectorized=True)
+    env = pyRDDLGym.make('Elevators', '0', vectorized=True)
     rddl = env.model
+    rddl.horizon = 120
     
     world = env
     agent = JaxMCTSController(
         JaxMCTSPlanner(
             rddl, 
-            rollout_horizon=30, 
-            alpha=0.6, 
-            beta=0.5,
+            rollout_horizon=20, 
+            alpha=0.4, 
+            beta=0.3,
             delta=0.1,
-            learning_rate=0),
-        train_seconds=1.0
+            learning_rate=0.1,
+            grad_updates=True),
+        train_seconds=2
     )
     
     agent.evaluate(env, episodes=1, verbose=True, render=True)
