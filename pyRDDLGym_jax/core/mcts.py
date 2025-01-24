@@ -3,7 +3,7 @@ import hashlib
 import math
 import numpy as np
 from tqdm import tqdm
-from typing import Any, Dict, Generator, Optional
+from typing import Any, Dict, Generator, Optional, Tuple
 import sys
 import time
 
@@ -66,7 +66,8 @@ class ChanceNode:
 class DecisionNode:
     '''A decision node represents a transition following some decision made.'''
     
-    def __init__(self, xi: Optional[random.PRNGKey]=None, tr: Optional[object]=None) -> None:
+    def __init__(self, xi: Optional[random.PRNGKey]=None, 
+                 tr: Optional[Tuple[StateType, float, bool]]=None) -> None:
         self.xi = xi
         self.tr = tr
         self.N = 0
@@ -104,8 +105,9 @@ class JaxMCTSPlanner:
                  alpha: float=0.5,
                  beta: float=0.5,
                  c: float=math.sqrt(2.0),
+                 grad_updates: bool=True,
                  adapt_c: bool=True,
-                 learning_rate: float=0.1,
+                 learning_rate: float=0.001,
                  delta: float=0.1,
                  logic: Logic=FuzzyLogic()) -> None:
         '''Creates a new hybrid backprop + UCT-MCTS planner.
@@ -116,6 +118,7 @@ class JaxMCTSPlanner:
         :param alpha: the growth factor for chance nodes
         :param beta: the growth factor for decision nodes
         :param c: initial scaling factor for UCT
+        :param grad_updates: whether to do gradient-based action refinement
         :param adapt_c: whether to adapt c to the scale of the reward
         :param learning_rate: learning rate for gradient-based action refinement
         :param delta: budget for gradient-based action refinement
@@ -131,6 +134,7 @@ class JaxMCTSPlanner:
         self.beta = beta
         self.c = c
         self.adapt_c = adapt_c
+        self.grad_updates = grad_updates
         self.lr = learning_rate
         self.delta = delta
         self.logic = logic
@@ -158,7 +162,7 @@ class JaxMCTSPlanner:
         self.rollout_fn = self._jax_compile_exact_rollout()
 
         # compile gradient planner
-        if self.lr > 0 and self.delta > 0:
+        if self.grad_updates:
             self.update_slp_fn = self._jax_compile_gradient_update()
         else:
             self.update_slp_fn = None
@@ -381,7 +385,7 @@ class JaxMCTSPlanner:
                 for (name, action) in vC.action.value.items()}
         length = min(length + 1, self.T)
         update = 0
-        if self.update_slp_fn is not None and actions is not None:
+        if self.grad_updates and actions is not None:
             plan = {name: np.concatenate([action, actions[name]], axis=0)[:self.T, ...]
                     for (name, action) in plan.items()}            
             if length >= self.T:
@@ -585,7 +589,7 @@ if __name__ == '__main__':
             alpha=0.6, 
             beta=0.5,
             delta=0.1,
-            learning_rate=0.01),
+            learning_rate=0),
         train_seconds=1.0
     )
     
