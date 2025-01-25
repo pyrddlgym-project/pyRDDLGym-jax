@@ -687,57 +687,73 @@ class JaxStraightLinePlan(JaxPlan):
         elif use_constraint_satisfaction and not self._use_new_projection:
             
             # calculate the surplus of actions above max-nondef-actions
-            def _jax_wrapped_sogbofa_surplus(params, hyperparams):
-                sum_action, count = 0.0, 0
-                for (var, param) in params.items():
+            def _jax_wrapped_sogbofa_surplus(actions):
+                sum_action, k = 0.0, 0
+                for (var, action) in actions.items():
                     if ranges[var] == 'bool':
-                        action = _jax_bool_param_to_action(var, param, hyperparams)                        
                         if noop[var]:
-                            sum_action += jnp.size(action) - jnp.sum(action)
-                            count += jnp.sum(action < 1)
-                        else:
-                            sum_action += jnp.sum(action)
-                            count += jnp.sum(action > 0)
+                            action = 1 - action                       
+                        sum_action += jnp.sum(action)
+                        k += jnp.count_nonzero(action)
                 surplus = jnp.maximum(sum_action - allowed_actions, 0.0)
-                count = jnp.maximum(count, 1)
-                return surplus / count
+                return surplus, k
                 
             # return whether the surplus is positive or reached compute limit
             max_constraint_iter = self._max_constraint_iter
         
             def _jax_wrapped_sogbofa_continue(values):
-                it, _, _, surplus = values
-                return jnp.logical_and(it < max_constraint_iter, surplus > 0)
+                it, _, surplus, k = values
+                return jnp.logical_and(
+                    it < max_constraint_iter, jnp.logical_and(surplus > 0, k > 0))
                 
             # reduce all bool action values by the surplus clipping at minimum
             # for no-op = True, do the opposite, i.e. increase all
             # bool action values by surplus clipping at maximum
             def _jax_wrapped_sogbofa_subtract_surplus(values):
-                it, params, hyperparams, surplus = values
-                new_params = {}
-                for (var, param) in params.items():
+                it, actions, surplus, k = values
+                amount = surplus / k
+                new_actions = {}
+                for (var, action) in actions.items():
                     if ranges[var] == 'bool':
-                        action = _jax_bool_param_to_action(var, param, hyperparams)
-                        new_action = action + (surplus if noop[var] else -surplus)
-                        new_action = jnp.clip(new_action, min_action, max_action)
-                        new_param = _jax_bool_action_to_param(var, new_action, hyperparams)
+                        if noop[var]:
+                            new_actions[var] = jnp.minimum(action + amount, 1)
+                        else:
+                            new_actions[var] = jnp.maximum(action - amount, 0)
                     else:
-                        new_param = param
-                    new_params[var] = new_param
-                new_surplus = _jax_wrapped_sogbofa_surplus(new_params, hyperparams)
+                        new_actions[var] = action
+                new_surplus, new_k = _jax_wrapped_sogbofa_surplus(new_actions)
                 new_it = it + 1
-                return new_it, new_params, hyperparams, new_surplus
+                return new_it, new_actions, new_surplus, new_k
                 
             # apply the surplus to the actions until it becomes zero
             def _jax_wrapped_sogbofa_project(params, hyperparams):
-                surplus = _jax_wrapped_sogbofa_surplus(params, hyperparams)
-                _, params, _, surplus = jax.lax.while_loop(
+
+                # convert parameters to actions
+                actions = {}
+                for (var, param) in params.items():
+                    if ranges[var] == 'bool':
+                        actions[var] = _jax_bool_param_to_action(var, param, hyperparams)
+                    else:
+                        actions[var] = param
+                
+                # run SOGBOFA loop on the actions to get adjusted actions
+                surplus, k = _jax_wrapped_sogbofa_surplus(actions)
+                _, actions, surplus, k = jax.lax.while_loop(
                     cond_fun=_jax_wrapped_sogbofa_continue,
                     body_fun=_jax_wrapped_sogbofa_subtract_surplus,
-                    init_val=(0, params, hyperparams, surplus)
+                    init_val=(0, actions, surplus, k)
                 )
                 converged = jnp.logical_not(surplus > 0)
-                return params, converged
+
+                # convert the adjusted actions back to parameters
+                new_params = {}
+                for (var, action) in actions.items():
+                    if ranges[var] == 'bool':
+                        action = jnp.clip(action, min_action, max_action)
+                        new_params[var] = _jax_bool_action_to_param(var, action, hyperparams)
+                    else:
+                        new_params[var] = action                        
+                return new_params, converged
                 
             # clip actions to valid bounds and satisfy constraint on max actions
             def _jax_wrapped_slp_project_to_max_constraint(params, hyperparams):
