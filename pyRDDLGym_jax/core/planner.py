@@ -655,7 +655,10 @@ class JaxStraightLinePlan(JaxPlan):
                     if ranges[var] == 'bool':
                         param_flat = jnp.ravel(param)
                         if noop[var]:
-                            param_flat = (-param_flat) if wrap_sigmoid else 1.0 - param_flat
+                            if wrap_sigmoid:
+                                param_flat = -param_flat
+                            else:
+                                param_flat = 1.0 - param_flat
                         scores.append(param_flat)
                 scores = jnp.concatenate(scores)
                 descending = jnp.sort(scores)[::-1]
@@ -666,7 +669,10 @@ class JaxStraightLinePlan(JaxPlan):
                 new_params = {}
                 for (var, param) in params.items():
                     if ranges[var] == 'bool':
-                        new_param = param + (surplus if noop[var] else -surplus)
+                        if noop[var]:
+                            new_param = param + surplus
+                        else:
+                            new_param = param - surplus
                         new_param = _jax_project_bool_to_box(var, new_param, hyperparams)
                     else:
                         new_param = param
@@ -1431,6 +1437,7 @@ r"""
         
         # optimization
         self.update = self._jax_update(train_loss)
+        self.check_zero_grad = self._jax_check_zero_gradients()
     
     def _jax_return(self, use_symlog):
         gamma = self.rddl.discount
@@ -1513,6 +1520,18 @@ r"""
         
         return jax.jit(_jax_wrapped_plan_update)
             
+    def _jax_check_zero_gradients(self):
+        
+        def _jax_wrapped_zero_gradient(grad):
+            return jnp.allclose(grad, 0)
+
+        def _jax_wrapped_zero_gradients(grad):
+            leaves, _ = jax.tree_util.tree_flatten(
+                jax.tree_map(_jax_wrapped_zero_gradient, grad))
+            return jnp.all(jnp.asarray(leaves))
+        
+        return jax.jit(_jax_wrapped_zero_gradients)
+
     def _batched_init_subs(self, subs): 
         rddl = self.rddl
         n_train, n_test = self.batch_size_train, self.batch_size_test
@@ -1811,7 +1830,6 @@ r"""
         rolling_test_loss = RollingMean(test_rolling_window)
         log = {}
         status = JaxPlannerStatus.NORMAL
-        is_all_zero_fn = lambda x: np.allclose(x, 0)
         
         # initialize stopping criterion
         if stopping_rule is not None:
@@ -1852,9 +1870,7 @@ r"""
             # ==================================================================
             
             # no progress
-            grad_norm_zero, _ = jax.tree_util.tree_flatten(
-                jax.tree_map(is_all_zero_fn, train_log['grad']))
-            if np.all(grad_norm_zero):
+            if self.check_zero_grad(train_log['grad']):
                 status = JaxPlannerStatus.NO_PROGRESS
              
             # constraint satisfaction problem
@@ -2051,8 +2067,8 @@ r"""
             # must be numeric array
             # exception is for POMDPs at 1st epoch when observ-fluents are None
             dtype = np.atleast_1d(values).dtype
-            if not jnp.issubdtype(dtype, jnp.number) \
-            and not jnp.issubdtype(dtype, jnp.bool_):
+            if not np.issubdtype(dtype, np.number) \
+            and not np.issubdtype(dtype, np.bool_):
                 if step == 0 and var in self.rddl.observ_fluents:
                     subs[var] = self.test_compiled.init_values[var]
                 else:
