@@ -2109,10 +2109,11 @@ def mean_variance_utility(returns: jnp.ndarray, beta: float) -> float:
 
 @jax.jit
 def cvar_utility(returns: jnp.ndarray, alpha: float) -> float:
-    alpha_mask = jax.lax.stop_gradient(
-        returns <= jnp.percentile(returns, q=100 * alpha))
-    return jnp.sum(returns * alpha_mask) / jnp.sum(alpha_mask)
-
+    var = jnp.percentile(returns, q=100 * alpha)
+    mask = returns <= var
+    weights = mask / jnp.maximum(1, jnp.sum(mask))
+    return jnp.sum(returns * weights)
+   
 
 # ***********************************************************************
 # ALL VERSIONS OF CONTROLLERS
