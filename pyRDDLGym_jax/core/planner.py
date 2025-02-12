@@ -163,6 +163,17 @@ def _load_config(config, args):
             del planner_args['optimizer']
         else:
             planner_args['optimizer'] = optimizer
+
+    # pgpe optimizer
+    pgpe_optimizer = planner_args.get('optimizer_pgpe', None)
+    if pgpe_optimizer is not None:
+        optimizer = _getattr_any(packages=[optax], item=pgpe_optimizer)
+        if optimizer is None:
+            raise_warning(
+                f'Ignoring invalid optimizer <{pgpe_optimizer}>.', 'red')
+            del planner_args['optimizer_pgpe']
+        else:
+            planner_args['optimizer_pgpe'] = optimizer
         
     # optimize call RNG key
     planner_key = train_args.get('key', None)
@@ -1187,6 +1198,14 @@ class JaxBackpropPlanner:
                  use_symlog_reward: bool=False,
                  utility: Union[Callable[[jnp.ndarray], float], str]='mean',
                  utility_kwargs: Optional[Kwargs]=None,
+                 use_pgpe: bool=True,
+                 batch_size_pgpe: int=1,
+                 min_sigma_pgpe: float=1e-6,
+                 init_sigma_pgpe: float=1.0,
+                 scale_reward_pgpe: bool=True,
+                 optimizer_pgpe: Callable[..., optax.GradientTransformation]=optax.adam,
+                 optimizer_kwargs_pgpe_mu: Optional[Kwargs]=None,
+                 optimizer_kwargs_pgpe_sigma: Optional[Kwargs]=None,
                  cpfs_without_grad: Optional[Set[str]]=None,
                  compile_non_fluent_exact: bool=True,
                  logger: Optional[Logger]=None,
@@ -1252,6 +1271,18 @@ class JaxBackpropPlanner:
         self.line_search_kwargs = line_search_kwargs
         self.noise_kwargs = noise_kwargs
         
+        self.use_pgpe = use_pgpe
+        self.batch_size_pgpe = batch_size_pgpe
+        self.pgpe_min_sigma = min_sigma_pgpe
+        self.pgpe_init_sigma = init_sigma_pgpe
+        self.scale_reward_pgpe = scale_reward_pgpe
+        if optimizer_kwargs_pgpe_mu is None:
+            optimizer_kwargs_pgpe_mu = {'learning_rate': 0.1}
+        self.optimizer_kwargs_pgpe_mu = optimizer_kwargs_pgpe_mu
+        if optimizer_kwargs_pgpe_sigma is None:
+            optimizer_kwargs_pgpe_sigma = {'learning_rate': 0.1}
+        self.optimizer_kwargs_pgpe_sigma = optimizer_kwargs_pgpe_sigma
+
         # set optimizer
         try:
             optimizer = optax.inject_hyperparams(optimizer)(**optimizer_kwargs)
@@ -1273,6 +1304,15 @@ class JaxBackpropPlanner:
             pipeline.append(optax.scale_by_zoom_linesearch(**line_search_kwargs))
         self.optimizer = optax.chain(*pipeline)
         
+        # optimizer for PGPE
+        self.pgpe_optimizer_name = optimizer_pgpe
+        if self.use_pgpe:
+            self.mu_optimizer = optimizer_pgpe(**optimizer_kwargs_pgpe_mu)
+            self.sigma_optimizer = optimizer_pgpe(**optimizer_kwargs_pgpe_sigma)
+        else:
+            self.mu_optimizer = None
+            self.sigma_optimizer = None
+
         # set utility
         if isinstance(utility, str):
             utility = utility.lower()
@@ -1308,6 +1348,7 @@ class JaxBackpropPlanner:
         
         self._jax_compile_rddl()        
         self._jax_compile_optimizer()
+        self._jax_compile_pgpe_optimizer()
     
     def summarize_system(self) -> str:
         try:
@@ -1348,14 +1389,22 @@ r"""
                   f'    non_fluents exact ={self.compile_non_fluent_exact}\n'
                   f'    cpfs_no_gradient  ={self.cpfs_without_grad}\n'
                   f'optimizer hyper-parameters:\n'
-                  f'    use_64_bit        ={self.use64bit}\n'
-                  f'    optimizer         ={self.optimizer_name}\n'
-                  f'    optimizer args    ={self.optimizer_kwargs}\n'
-                  f'    clip_gradient     ={self.clip_grad}\n'
-                  f'    line_search_kwargs={self.line_search_kwargs}\n'
-                  f'    noise_kwargs      ={self.noise_kwargs}\n'
-                  f'    batch_size_train  ={self.batch_size_train}\n'
-                  f'    batch_size_test   ={self.batch_size_test}')
+                  f'    use_64_bit                 ={self.use64bit}\n'
+                  f'    optimizer                  ={self.optimizer_name}\n'
+                  f'    optimizer args             ={self.optimizer_kwargs}\n'
+                  f'    optimizer (pgpe)           ={self.pgpe_optimizer_name}\n'
+                  f'    optimizer args mu (pgpe)   ={self.optimizer_kwargs_pgpe_mu}\n'
+                  f'    optimizer args sigma (pgpe)={self.optimizer_kwargs_pgpe_sigma}\n'
+                  f'    clip_gradient              ={self.clip_grad}\n'
+                  f'    line_search_kwargs         ={self.line_search_kwargs}\n'
+                  f'    noise_kwargs               ={self.noise_kwargs}\n'
+                  f'    batch_size_train           ={self.batch_size_train}\n'
+                  f'    batch_size_test            ={self.batch_size_test}\n'
+                  f'    batch_size (pgpe)          ={self.batch_size_pgpe}\n'
+                  f'    use_pgpe                   ={self.use_pgpe}\n'
+                  f'    initial sigma (pgpe)       ={self.pgpe_init_sigma}\n'
+                  f'    minimum sigma (pgpe)       ={self.pgpe_min_sigma}\n'
+                  f'    scale_reward (pgpe)        ={self.scale_reward_pgpe}')
         result += '\n' + str(self.plan)
         result += '\n' + str(self.logic)
         
@@ -1648,6 +1697,115 @@ r"""
         return _loss_function, _grad_function, guess_1d, jax.jit(unravel_fn)
         
     # ===========================================================================
+    # COMPILATION SUBROUTINES - PGPE
+    # ===========================================================================
+
+    def _jax_compile_pgpe_optimizer(self):
+        if self.use_pgpe:
+            self.pgpe_init = jax.jit(self._jax_pgpe_init())
+            self.pgpe_update = jax.jit(
+                self._jax_pgpe_update(self.batch_size_pgpe, self.test_rollouts))
+        else:
+            self.pgpe_init, self.pgpe_update = None, None
+
+    def _jax_pgpe_init(self):
+        mu_optimizer = self.mu_optimizer
+        sigma_optimizer = self.sigma_optimizer
+
+        def _jax_wrapped_init(key, mu0, sigma0):
+            sigma = jax.tree_map(lambda x: sigma0 * jnp.ones_like(x), mu0)
+            mu_state = mu_optimizer.init(mu0)
+            sigma_state = sigma_optimizer.init(sigma)
+            return mu0, sigma, mu_state, sigma_state
+        
+        return _jax_wrapped_init
+
+    def _jax_pgpe_update(self, batch_size, rollout_fn):
+        projection = self.plan.projection
+        return_fn = self._jax_return(use_symlog=False)
+        min_sigma = self.pgpe_min_sigma
+        scale_reward = self.scale_reward_pgpe
+        mu_optimizer = self.mu_optimizer
+        sigma_optimizer = self.sigma_optimizer
+
+        def _jax_wrapped_mu_noise(key, sigma):
+            return sigma * random.normal(key, shape=jnp.shape(sigma))
+
+        def _jax_wrapped_sample_params(key, mu, sigma):
+            keys = random.split(key, num=len(jax.tree_util.tree_leaves(mu)))
+            keys_pytree = jax.tree_util.tree_unflatten(
+                treedef=jax.tree_util.tree_structure(mu), leaves=keys)
+            epsilon = jax.tree_map(_jax_wrapped_mu_noise, keys_pytree, sigma)     
+            params_pos = jax.tree_map(jnp.add, mu, epsilon)
+            params_neg = jax.tree_map(jnp.subtract, mu, epsilon)
+            return params_pos, params_neg
+        
+        def _jax_wrapped_sample_params_batched(key, mu, sigma):
+            keys = random.split(key, num=batch_size)
+            batched_params = jax.vmap(
+                _jax_wrapped_sample_params, in_axes=(0, None, None))(keys, mu, sigma)
+            return batched_params
+        
+        def _jax_wrapped_return(key, policy_params, policy_hyperparams, subs, model_params):
+            log, _ = rollout_fn(
+                key, policy_params, policy_hyperparams, subs, model_params)
+            mean_return = jnp.mean(return_fn(log['reward']))
+            return mean_return
+        
+        def _jax_wrapped_return_batched(key, batched_params, policy_hyperparams,
+                                        subs, model_params):
+            keys = random.split(key, num=batch_size)
+            batched_returns = jax.vmap(
+                _jax_wrapped_return, in_axes=(0, 0, None, None, None)
+            )(keys, batched_params, policy_hyperparams, subs, model_params)
+            return batched_returns
+        
+        def _jax_wrapped_mu_grad(params, mu, sigma, r):
+            return jax.tree_map(lambda p, m, s: -(p - m) * r, params, mu, sigma)
+        
+        def _jax_wrapped_sigma_grad(params, mu, sigma, r):
+            return jax.tree_map(
+                lambda p, m, s: -(jnp.square(p - m) / s - s) * r, params, mu, sigma)
+            
+        def _jax_wrapped_pgpe_grad(key, mu, sigma, policy_hyperparams, subs, model_params,
+                                   r_max):
+            key, subkey = random.split(key)
+            params_pos, params_neg = _jax_wrapped_sample_params_batched(key, mu, sigma)
+            r_pos = _jax_wrapped_return_batched(
+                subkey, params_pos, policy_hyperparams, subs, model_params)
+            r_neg = _jax_wrapped_return_batched(
+                subkey, params_neg, policy_hyperparams, subs, model_params)
+            if scale_reward:
+                r_mu_scale = jnp.maximum(1e-4, r_max - (r_pos + r_neg) / 2)
+                r_sigma_scale = jnp.maximum(1e-4, r_max)
+            else:
+                r_mu_scale = 1.0
+                r_sigma_scale = 1.0
+            r_mu = (r_pos - r_neg) / (2 * r_mu_scale)
+            r_sigma = (r_pos + r_neg) / (2 * r_sigma_scale)
+            mu_grads = jax.vmap(_jax_wrapped_mu_grad, in_axes=(0, None, None, 0))(
+                params_pos, mu, sigma, r_mu)
+            sigma_grads = jax.vmap(_jax_wrapped_sigma_grad, in_axes=(0, None, None, 0))(
+                params_pos, mu, sigma, r_sigma)
+            grad = jax.tree_map(lambda g: jnp.mean(g, axis=0), (mu_grads, sigma_grads))
+            return grad
+
+        def _jax_wrapped_policy_gradient_update(key, mu, sigma, policy_hyperparams, subs, 
+                                                model_params, mu_state, sigma_state, r_max):
+            mu_grad, sigma_grad = _jax_wrapped_pgpe_grad(
+                key, mu, sigma, policy_hyperparams, subs, model_params, r_max)
+            mu_updates, new_mu_state = mu_optimizer.update(mu_grad, mu_state, params=mu) 
+            sigma_updates, new_sigma_state = sigma_optimizer.update(
+                sigma_grad, sigma_state, params=sigma) 
+            new_mu = optax.apply_updates(mu, mu_updates)
+            new_sigma = optax.apply_updates(sigma, sigma_updates)
+            new_sigma = jax.tree_map(lambda x: jnp.maximum(x, min_sigma), new_sigma)
+            new_mu, _ = projection(new_mu, policy_hyperparams)
+            return new_mu, new_sigma, new_mu_state, new_sigma_state
+
+        return _jax_wrapped_policy_gradient_update
+        
+    # ===========================================================================
     # OPTIMIZE API
     # ===========================================================================
 
@@ -1819,7 +1977,14 @@ r"""
             policy_params = guess
             opt_state = self.optimizer.init(policy_params)
             opt_aux = {}
-            
+        
+        # initialize pgpe parameters
+        if self.use_pgpe:
+            pgpe_mu, pgpe_sigma, pgpe_mu_state, pgpe_sigma_state = self.pgpe_init(
+                key, policy_params, self.pgpe_init_sigma)
+        else:
+            pgpe_mu, pgpe_sigma, pgpe_mu_state, pgpe_sigma_state = None, None, None, None
+
         # ======================================================================
         # INITIALIZATION OF RUNNING STATISTICS
         # ======================================================================
@@ -1864,7 +2029,32 @@ r"""
              train_loss, train_log, model_params) = \
                 self.update(subkey, policy_params, policy_hyperparams,
                             train_subs, model_params, opt_state, opt_aux)
-                
+            test_loss, (log, model_params_test) = self.test_loss(
+                subkey, policy_params, policy_hyperparams, test_subs, model_params_test)
+
+            # pgpe update of the plan
+            if self.use_pgpe:
+                key, subkey = random.split(key)
+                r_max = abs(best_loss.item()) if it else 1.0
+                pgpe_mu, pgpe_sigma, pgpe_mu_state, pgpe_sigma_state = \
+                    self.pgpe_update(subkey, pgpe_mu, pgpe_sigma, policy_hyperparams, 
+                                     test_subs, model_params, 
+                                     pgpe_mu_state, pgpe_sigma_state, r_max)
+                test_loss_pgpe, _ = self.test_loss(
+                    subkey, pgpe_mu, policy_hyperparams, test_subs, model_params_test)
+                if test_loss_pgpe < test_loss or not np.isfinite(test_loss):
+                    policy_params = pgpe_mu
+                    test_loss = test_loss_pgpe
+            else:
+                test_loss_pgpe = None
+
+            # evaluate test losses and record best plan so far
+            test_loss = rolling_test_loss.update(test_loss)
+            if test_loss < best_loss:
+                best_params, best_loss, best_grad = \
+                    policy_params, test_loss, train_log['grad']
+                last_iter_improve = it
+            
             # ==================================================================
             # STATUS CHECKS AND LOGGING
             # ==================================================================
@@ -1887,16 +2077,6 @@ r"""
                     f'JAX planner aborted due to invalid loss {train_loss}.', 'red')
                 status = JaxPlannerStatus.INVALID_GRADIENT
               
-            # evaluate test losses and record best plan so far
-            test_loss, (log, model_params_test) = self.test_loss(
-                subkey, policy_params, policy_hyperparams,
-                test_subs, model_params_test)
-            test_loss = rolling_test_loss.update(test_loss)
-            if test_loss < best_loss:
-                best_params, best_loss, best_grad = \
-                    policy_params, test_loss, train_log['grad']
-                last_iter_improve = it
-            
             # reached computation budget
             elapsed = time.time() - start_time - elapsed_outside_loop
             if elapsed >= train_seconds:
@@ -1912,6 +2092,7 @@ r"""
                 'train_return':-train_loss,
                 'test_return':-test_loss,
                 'best_return':-best_loss,
+                'test_return_pgpe': None if test_loss_pgpe is None else -test_loss_pgpe,
                 'params': policy_params,
                 'best_params': best_params,
                 'last_iteration_improved': last_iter_improve,
@@ -1955,7 +2136,7 @@ r"""
         # ======================================================================
         # POST-PROCESSING AND CLEANUP
         # ====================================================================== 
-        
+
         # release resources
         if print_progress:
             iters.close()
