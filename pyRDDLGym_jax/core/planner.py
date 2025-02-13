@@ -1800,8 +1800,8 @@ r"""
             new_mu = optax.apply_updates(mu, mu_updates)
             new_sigma = optax.apply_updates(sigma, sigma_updates)
             new_sigma = jax.tree_map(lambda x: jnp.maximum(x, min_sigma), new_sigma)
-            new_mu, _ = projection(new_mu, policy_hyperparams)
-            return new_mu, new_sigma, new_mu_state, new_sigma_state
+            new_mu, converged = projection(new_mu, policy_hyperparams)
+            return new_mu, new_sigma, new_mu_state, new_sigma_state, converged
 
         return _jax_wrapped_policy_gradient_update
         
@@ -1982,8 +1982,11 @@ r"""
         if self.use_pgpe:
             pgpe_mu, pgpe_sigma, pgpe_mu_state, pgpe_sigma_state = self.pgpe_init(
                 key, policy_params, self.pgpe_init_sigma)
+            rolling_pgpe_loss = RollingMean(test_rolling_window)
         else:
             pgpe_mu, pgpe_sigma, pgpe_mu_state, pgpe_sigma_state = None, None, None, None
+            rolling_pgpe_loss = None
+        total_pgpe_it = 0
 
         # ======================================================================
         # INITIALIZATION OF RUNNING STATISTICS
@@ -2025,34 +2028,41 @@ r"""
             
             # update the parameters of the plan
             key, subkey = random.split(key)
-            (policy_params, converged, opt_state, opt_aux, 
-             train_loss, train_log, model_params) = \
-                self.update(subkey, policy_params, policy_hyperparams,
-                            train_subs, model_params, opt_state, opt_aux)
-            test_loss, (log, model_params_test) = self.test_loss(
+            (policy_params, converged, opt_state, opt_aux, train_loss, train_log, 
+             model_params) = self.update(subkey, policy_params, policy_hyperparams,
+                                         train_subs, model_params, opt_state, opt_aux)
+            test_loss, (test_log, model_params_test) = self.test_loss(
                 subkey, policy_params, policy_hyperparams, test_subs, model_params_test)
+            test_loss_smooth = rolling_test_loss.update(test_loss)
 
             # pgpe update of the plan
+            pgpe_improve = False
             if self.use_pgpe:
                 key, subkey = random.split(key)
                 r_max = abs(best_loss.item()) if it else 1.0
-                pgpe_mu, pgpe_sigma, pgpe_mu_state, pgpe_sigma_state = \
+                pgpe_mu, pgpe_sigma, pgpe_mu_state, pgpe_sigma_state, pgpe_converged = \
                     self.pgpe_update(subkey, pgpe_mu, pgpe_sigma, policy_hyperparams, 
                                      test_subs, model_params, 
                                      pgpe_mu_state, pgpe_sigma_state, r_max)
-                test_loss_pgpe, _ = self.test_loss(
+                pgpe_loss, _ = self.test_loss(
                     subkey, pgpe_mu, policy_hyperparams, test_subs, model_params_test)
-                if test_loss_pgpe < test_loss or not np.isfinite(test_loss):
+                pgpe_loss_smooth = rolling_pgpe_loss.update(pgpe_loss)
+                pgpe_return = -pgpe_loss_smooth
+
+                # replace with PGPE if it reaches a new minimum or train loss invalid
+                if pgpe_loss_smooth < best_loss or not np.isfinite(train_loss):
                     policy_params = pgpe_mu
-                    test_loss = test_loss_pgpe
+                    test_loss, test_loss_smooth = pgpe_loss, pgpe_loss_smooth
+                    converged = pgpe_converged
+                    pgpe_improve = True
+                    total_pgpe_it += 1
             else:
-                test_loss_pgpe = None
+                pgpe_loss, pgpe_loss_smooth, pgpe_return = None, None, None
 
             # evaluate test losses and record best plan so far
-            test_loss = rolling_test_loss.update(test_loss)
-            if test_loss < best_loss:
+            if test_loss_smooth < best_loss:
                 best_params, best_loss, best_grad = \
-                    policy_params, test_loss, train_log['grad']
+                    policy_params, test_loss_smooth, train_log['grad']
                 last_iter_improve = it
             
             # ==================================================================
@@ -2060,7 +2070,7 @@ r"""
             # ==================================================================
             
             # no progress
-            if self.check_zero_grad(train_log['grad']):
+            if (not pgpe_improve) and self.check_zero_grad(train_log['grad']):
                 status = JaxPlannerStatus.NO_PROGRESS
              
             # constraint satisfaction problem
@@ -2072,9 +2082,12 @@ r"""
                 status = JaxPlannerStatus.PRECONDITION_POSSIBLY_UNSATISFIED
             
             # numerical error
-            if not np.isfinite(train_loss):
-                raise_warning(
-                    f'JAX planner aborted due to invalid loss {train_loss}.', 'red')
+            if self.use_pgpe:
+                invalid_loss = not (np.isfinite(train_loss) or np.isfinite(pgpe_loss))
+            else:
+                invalid_loss = not np.isfinite(train_loss)
+            if invalid_loss:
+                raise_warning(f'Planner aborted due to invalid loss {train_loss}.', 'red')
                 status = JaxPlannerStatus.INVALID_GRADIENT
               
             # reached computation budget
@@ -2090,12 +2103,13 @@ r"""
                 'status': status,
                 'iteration': it,
                 'train_return':-train_loss,
-                'test_return':-test_loss,
+                'test_return':-test_loss_smooth,
                 'best_return':-best_loss,
-                'test_return_pgpe': None if test_loss_pgpe is None else -test_loss_pgpe,
+                'pgpe_return': pgpe_return,
                 'params': policy_params,
                 'best_params': best_params,
                 'last_iteration_improved': last_iter_improve,
+                'pgpe_improved': pgpe_improve,
                 'grad': train_log['grad'],
                 'best_grad': best_grad,
                 'updates': train_log['updates'],
@@ -2104,7 +2118,7 @@ r"""
                 'model_params': model_params,
                 'progress': progress_percent,
                 'train_log': train_log,
-                **log
+                **test_log
             }
             
             # stopping condition reached
@@ -2115,9 +2129,9 @@ r"""
             if print_progress:
                 iters.n = progress_percent
                 iters.set_description(
-                    f'{position_str} {it:6} it / {-train_loss:14.6f} train / '
-                    f'{-test_loss:14.6f} test / {-best_loss:14.6f} best / '
-                    f'{status.value} status'
+                    f'{position_str} {it:6} it / {-train_loss:14.5f} train / '
+                    f'{-test_loss_smooth:14.5f} test / {-best_loss:14.5f} best / '
+                    f'{status.value} status / {total_pgpe_it:6} pgpe'
                 )
             
             # dash-board
@@ -2148,7 +2162,7 @@ r"""
                 messages.update(JaxRDDLCompiler.get_error_messages(error_code))
             if messages:
                 messages = '\n'.join(messages)
-                raise_warning('The JAX compiler encountered the following '
+                raise_warning('JAX compiler encountered the following '
                               'error(s) in the original RDDL formulation '
                               f'during test evaluation:\n{messages}', 'red')                               
         
@@ -2156,14 +2170,14 @@ r"""
         if print_summary:
             grad_norm = jax.tree_map(lambda x: np.linalg.norm(x).item(), best_grad)
             diagnosis = self._perform_diagnosis(
-                last_iter_improve, -train_loss, -test_loss, -best_loss, grad_norm)
+                last_iter_improve, -train_loss, -test_loss_smooth, -best_loss, grad_norm)
             print(f'summary of optimization:\n'
-                  f'    status_code   ={status}\n'
-                  f'    time_elapsed  ={elapsed}\n'
+                  f'    status        ={status}\n'
+                  f'    time          ={elapsed:.6f} sec.\n'
                   f'    iterations    ={it}\n'
-                  f'    best_objective={-best_loss}\n'
-                  f'    best_grad_norm={grad_norm}\n'
-                  f'    diagnosis: {diagnosis}\n')
+                  f'    best objective={-best_loss:.6f}\n'
+                  f'    best grad norm={grad_norm}\n'
+                  f'diagnosis: {diagnosis}\n')
     
     def _perform_diagnosis(self, last_iter_improve,
                            train_return, test_return, best_return, grad_norm):
@@ -2183,23 +2197,24 @@ r"""
         if last_iter_improve <= 1:
             if grad_is_zero:
                 return termcolor.colored(
-                    '[FAILURE] no progress was made, '
-                    f'and max grad norm {max_grad_norm:.6f} is zero: '
-                    'solver likely stuck in a plateau.', 'red')
+                    '[FAILURE] no progress was made '
+                    f'and max grad norm {max_grad_norm:.6f} was zero: '
+                    'the solver was likely stuck in a plateau.', 'red')
             else:
                 return termcolor.colored(
-                    '[FAILURE] no progress was made, '
-                    f'but max grad norm {max_grad_norm:.6f} is non-zero: '
-                    'likely poor learning rate or other hyper-parameter.', 'red')
+                    '[FAILURE] no progress was made '
+                    f'but max grad norm {max_grad_norm:.6f} was non-zero: '
+                    'the learning rate or other hyper-parameters were likely suboptimal.', 
+                    'red')
         
         # model is likely poor IF:
         # 1. the train and test return disagree
         if not (validation_error < 20):
             return termcolor.colored(
-                '[WARNING] progress was made, '
-                f'but relative train-test error {validation_error:.6f} is high: '
-                'likely poor model relaxation around the solution, '
-                'or the batch size is too small.', 'yellow')
+                '[WARNING] progress was made '
+                f'but relative train-test error {validation_error:.6f} was high: '
+                'model relaxation around the solution was poor '
+                'or the batch size was too small.', 'yellow')
         
         # model likely did not converge IF:
         # 1. the max grad relative to the return is high
@@ -2207,15 +2222,15 @@ r"""
             return_to_grad_norm = abs(best_return) / max_grad_norm
             if not (return_to_grad_norm > 1):
                 return termcolor.colored(
-                    '[WARNING] progress was made, '
-                    f'but max grad norm {max_grad_norm:.6f} is high: '
-                    'likely the solution is not locally optimal, '
-                    'or the relaxed model is not smooth around the solution, '
-                    'or the batch size is too small.', 'yellow')
+                    '[WARNING] progress was made '
+                    f'but max grad norm {max_grad_norm:.6f} was high: '
+                    'the solution was likely locally suboptimal, '
+                    'or the relaxed model was not smooth around the solution, '
+                    'or the batch size was too small.', 'yellow')
         
         # likely successful
         return termcolor.colored(
-            '[SUCCESS] planner has converged successfully '
+            '[SUCCESS] solver converged successfully '
             '(note: not all potential problems can be ruled out).', 'green')
         
     def get_action(self, key: random.PRNGKey,
