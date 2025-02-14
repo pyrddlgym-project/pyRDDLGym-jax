@@ -6,7 +6,7 @@ import os
 import sys
 import time
 import traceback
-from typing import Any, Callable, Dict, Generator, Optional, Set, Sequence, Tuple, Union
+from typing import Any, Callable, Dict, Generator, Optional, Set, Sequence, Type, Tuple, Union
 
 import haiku as hk
 import jax
@@ -1206,7 +1206,7 @@ class PGPE:
         return self._update
 
     def compile(self, return_fn: Callable, rollout_fn: Callable, 
-                projection: Callable) -> None:
+                projection: Callable, real_dtype: Type) -> None:
         raise NotImplementedError
 
 
@@ -1253,7 +1253,7 @@ class GaussianPGPE(PGPE):
         )
 
     def compile(self, return_fn: Callable, rollout_fn: Callable, 
-                projection: Callable) -> None:
+                projection: Callable, real_dtype: Type) -> None:
         sigma0 = self.init_sigma
         min_sigma = self.min_sigma
         scale_reward = self.scale_reward
@@ -1273,7 +1273,7 @@ class GaussianPGPE(PGPE):
 
         # parameter sampling functions
         def _jax_wrapped_mu_noise(key, sigma):
-            return sigma * random.normal(key, shape=jnp.shape(sigma))
+            return sigma * random.normal(key, shape=jnp.shape(sigma), dtype=real_dtype)
 
         def _jax_wrapped_sample_params(key, mu, sigma):
             keys = random.split(key, num=len(jax.tree_util.tree_leaves(mu)))
@@ -1645,7 +1645,12 @@ r"""
         # pgpe option
         if self.use_pgpe:
             test_return_fn = self._jax_return(use_symlog=False)
-            self.pgpe.compile(test_return_fn, test_rollouts, self.plan.projection)
+            self.pgpe.compile(
+                return_fn=test_return_fn, 
+                rollout_fn=test_rollouts, 
+                projection=self.plan.projection, 
+                real_dtype=self.test_compiled.REAL
+            )
     
     def _jax_return(self, use_symlog):
         gamma = self.rddl.discount
