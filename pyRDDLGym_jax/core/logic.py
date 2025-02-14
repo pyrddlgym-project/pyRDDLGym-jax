@@ -759,14 +759,14 @@ class FuzzyLogic(Logic):
     
     def __str__(self) -> str:
         return (f'model relaxation:\n'
-                f'    tnorm         ={str(self.tnorm)}\n'
-                f'    complement    ={str(self.complement)}\n'
-                f'    comparison    ={str(self.comparison)}\n'
-                f'    sampling      ={str(self.sampling)}\n'
-                f'    rounding      ={str(self.rounding)}\n'
-                f'    control       ={str(self.control)}\n'
-                f'    underflow_tol ={self.eps}\n'
-                f'    use_64_bit    ={self.use64bit}')
+                f'    tnorm        ={str(self.tnorm)}\n'
+                f'    complement   ={str(self.complement)}\n'
+                f'    comparison   ={str(self.comparison)}\n'
+                f'    sampling     ={str(self.sampling)}\n'
+                f'    rounding     ={str(self.rounding)}\n'
+                f'    control      ={str(self.control)}\n'
+                f'    underflow_tol={self.eps}\n'
+                f'    use_64_bit   ={self.use64bit}\n')
 
     def summarize_hyperparameters(self) -> None:
         print(self.__str__())
