@@ -1323,7 +1323,7 @@ class GaussianPGPE(PGPE):
                 subkey, params_neg, policy_hyperparams, subs, model_params)
             if scale_reward:
                 r_mu_scale = jnp.maximum(1e-5, r_max - (r_pos + r_neg) / 2)
-                r_sigma_scale = jnp.maximum(1e-5, r_max)
+                r_sigma_scale = jnp.maximum(1e-5, jnp.abs(r_max))
             else:
                 r_mu_scale = 1.0
                 r_sigma_scale = 1.0
@@ -2093,7 +2093,7 @@ r"""
             pgpe_improve = False
             if self.use_pgpe:
                 key, subkey = random.split(key)
-                r_max = abs(best_loss.item()) if it else 1.0
+                r_max = best_loss.item() if it else 1.0
                 pgpe_params, pgpe_opt_state, pgpe_param, pgpe_converged = \
                     self.pgpe.update(subkey, pgpe_params, policy_hyperparams, 
                                      test_subs, model_params, pgpe_opt_state, r_max)
