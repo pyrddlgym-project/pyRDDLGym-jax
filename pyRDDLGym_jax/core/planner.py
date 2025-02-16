@@ -2,6 +2,7 @@ from ast import literal_eval
 from collections import deque
 import configparser
 from enum import Enum
+from functools import partial
 import os
 import sys
 import time
@@ -1282,14 +1283,8 @@ class GaussianPGPE(PGPE):
             epsilon = jax.tree_map(_jax_wrapped_mu_noise, keys_pytree, sigma)     
             params_pos = jax.tree_map(jnp.add, mu, epsilon)
             params_neg = jax.tree_map(jnp.subtract, mu, epsilon)
-            return params_pos, params_neg
-        
-        def _jax_wrapped_sample_params_batched(key, mu, sigma):
-            keys = random.split(key, num=batch_size)
-            batched_params = jax.vmap(
-                _jax_wrapped_sample_params, in_axes=(0, None, None))(keys, mu, sigma)
-            return batched_params
-        
+            return (params_pos, params_neg), epsilon
+                
         # evaluation functions
         def _jax_wrapped_return(key, policy_params, policy_hyperparams, subs, model_params):
             log, _ = rollout_fn(
@@ -1297,51 +1292,49 @@ class GaussianPGPE(PGPE):
             mean_return = jnp.mean(return_fn(log['reward']))
             return mean_return
         
-        def _jax_wrapped_return_batched(key, batched_params, policy_hyperparams,
-                                        subs, model_params):
-            keys = random.split(key, num=batch_size)
-            batched_returns = jax.vmap(
-                _jax_wrapped_return, in_axes=(0, 0, None, None, None)
-            )(keys, batched_params, policy_hyperparams, subs, model_params)
-            return batched_returns
-        
         # policy gradient update functions
-        def _jax_wrapped_mu_grad(params, mu, sigma, r):
-            return jax.tree_map(lambda p, m, s: -(p - m) * r, params, mu, sigma)
+        def _jax_wrapped_mu_grad(epsilon, r):
+            return -r * epsilon
         
-        def _jax_wrapped_sigma_grad(params, mu, sigma, r):
-            return jax.tree_map(
-                lambda p, m, s: -(jnp.square(p - m) / s - s) * r, params, mu, sigma)
+        def _jax_wrapped_sigma_grad(epsilon, sigma, r):
+            return -r * (epsilon * epsilon / sigma - sigma)
             
-        def _jax_wrapped_pgpe_grad(key, mu, sigma, policy_hyperparams, subs, model_params,
+        def _jax_wrapped_pgpe_grad(key, mu, sigma, policy_hyperparams, subs, model_params, 
                                    r_max):
             key, subkey = random.split(key)
-            params_pos, params_neg = _jax_wrapped_sample_params_batched(key, mu, sigma)
-            r_pos = _jax_wrapped_return_batched(
+            (params_pos, params_neg), epsilon = _jax_wrapped_sample_params(key, mu, sigma)
+            r_pos = _jax_wrapped_return(
                 subkey, params_pos, policy_hyperparams, subs, model_params)
-            r_neg = _jax_wrapped_return_batched(
+            r_neg = _jax_wrapped_return(
                 subkey, params_neg, policy_hyperparams, subs, model_params)
             if scale_reward:
-                r_mu_scale = jnp.maximum(1e-5, r_max - (r_pos + r_neg) / 2)
-                r_sigma_scale = jnp.maximum(1e-5, jnp.abs(r_max))
+                mu_scale = jnp.maximum(1e-5, r_max - (r_pos + r_neg) / 2)
+                sigma_scale = jnp.maximum(1e-5, jnp.abs(r_max))
             else:
-                r_mu_scale = 1.0
-                r_sigma_scale = 1.0
-            r_mu = (r_pos - r_neg) / (2 * r_mu_scale)
-            r_sigma = (r_pos + r_neg) / (2 * r_sigma_scale)
-            mu_grads = jax.vmap(_jax_wrapped_mu_grad, in_axes=(0, None, None, 0))(
-                params_pos, mu, sigma, r_mu)
-            sigma_grads = jax.vmap(_jax_wrapped_sigma_grad, in_axes=(0, None, None, 0))(
-                params_pos, mu, sigma, r_sigma)
-            grad = jax.tree_map(lambda g: jnp.mean(g, axis=0), (mu_grads, sigma_grads))
-            return grad
+                mu_scale = 1.0
+                sigma_scale = 1.0
+            r_mu = (r_pos - r_neg) / (2 * mu_scale)
+            r_sigma = (r_pos + r_neg) / (2 * sigma_scale)
+            grad_mu = jax.tree_map(partial(_jax_wrapped_mu_grad, r=r_mu), epsilon) 
+            grad_sigma = jax.tree_map(
+                partial(_jax_wrapped_sigma_grad, r=r_sigma), epsilon, sigma)
+            return grad_mu, grad_sigma
 
         def _jax_wrapped_policy_gradient_update(key, pgpe_params, policy_hyperparams, 
                                                 subs, model_params, pgpe_opt_state, r_max):
             mu, sigma = pgpe_params
             mu_state, sigma_state = pgpe_opt_state
-            mu_grad, sigma_grad = _jax_wrapped_pgpe_grad(
-                key, mu, sigma, policy_hyperparams, subs, model_params, r_max)
+            if batch_size == 1:
+                mu_grad, sigma_grad = _jax_wrapped_pgpe_grad(
+                    key, mu, sigma, policy_hyperparams, subs, model_params, r_max)
+            else:
+                keys = random.split(key, num=batch_size)
+                mu_grads, sigma_grads = jax.vmap(
+                    _jax_wrapped_pgpe_grad, 
+                    in_axes=(0, None, None, None, None, None, None)
+                )(keys, mu, sigma, policy_hyperparams, subs, model_params, r_max)
+                mu_grad = jax.tree_map(partial(jnp.mean, axis=0), mu_grads)
+                sigma_grad = jax.tree_map(partial(jnp.mean, axis=0), sigma_grads)
             mu_updates, new_mu_state = mu_optimizer.update(mu_grad, mu_state, params=mu) 
             sigma_updates, new_sigma_state = sigma_optimizer.update(
                 sigma_grad, sigma_state, params=sigma) 
