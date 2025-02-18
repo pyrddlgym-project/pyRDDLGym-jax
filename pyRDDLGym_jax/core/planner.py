@@ -1212,23 +1212,36 @@ class PGPE:
 
 
 class GaussianPGPE(PGPE):
-    """PGPE with a Gaussian parameter distribution."""
+    '''PGPE with a Gaussian parameter distribution.'''
 
     def __init__(self, batch_size: int=1, 
                  init_sigma: float=1.0,
                  sigma_range: Tuple[float, float]=(1e-5, 1e5),
                  scale_reward: bool=True,
-                 baseline_free: bool=True,
+                 super_symmetric: bool=True,
                  optimizer: Callable[..., optax.GradientTransformation]=optax.adam,
                  optimizer_kwargs_mu: Optional[Kwargs]=None,
                  optimizer_kwargs_sigma: Optional[Kwargs]=None) -> None:
+        '''Creates a new Gaussian PGPE planner.
+        
+        :param batch_size: how many policy parameters to sample per optimization step
+        :param init_sigma: initial standard deviation of Gaussian
+        :param sigma_range: bounds to constrain standard deviation
+        :param scale_reward: whether to apply reward scaling as in the paper
+        :param super_symmetric: whether to use super-symmetric sampling as in the paper
+        :param optimizer: a factory for an optax SGD algorithm
+        :param optimizer_kwargs_mu: a dictionary of parameters to pass to the SGD
+        factory for the mean optimizer
+        :param optimizer_kwargs_sigma: a dictionary of parameters to pass to the SGD
+        factory for the standard deviation optimizer
+        '''
         super().__init__()
 
         self.batch_size = batch_size
         self.init_sigma = init_sigma
         self.sigma_range = sigma_range
         self.scale_reward = scale_reward
-        self.baseline_free = baseline_free
+        self.super_symmetric = super_symmetric
         
         # set optimizers
         if optimizer_kwargs_mu is None:
@@ -1244,12 +1257,13 @@ class GaussianPGPE(PGPE):
     
     def __str__(self) -> str:
         return (f'PGPE hyper-parameters:\n'
-                f'    method      ={self.__class__.__name__}\n'
-                f'    batch_size  ={self.batch_size}\n'
-                f'    init_sigma  ={self.init_sigma}\n'
-                f'    sigma_range ={self.sigma_range}\n'
-                f'    scale_reward={self.scale_reward}\n'
-                f'    optimizer   ={self.optimizer_name}\n'
+                f'    method         ={self.__class__.__name__}\n'
+                f'    batch_size     ={self.batch_size}\n'
+                f'    init_sigma     ={self.init_sigma}\n'
+                f'    sigma_range    ={self.sigma_range}\n'
+                f'    scale_reward   ={self.scale_reward}\n'
+                f'    super_symmetric={self.super_symmetric}\n'
+                f'    optimizer      ={self.optimizer_name}\n'
                 f'    optimizer_kwargs:\n'
                 f'        mu   ={self.optimizer_kwargs_mu}\n'
                 f'        sigma={self.optimizer_kwargs_sigma}\n'
@@ -1261,7 +1275,7 @@ class GaussianPGPE(PGPE):
         sigma0 = self.init_sigma
         sigma_range = self.sigma_range
         scale_reward = self.scale_reward
-        baseline_free = self.baseline_free
+        super_symmetric = self.super_symmetric
         batch_size = self.batch_size
         optimizers = (mu_optimizer, sigma_optimizer) = self.optimizers
 
@@ -1293,7 +1307,7 @@ class GaussianPGPE(PGPE):
             epsilon = jax.tree_map(_jax_wrapped_mu_noise, keys_pytree, sigma)
             p1 = jax.tree_map(jnp.add, mu, epsilon)
             p2 = jax.tree_map(jnp.subtract, mu, epsilon)
-            if baseline_free:
+            if super_symmetric:
                 epsilon_star = jax.tree_map(_jax_wrapped_epsilon_star, sigma, epsilon)     
                 p3 = jax.tree_map(jnp.add, mu, epsilon_star)
                 p4 = jax.tree_map(jnp.subtract, mu, epsilon_star)
@@ -1303,7 +1317,7 @@ class GaussianPGPE(PGPE):
                         
         # policy gradient update functions
         def _jax_wrapped_mu_grad(epsilon, epsilon_star, r1, r2, r3, r4, m):
-            if baseline_free:
+            if super_symmetric:
                 if scale_reward:
                     scale1 = jnp.maximum(MIN_NORM, m - (r1 + r2) / 2)
                     scale2 = jnp.maximum(MIN_NORM, m - (r3 + r4) / 2)
@@ -1322,7 +1336,7 @@ class GaussianPGPE(PGPE):
             return grad
         
         def _jax_wrapped_sigma_grad(epsilon, epsilon_star, sigma, r1, r2, r3, r4, m):
-            if baseline_free:
+            if super_symmetric:
                 mask = r1 + r2 >= r3 + r4
                 epsilon_tau = mask * epsilon + (1 - mask) * epsilon_star
                 s = epsilon_tau * epsilon_tau / sigma - sigma
@@ -1356,7 +1370,7 @@ class GaussianPGPE(PGPE):
             r2 = _jax_wrapped_return(subkey, p2, policy_hyperparams, subs, model_params)
             r_max = jnp.maximum(r_max, r1)
             r_max = jnp.maximum(r_max, r2)            
-            if baseline_free:
+            if super_symmetric:
                 r3 = _jax_wrapped_return(subkey, p3, policy_hyperparams, subs, model_params)
                 r4 = _jax_wrapped_return(subkey, p4, policy_hyperparams, subs, model_params)
                 r_max = jnp.maximum(r_max, r3)
