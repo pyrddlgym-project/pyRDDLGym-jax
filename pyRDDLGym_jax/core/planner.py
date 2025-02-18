@@ -1216,8 +1216,9 @@ class GaussianPGPE(PGPE):
 
     def __init__(self, batch_size: int=1, 
                  init_sigma: float=1.0,
-                 min_sigma: float=1e-6,
+                 sigma_range: Tuple[float, float]=(1e-5, 1e5),
                  scale_reward: bool=True,
+                 baseline_free: bool=True,
                  optimizer: Callable[..., optax.GradientTransformation]=optax.adam,
                  optimizer_kwargs_mu: Optional[Kwargs]=None,
                  optimizer_kwargs_sigma: Optional[Kwargs]=None) -> None:
@@ -1225,8 +1226,9 @@ class GaussianPGPE(PGPE):
 
         self.batch_size = batch_size
         self.init_sigma = init_sigma
-        self.min_sigma = min_sigma
+        self.sigma_range = sigma_range
         self.scale_reward = scale_reward
+        self.baseline_free = baseline_free
         
         # set optimizers
         if optimizer_kwargs_mu is None:
@@ -1245,7 +1247,7 @@ class GaussianPGPE(PGPE):
                 f'    method      ={self.__class__.__name__}\n'
                 f'    batch_size  ={self.batch_size}\n'
                 f'    init_sigma  ={self.init_sigma}\n'
-                f'    min_sigma   ={self.min_sigma}\n'
+                f'    sigma_range ={self.sigma_range}\n'
                 f'    scale_reward={self.scale_reward}\n'
                 f'    optimizer   ={self.optimizer_name}\n'
                 f'    optimizer_kwargs:\n'
@@ -1255,9 +1257,11 @@ class GaussianPGPE(PGPE):
 
     def compile(self, return_fn: Callable, rollout_fn: Callable, 
                 projection: Callable, real_dtype: Type) -> None:
+        MIN_NORM = 1e-5
         sigma0 = self.init_sigma
-        min_sigma = self.min_sigma
+        sigma_range = self.sigma_range
         scale_reward = self.scale_reward
+        baseline_free = self.baseline_free
         batch_size = self.batch_size
         optimizers = (mu_optimizer, sigma_optimizer) = self.optimizers
 
@@ -1276,78 +1280,136 @@ class GaussianPGPE(PGPE):
         def _jax_wrapped_mu_noise(key, sigma):
             return sigma * random.normal(key, shape=jnp.shape(sigma), dtype=real_dtype)
 
+        def _jax_wrapped_epsilon_star(sigma, epsilon):
+            phi = 0.67449 * sigma
+            a = (sigma - jnp.abs(epsilon)) / sigma
+            epsilon_star = jnp.sign(epsilon) * phi * jnp.exp(a)
+            return epsilon_star
+
         def _jax_wrapped_sample_params(key, mu, sigma):
             keys = random.split(key, num=len(jax.tree_util.tree_leaves(mu)))
             keys_pytree = jax.tree_util.tree_unflatten(
                 treedef=jax.tree_util.tree_structure(mu), leaves=keys)
-            epsilon = jax.tree_map(_jax_wrapped_mu_noise, keys_pytree, sigma)     
-            params_pos = jax.tree_map(jnp.add, mu, epsilon)
-            params_neg = jax.tree_map(jnp.subtract, mu, epsilon)
-            return (params_pos, params_neg), epsilon
-                
-        # evaluation functions
+            epsilon = jax.tree_map(_jax_wrapped_mu_noise, keys_pytree, sigma)
+            p1 = jax.tree_map(jnp.add, mu, epsilon)
+            p2 = jax.tree_map(jnp.subtract, mu, epsilon)
+            if baseline_free:
+                epsilon_star = jax.tree_map(_jax_wrapped_epsilon_star, sigma, epsilon)     
+                p3 = jax.tree_map(jnp.add, mu, epsilon_star)
+                p4 = jax.tree_map(jnp.subtract, mu, epsilon_star)
+            else:
+                epsilon_star, p3, p4 = epsilon, p1, p2
+            return (p1, p2, p3, p4), (epsilon, epsilon_star)
+                        
+        # policy gradient update functions
+        def _jax_wrapped_mu_grad(epsilon, epsilon_star, r1, r2, r3, r4, m):
+            if baseline_free:
+                if scale_reward:
+                    scale1 = jnp.maximum(MIN_NORM, m - (r1 + r2) / 2)
+                    scale2 = jnp.maximum(MIN_NORM, m - (r3 + r4) / 2)
+                else:
+                    scale1 = scale2 = 1.0
+                r_mu1 = (r1 - r2) / (2 * scale1)
+                r_mu2 = (r3 - r4) / (2 * scale2)
+                grad = -(r_mu1 * epsilon + r_mu2 * epsilon_star)
+            else:
+                if scale_reward:
+                    scale = jnp.maximum(MIN_NORM, m - (r1 + r2) / 2)
+                else:
+                    scale = 1.0
+                r_mu = (r1 - r2) / (2 * scale)
+                grad = -r_mu * epsilon
+            return grad
+        
+        def _jax_wrapped_sigma_grad(epsilon, epsilon_star, sigma, r1, r2, r3, r4, m):
+            if baseline_free:
+                mask = r1 + r2 >= r3 + r4
+                epsilon_tau = mask * epsilon + (1 - mask) * epsilon_star
+                s = epsilon_tau * epsilon_tau / sigma - sigma
+                if scale_reward:
+                    scale = jnp.maximum(MIN_NORM, m - (r1 + r2 + r3 + r4) / 4)
+                else:
+                    scale = 1.0
+                r_sigma = ((r1 + r2) - (r3 + r4)) / (4 * scale)
+            else:
+                s = epsilon * epsilon / sigma - sigma
+                if scale_reward:
+                    scale = jnp.maximum(MIN_NORM, jnp.abs(m))
+                else:
+                    scale = 1.0
+                r_sigma = (r1 + r2) / (2 * scale)
+            grad = -r_sigma * s
+            return grad
+            
         def _jax_wrapped_return(key, policy_params, policy_hyperparams, subs, model_params):
             log, _ = rollout_fn(
                 key, policy_params, policy_hyperparams, subs, model_params)
             mean_return = jnp.mean(return_fn(log['reward']))
             return mean_return
         
-        # policy gradient update functions
-        def _jax_wrapped_mu_grad(epsilon, r):
-            return -r * epsilon
-        
-        def _jax_wrapped_sigma_grad(epsilon, sigma, r):
-            return -r * (epsilon * epsilon / sigma - sigma)
-            
-        def _jax_wrapped_pgpe_grad(key, mu, sigma, policy_hyperparams, subs, model_params, 
-                                   r_max):
+        def _jax_wrapped_pgpe_grad(key, mu, sigma, r_max, 
+                                   policy_hyperparams, subs, model_params):
             key, subkey = random.split(key)
-            (params_pos, params_neg), epsilon = _jax_wrapped_sample_params(key, mu, sigma)
-            r_pos = _jax_wrapped_return(
-                subkey, params_pos, policy_hyperparams, subs, model_params)
-            r_neg = _jax_wrapped_return(
-                subkey, params_neg, policy_hyperparams, subs, model_params)
-            if scale_reward:
-                mu_scale = jnp.maximum(1e-5, r_max - (r_pos + r_neg) / 2)
-                sigma_scale = jnp.maximum(1e-5, jnp.abs(r_max))
+            (p1, p2, p3, p4), (epsilon, epsilon_star) = _jax_wrapped_sample_params(
+                key, mu, sigma)
+            r1 = _jax_wrapped_return(subkey, p1, policy_hyperparams, subs, model_params)
+            r2 = _jax_wrapped_return(subkey, p2, policy_hyperparams, subs, model_params)
+            r_max = jnp.maximum(r_max, r1)
+            r_max = jnp.maximum(r_max, r2)            
+            if baseline_free:
+                r3 = _jax_wrapped_return(subkey, p3, policy_hyperparams, subs, model_params)
+                r4 = _jax_wrapped_return(subkey, p4, policy_hyperparams, subs, model_params)
+                r_max = jnp.maximum(r_max, r3)
+                r_max = jnp.maximum(r_max, r4)       
             else:
-                mu_scale = 1.0
-                sigma_scale = 1.0
-            r_mu = (r_pos - r_neg) / (2 * mu_scale)
-            r_sigma = (r_pos + r_neg) / (2 * sigma_scale)
-            grad_mu = jax.tree_map(partial(_jax_wrapped_mu_grad, r=r_mu), epsilon) 
+                r3, r4 = r1, r2            
+            grad_mu = jax.tree_map(
+                partial(_jax_wrapped_mu_grad, r1=r1, r2=r2, r3=r3, r4=r4, m=r_max), 
+                epsilon, epsilon_star
+            ) 
             grad_sigma = jax.tree_map(
-                partial(_jax_wrapped_sigma_grad, r=r_sigma), epsilon, sigma)
-            return grad_mu, grad_sigma
+                partial(_jax_wrapped_sigma_grad, r1=r1, r2=r2, r3=r3, r4=r4, m=r_max), 
+                epsilon, epsilon_star, sigma
+            )
+            return grad_mu, grad_sigma, r_max
 
-        def _jax_wrapped_policy_gradient_update(key, pgpe_params, policy_hyperparams, 
-                                                subs, model_params, pgpe_opt_state, r_max):
+        def _jax_wrapped_pgpe_grad_batched(key, pgpe_params, r_max, 
+                                           policy_hyperparams, subs, model_params):
             mu, sigma = pgpe_params
-            mu_state, sigma_state = pgpe_opt_state
             if batch_size == 1:
-                mu_grad, sigma_grad = _jax_wrapped_pgpe_grad(
-                    key, mu, sigma, policy_hyperparams, subs, model_params, r_max)
+                mu_grad, sigma_grad, new_r_max = _jax_wrapped_pgpe_grad(
+                    key, mu, sigma, r_max, policy_hyperparams, subs, model_params)
             else:
                 keys = random.split(key, num=batch_size)
-                mu_grads, sigma_grads = jax.vmap(
+                mu_grads, sigma_grads, r_maxs = jax.vmap(
                     _jax_wrapped_pgpe_grad, 
                     in_axes=(0, None, None, None, None, None, None)
-                )(keys, mu, sigma, policy_hyperparams, subs, model_params, r_max)
+                )(keys, mu, sigma, r_max, policy_hyperparams, subs, model_params)
                 mu_grad = jax.tree_map(partial(jnp.mean, axis=0), mu_grads)
                 sigma_grad = jax.tree_map(partial(jnp.mean, axis=0), sigma_grads)
+                new_r_max = jnp.max(r_maxs)
+            return mu_grad, sigma_grad, new_r_max
+
+        def _jax_wrapped_pgpe_update(key, pgpe_params, r_max, 
+                                     policy_hyperparams, subs, model_params, 
+                                     pgpe_opt_state):
+            mu, sigma = pgpe_params
+            mu_state, sigma_state = pgpe_opt_state
+            mu_grad, sigma_grad, new_r_max = _jax_wrapped_pgpe_grad_batched(
+                key, pgpe_params, r_max, policy_hyperparams, subs, model_params)
             mu_updates, new_mu_state = mu_optimizer.update(mu_grad, mu_state, params=mu) 
             sigma_updates, new_sigma_state = sigma_optimizer.update(
                 sigma_grad, sigma_state, params=sigma) 
             new_mu = optax.apply_updates(mu, mu_updates)
             new_mu, converged = projection(new_mu, policy_hyperparams)
             new_sigma = optax.apply_updates(sigma, sigma_updates)
-            new_sigma = jax.tree_map(lambda x: jnp.maximum(x, min_sigma), new_sigma)
+            new_sigma = jax.tree_map(lambda x: jnp.clip(x, *sigma_range), new_sigma)
             new_pgpe_params = (new_mu, new_sigma)
             new_pgpe_opt_state = (new_mu_state, new_sigma_state)
             policy_params = new_mu
-            return new_pgpe_params, new_pgpe_opt_state, policy_params, converged
+            return new_pgpe_params, new_r_max, new_pgpe_opt_state, policy_params, converged
 
-        self._update = jax.jit(_jax_wrapped_policy_gradient_update)
+        self._update = jax.jit(_jax_wrapped_pgpe_update)
 
 
 # ***********************************************************************
@@ -2034,6 +2096,7 @@ r"""
             pgpe_params, pgpe_opt_state = None, None
             rolling_pgpe_loss = None
         total_pgpe_it = 0
+        r_max = -jnp.inf
 
         # ======================================================================
         # INITIALIZATION OF RUNNING STATISTICS
@@ -2086,10 +2149,9 @@ r"""
             pgpe_improve = False
             if self.use_pgpe:
                 key, subkey = random.split(key)
-                r_max = best_loss.item() if it else 1.0
-                pgpe_params, pgpe_opt_state, pgpe_param, pgpe_converged = \
-                    self.pgpe.update(subkey, pgpe_params, policy_hyperparams, 
-                                     test_subs, model_params, pgpe_opt_state, r_max)
+                pgpe_params, r_max, pgpe_opt_state, pgpe_param, pgpe_converged = \
+                    self.pgpe.update(subkey, pgpe_params, r_max, policy_hyperparams, 
+                                     test_subs, model_params, pgpe_opt_state)
                 pgpe_loss, _ = self.test_loss(
                     subkey, pgpe_param, policy_hyperparams, test_subs, model_params_test)
                 pgpe_loss_smooth = rolling_pgpe_loss.update(pgpe_loss)
