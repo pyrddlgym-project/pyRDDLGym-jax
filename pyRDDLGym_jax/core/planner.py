@@ -1219,6 +1219,7 @@ class GaussianPGPE(PGPE):
                  sigma_range: Tuple[float, float]=(1e-5, 1e5),
                  scale_reward: bool=True,
                  super_symmetric: bool=True,
+                 super_symmetric_accurate: bool=True,
                  optimizer: Callable[..., optax.GradientTransformation]=optax.adam,
                  optimizer_kwargs_mu: Optional[Kwargs]=None,
                  optimizer_kwargs_sigma: Optional[Kwargs]=None) -> None:
@@ -1229,6 +1230,8 @@ class GaussianPGPE(PGPE):
         :param sigma_range: bounds to constrain standard deviation
         :param scale_reward: whether to apply reward scaling as in the paper
         :param super_symmetric: whether to use super-symmetric sampling as in the paper
+        :param super_symmetric_accurate: whether to use the accurate formula for super-
+        symmetric sampling or the simplified but biased formula
         :param optimizer: a factory for an optax SGD algorithm
         :param optimizer_kwargs_mu: a dictionary of parameters to pass to the SGD
         factory for the mean optimizer
@@ -1242,6 +1245,7 @@ class GaussianPGPE(PGPE):
         self.sigma_range = sigma_range
         self.scale_reward = scale_reward
         self.super_symmetric = super_symmetric
+        self.super_symmetric_accurate = super_symmetric_accurate
         
         # set optimizers
         if optimizer_kwargs_mu is None:
@@ -1263,6 +1267,7 @@ class GaussianPGPE(PGPE):
                 f'    sigma_range    ={self.sigma_range}\n'
                 f'    scale_reward   ={self.scale_reward}\n'
                 f'    super_symmetric={self.super_symmetric}\n'
+                f'        accurate   ={self.super_symmetric_accurate}\n'
                 f'    optimizer      ={self.optimizer_name}\n'
                 f'    optimizer_kwargs:\n'
                 f'        mu   ={self.optimizer_kwargs_mu}\n'
@@ -1276,6 +1281,7 @@ class GaussianPGPE(PGPE):
         sigma_range = self.sigma_range
         scale_reward = self.scale_reward
         super_symmetric = self.super_symmetric
+        super_symmetric_accurate = self.super_symmetric_accurate
         batch_size = self.batch_size
         optimizers = (mu_optimizer, sigma_optimizer) = self.optimizers
 
@@ -1295,9 +1301,18 @@ class GaussianPGPE(PGPE):
             return sigma * random.normal(key, shape=jnp.shape(sigma), dtype=real_dtype)
 
         def _jax_wrapped_epsilon_star(sigma, epsilon):
+            c1, c2, c3 = -0.06655, -0.9706, 0.124
             phi = 0.67449 * sigma
             a = (sigma - jnp.abs(epsilon)) / sigma
-            epsilon_star = jnp.sign(epsilon) * phi * jnp.exp(a)
+            if super_symmetric_accurate:
+                aa = jnp.abs(a)
+                epsilon_star = jnp.sign(epsilon) * phi * jnp.where(
+                    a <= 0,
+                    jnp.exp(c1 * aa * (aa * aa - 1) / jnp.log(aa + 1e-10) + c2 * aa),
+                    jnp.exp(aa - c3 * aa * jnp.log(1.0 - jnp.power(aa, 3) + 1e-10))
+                )
+            else:
+                epsilon_star = jnp.sign(epsilon) * phi * jnp.exp(a)
             return epsilon_star
 
         def _jax_wrapped_sample_params(key, mu, sigma):
