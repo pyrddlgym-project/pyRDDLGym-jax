@@ -539,7 +539,7 @@ class JaxRDDLCompiler:
                 _jax_wrapped_single_step_policy,
                 in_axes=(0, None, None, None, 0, None)
             )(keys, policy_params, hyperparams, step, subs, model_params)
-            model_params = jax.tree_map(lambda x: jnp.mean(x, axis=0), model_params)
+            model_params = jax.tree_map(partial(jnp.mean, axis=0), model_params)
             carry = (key, policy_params, hyperparams, subs, model_params)
             return carry, log            
             
