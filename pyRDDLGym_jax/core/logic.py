@@ -1,4 +1,31 @@
-from typing import Optional, Set
+# ***********************************************************************
+# JAXPLAN
+# 
+# Author: Michael Gimelfarb
+#
+# REFERENCES:
+#
+# [1] Gimelfarb, Michael, Ayal Taitler, and Scott Sanner. "JaxPlan and GurobiPlan: 
+# Optimization Baselines for Replanning in Discrete and Mixed Discrete-Continuous 
+# Probabilistic Domains." Proceedings of the International Conference on Automated 
+# Planning and Scheduling. Vol. 34. 2024.
+#
+# [2] Petersen, Felix, Christian Borgelt, Hilde Kuehne, and Oliver Deussen. "Learning with 
+# algorithmic supervision via continuous relaxations." Advances in Neural Information 
+# Processing Systems 34 (2021): 16520-16531.
+#
+# [3] Agustsson, Eirikur, and Lucas Theis. "Universally quantized neural compression." 
+# Advances in neural information processing systems 33 (2020): 12367-12376.
+#
+# [4] Gupta, Madan M., and J11043360726 Qi. "Theory of T-norms and fuzzy inference 
+# methods." Fuzzy sets and systems 40, no. 3 (1991): 431-450.
+#
+# [5] Jang, Eric, Shixiang Gu, and Ben Poole. "Categorical Reparametrization with 
+# Gumble-Softmax." In International Conference on Learning Representations (ICLR 2017). 
+# OpenReview. net, 2017.
+#
+# ***********************************************************************
+
 
 import jax
 import jax.numpy as jnp
@@ -759,14 +786,14 @@ class FuzzyLogic(Logic):
     
     def __str__(self) -> str:
         return (f'model relaxation:\n'
-                f'    tnorm         ={str(self.tnorm)}\n'
-                f'    complement    ={str(self.complement)}\n'
-                f'    comparison    ={str(self.comparison)}\n'
-                f'    sampling      ={str(self.sampling)}\n'
-                f'    rounding      ={str(self.rounding)}\n'
-                f'    control       ={str(self.control)}\n'
-                f'    underflow_tol ={self.eps}\n'
-                f'    use_64_bit    ={self.use64bit}')
+                f'    tnorm        ={str(self.tnorm)}\n'
+                f'    complement   ={str(self.complement)}\n'
+                f'    comparison   ={str(self.comparison)}\n'
+                f'    sampling     ={str(self.sampling)}\n'
+                f'    rounding     ={str(self.rounding)}\n'
+                f'    control      ={str(self.control)}\n'
+                f'    underflow_tol={self.eps}\n'
+                f'    use_64_bit   ={self.use64bit}\n')
 
     def summarize_hyperparameters(self) -> None:
         print(self.__str__())

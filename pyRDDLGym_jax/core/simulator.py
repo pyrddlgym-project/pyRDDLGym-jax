@@ -1,3 +1,23 @@
+# ***********************************************************************
+# JAXPLAN
+# 
+# Author: Michael Gimelfarb
+#
+# REFERENCES:
+# 
+# [1] Gimelfarb, Michael, Ayal Taitler, and Scott Sanner. "JaxPlan and GurobiPlan: 
+# Optimization Baselines for Replanning in Discrete and Mixed Discrete-Continuous 
+# Probabilistic Domains." Proceedings of the International Conference on Automated 
+# Planning and Scheduling. Vol. 34. 2024.
+# 
+# [2] Taitler, Ayal, Michael Gimelfarb, Jihwan Jeong, Sriram Gopalakrishnan, Martin 
+# Mladenov, Xiaotian Liu, and Scott Sanner. "pyRDDLGym: From RDDL to Gym Environments." 
+# In PRL Workshop Series {\textendash} Bridging the Gap Between AI Planning and 
+# Reinforcement Learning.
+#
+# ***********************************************************************
+
+
 import time
 from typing import Dict, Optional
 
