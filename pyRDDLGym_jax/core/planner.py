@@ -1,3 +1,33 @@
+# ***********************************************************************
+# JAXPLAN
+# 
+# Author: Michael Gimelfarb
+#
+# RELEVANT SOURCES:
+#
+# [1] Gimelfarb, Michael, Ayal Taitler, and Scott Sanner. "JaxPlan and GurobiPlan: 
+# Optimization Baselines for Replanning in Discrete and Mixed Discrete-Continuous 
+# Probabilistic Domains." Proceedings of the International Conference on Automated 
+# Planning and Scheduling. Vol. 34. 2024.
+# 
+# [2] Patton, Noah, Jihwan Jeong, Mike Gimelfarb, and Scott Sanner. "A Distributional 
+# Framework for Risk-Sensitive End-to-End Planning in Continuous MDPs." In Proceedings of 
+# the AAAI Conference on Artificial Intelligence, vol. 36, no. 9, pp. 9894-9901. 2022.
+#
+# [3] Bueno, Thiago P., Leliane N. de Barros, Denis D. Mauá, and Scott Sanner. "Deep 
+# reactive policies for planning in stochastic nonlinear domains." In Proceedings of the 
+# AAAI Conference on Artificial Intelligence, vol. 33, no. 01, pp. 7530-7537. 2019.
+#
+# [4] Wu, Ga, Buser Say, and Scott Sanner. "Scalable planning with tensorflow for hybrid 
+# nonlinear domains." Advances in Neural Information Processing Systems 30 (2017).
+#
+# [5] Sehnke, Frank, and Tingting Zhao. "Baseline-free sampling in parameter exploring 
+# policy gradients: Super symmetric pgpe." Artificial Neural Networks: Methods and 
+# Applications in Bio-/Neuroinformatics. Springer International Publishing, 2015.
+#
+# ***********************************************************************
+
+
 from ast import literal_eval
 from collections import deque
 import configparser
