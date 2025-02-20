@@ -1236,8 +1236,7 @@ class PGPE:
     def update(self):
         return self._update
 
-    def compile(self, return_fn: Callable, rollout_fn: Callable, 
-                projection: Callable, real_dtype: Type) -> None:
+    def compile(self, loss_fn: Callable, projection: Callable, real_dtype: Type) -> None:
         raise NotImplementedError
 
 
@@ -1304,8 +1303,7 @@ class GaussianPGPE(PGPE):
                 f'        sigma={self.optimizer_kwargs_sigma}\n'
         )
 
-    def compile(self, return_fn: Callable, rollout_fn: Callable, 
-                projection: Callable, real_dtype: Type) -> None:
+    def compile(self, loss_fn: Callable, projection: Callable, real_dtype: Type) -> None:
         MIN_NORM = 1e-5
         sigma0 = self.init_sigma
         sigma_range = self.sigma_range
@@ -1400,24 +1398,18 @@ class GaussianPGPE(PGPE):
             grad = -r_sigma * s
             return grad
             
-        def _jax_wrapped_return(key, policy_params, policy_hyperparams, subs, model_params):
-            log, _ = rollout_fn(
-                key, policy_params, policy_hyperparams, subs, model_params)
-            mean_return = jnp.mean(return_fn(log['reward']))
-            return mean_return
-        
         def _jax_wrapped_pgpe_grad(key, mu, sigma, r_max, 
                                    policy_hyperparams, subs, model_params):
             key, subkey = random.split(key)
             (p1, p2, p3, p4), (epsilon, epsilon_star) = _jax_wrapped_sample_params(
                 key, mu, sigma)
-            r1 = _jax_wrapped_return(subkey, p1, policy_hyperparams, subs, model_params)
-            r2 = _jax_wrapped_return(subkey, p2, policy_hyperparams, subs, model_params)
+            r1 = -loss_fn(subkey, p1, policy_hyperparams, subs, model_params)[0]
+            r2 = -loss_fn(subkey, p2, policy_hyperparams, subs, model_params)[0]
             r_max = jnp.maximum(r_max, r1)
             r_max = jnp.maximum(r_max, r2)            
             if super_symmetric:
-                r3 = _jax_wrapped_return(subkey, p3, policy_hyperparams, subs, model_params)
-                r4 = _jax_wrapped_return(subkey, p4, policy_hyperparams, subs, model_params)
+                r3 = -loss_fn(subkey, p3, policy_hyperparams, subs, model_params)[0]
+                r4 = -loss_fn(subkey, p4, policy_hyperparams, subs, model_params)[0]
                 r_max = jnp.maximum(r_max, r3)
                 r_max = jnp.maximum(r_max, r4)       
             else:
@@ -1758,10 +1750,9 @@ r"""
 
         # pgpe option
         if self.use_pgpe:
-            test_return_fn = self._jax_return(use_symlog=False)
+            loss_fn = self._jax_loss(rollouts=test_rollouts)
             self.pgpe.compile(
-                return_fn=test_return_fn, 
-                rollout_fn=test_rollouts, 
+                loss_fn=loss_fn, 
                 projection=self.plan.projection, 
                 real_dtype=self.test_compiled.REAL
             )
