@@ -76,6 +76,7 @@ class JaxPlannerDashboard:
         self.xticks = {}
         self.test_return = {}
         self.train_return = {}
+        self.pgpe_return = {}
         self.return_dist = {}
         self.return_dist_ticks = {}
         self.return_dist_last_progress = {}
@@ -313,6 +314,9 @@ class JaxPlannerDashboard:
                                 dbc.Row([
                                     dbc.Col(Graph(id='train-return-graph'), width=6),
                                     dbc.Col(Graph(id='test-return-graph'), width=6),
+                                ]),
+                                dbc.Row([                           
+                                    dbc.Col(Graph(id='pgpe-return-graph'), width=6)
                                 ]),
                                 dbc.Row([                           
                                     Graph(id='dist-return-graph')
@@ -676,6 +680,33 @@ class JaxPlannerDashboard:
             )
             return fig
         
+        @app.callback(
+            Output('pgpe-return-graph', 'figure'),
+            [Input('interval', 'n_intervals'),
+             Input('trigger-experiment-check', 'children'),
+             Input('tabs-main', 'active_tab')]
+        )
+        def update_pgpe_return_graph(n, trigger, active_tab):
+            if active_tab != 'tab-performance': return dash.no_update
+            fig = go.Figure()
+            for (row, checked) in self.checked.copy().items():
+                if checked:
+                    fig.add_trace(go.Scatter(
+                        x=self.xticks[row], y=self.pgpe_return[row],
+                        name=f'id={row}',
+                        mode='lines+markers',
+                        marker=dict(size=3), line=dict(width=2)
+                    ))
+            fig.update_layout(
+                title=dict(text="PGPE Return"),
+                xaxis=dict(title=dict(text="Training Iteration")),
+                yaxis=dict(title=dict(text="Cumulative Reward")),
+                font=dict(size=PLOT_AXES_FONT_SIZE),
+                legend=dict(bgcolor='rgba(0,0,0,0)'),
+                template="plotly_white"
+            )
+            return fig
+
         @app.callback(
             Output('dist-return-graph', 'figure'),
             [Input('interval', 'n_intervals'),
@@ -1331,6 +1362,7 @@ class JaxPlannerDashboard:
         self.xticks[experiment_id] = []
         self.train_return[experiment_id] = []
         self.test_return[experiment_id] = []
+        self.pgpe_return[experiment_id] = []
         self.return_dist_ticks[experiment_id] = []
         self.return_dist_last_progress[experiment_id] = 0
         self.return_dist[experiment_id] = []
@@ -1382,6 +1414,7 @@ class JaxPlannerDashboard:
         self.xticks[experiment_id].append(iteration)
         self.train_return[experiment_id].append(callback['train_return'])    
         self.test_return[experiment_id].append(callback['best_return'])
+        self.pgpe_return[experiment_id].append(callback['pgpe_return'])
         
         # data for return distributions
         progress = callback['progress']
