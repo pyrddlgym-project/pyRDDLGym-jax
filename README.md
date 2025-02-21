@@ -301,4 +301,5 @@ Some of the implementation details derive from the following literature, which y
 - [A Distributional Framework for Risk-Sensitive End-to-End Planning in Continuous MDPs](https://ojs.aaai.org/index.php/AAAI/article/view/21226)
 - [Deep reactive policies for planning in stochastic nonlinear domains, AAAI 2019](https://ojs.aaai.org/index.php/AAAI/article/view/4744)
 - [Scalable planning with tensorflow for hybrid nonlinear domains, NeurIPS 2017](https://proceedings.neurips.cc/paper/2017/file/98b17f068d5d9b7668e19fb8ae470841-Paper.pdf)
+- [Baseline-Free Sampling in Parameter Exploring Policy Gradients: Super Symmetric PGPE](https://link.springer.com/chapter/10.1007/978-3-319-09903-3_13)
 
