@@ -1436,8 +1436,8 @@ class GaussianPGPE(PGPE):
                     _jax_wrapped_pgpe_grad, 
                     in_axes=(0, None, None, None, None, None, None)
                 )(keys, mu, sigma, r_max, policy_hyperparams, subs, model_params)
-                mu_grad = jax.tree_map(partial(jnp.mean, axis=0), mu_grads)
-                sigma_grad = jax.tree_map(partial(jnp.mean, axis=0), sigma_grads)
+                mu_grad, sigma_grad = jax.tree_map(
+                    partial(jnp.mean, axis=0), (mu_grads, sigma_grads))
                 new_r_max = jnp.max(r_maxs)
             return mu_grad, sigma_grad, new_r_max
 
@@ -1588,14 +1588,19 @@ class JaxBackpropPlanner:
                 utility_fn = jnp.mean
             elif utility == 'mean_var':
                 utility_fn = mean_variance_utility
-            elif utility == 'entropic':
+            elif utility == 'mean_std':
+                utility_fn = mean_std_utility
+            elif utility == 'msd':
+                utility_fn = mean_semideviation_utility
+            elif utility == 'entropic' or utility == 'exponential':
                 utility_fn = entropic_utility
             elif utility == 'cvar':
                 utility_fn = cvar_utility
             else:
                 raise RDDLNotImplementedError(
                     f'Utility function <{utility}> is not supported: '
-                    'must be one of ["mean", "mean_var", "entropic", "cvar"].')
+                    'must be one of ["mean", "mean_var", "mean_std", "mean_sd", '
+                    '"entropic", "exponential", "cvar"].')
         else:
             utility_fn = utility
         self.utility = utility_fn
@@ -2460,7 +2465,19 @@ def entropic_utility(returns: jnp.ndarray, beta: float) -> float:
 @jax.jit
 def mean_variance_utility(returns: jnp.ndarray, beta: float) -> float:
     return jnp.mean(returns) - 0.5 * beta * jnp.var(returns)
-    
+
+
+@jax.jit
+def mean_std_utility(returns: jnp.ndarray, beta: float) -> float:
+    return jnp.mean(returns) - 0.5 * beta * jnp.std(returns)
+
+
+@jax.jit
+def mean_semideviation_utility(returns: jnp.ndarray, beta: float) -> float:
+    mu = jnp.mean(returns)
+    msd = jnp.sqrt(jnp.mean(jnp.minimum(0.0, returns - mu) ** 2))
+    return mu - 0.5 * beta * msd
+
 
 @jax.jit
 def cvar_utility(returns: jnp.ndarray, alpha: float) -> float:
