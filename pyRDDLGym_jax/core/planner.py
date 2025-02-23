@@ -1590,7 +1590,7 @@ class JaxBackpropPlanner:
                 utility_fn = mean_variance_utility
             elif utility == 'mean_std':
                 utility_fn = mean_std_utility
-            elif utility == 'msd':
+            elif utility == 'mean_sd':
                 utility_fn = mean_semideviation_utility
             elif utility == 'entropic' or utility == 'exponential':
                 utility_fn = entropic_utility
