@@ -1464,6 +1464,71 @@ class GaussianPGPE(PGPE):
 
 
 # ***********************************************************************
+# ALL VERSIONS OF RISK FUNCTIONS
+# 
+# Based on the original paper "A Distributional Framework for Risk-Sensitive 
+# End-to-End Planning in Continuous MDPs" by Patton et al., AAAI 2022.
+#
+# Original risk functions:
+# - entropic utility
+# - mean-variance
+# - mean-semideviation
+# - conditional value at risk with straight-through gradient trick
+#
+# ***********************************************************************
+
+
+@jax.jit
+def entropic_utility(returns: jnp.ndarray, beta: float) -> float:
+    return (-1.0 / beta) * jax.scipy.special.logsumexp(
+        -beta * returns, b=1.0 / returns.size)
+
+
+@jax.jit
+def mean_variance_utility(returns: jnp.ndarray, beta: float) -> float:
+    return jnp.mean(returns) - 0.5 * beta * jnp.var(returns)
+
+
+@jax.jit
+def mean_deviation_utility(returns: jnp.ndarray, beta: float) -> float:
+    return jnp.mean(returns) - 0.5 * beta * jnp.std(returns)
+
+
+@jax.jit
+def mean_semideviation_utility(returns: jnp.ndarray, beta: float) -> float:
+    mu = jnp.mean(returns)
+    msd = jnp.sqrt(jnp.mean(jnp.minimum(0.0, returns - mu) ** 2))
+    return mu - 0.5 * beta * msd
+
+
+@jax.jit
+def mean_semivariance_utility(returns: jnp.ndarray, beta: float) -> float:
+    mu = jnp.mean(returns)
+    msv = jnp.mean(jnp.minimum(0.0, returns - mu) ** 2)
+    return mu - 0.5 * beta * msv
+
+
+@jax.jit
+def cvar_utility(returns: jnp.ndarray, alpha: float) -> float:
+    var = jnp.percentile(returns, q=100 * alpha)
+    mask = returns <= var
+    weights = mask / jnp.maximum(1, jnp.sum(mask))
+    return jnp.sum(returns * weights)
+
+
+UTILITY_LOOKUP = {
+    'mean': jnp.mean,
+    'mean_var': mean_variance_utility,
+    'mean_std': mean_deviation_utility,
+    'mean_semivar': mean_semivariance_utility,
+    'mean_semidev': mean_semideviation_utility,
+    'entropic': entropic_utility,
+    'exponential': entropic_utility,
+    'cvar': cvar_utility
+}
+
+
+# ***********************************************************************
 # ALL VERSIONS OF JAX PLANNER
 # 
 # - simple gradient descent based planner
@@ -1525,8 +1590,7 @@ class JaxBackpropPlanner:
         reward as a form of normalization
         :param utility: how to aggregate return observations to compute utility
         of a policy or plan; must be either a function mapping jax array to a 
-        scalar, or a a string identifying the utility function by name 
-        ("mean", "mean_var", "entropic", or "cvar" are currently supported)
+        scalar, or a a string identifying the utility function by name
         :param utility_kwargs: additional keyword arguments to pass hyper-
         parameters to the utility function call
         :param cpfs_without_grad: which CPFs do not have gradients (use straight
@@ -1584,23 +1648,11 @@ class JaxBackpropPlanner:
         # set utility
         if isinstance(utility, str):
             utility = utility.lower()
-            if utility == 'mean':
-                utility_fn = jnp.mean
-            elif utility == 'mean_var':
-                utility_fn = mean_variance_utility
-            elif utility == 'mean_std':
-                utility_fn = mean_std_utility
-            elif utility == 'mean_sd':
-                utility_fn = mean_semideviation_utility
-            elif utility == 'entropic' or utility == 'exponential':
-                utility_fn = entropic_utility
-            elif utility == 'cvar':
-                utility_fn = cvar_utility
-            else:
+            utility_fn = UTILITY_LOOKUP.get(utility, None)
+            if utility_fn is None:
                 raise RDDLNotImplementedError(
-                    f'Utility function <{utility}> is not supported: '
-                    'must be one of ["mean", "mean_var", "mean_std", "mean_sd", '
-                    '"entropic", "exponential", "cvar"].')
+                    f'Utility <{utility}> is not supported, '
+                    f'must be one of {list(UTILITY_LOOKUP.keys())}.')
         else:
             utility_fn = utility
         self.utility = utility_fn
@@ -2440,52 +2492,7 @@ r"""
         actions = self.test_policy(key, params, policy_hyperparams, step, subs)
         actions = jax.tree_map(np.asarray, actions)
         return actions      
-    
-
-# ***********************************************************************
-# ALL VERSIONS OF RISK FUNCTIONS
-# 
-# Based on the original paper "A Distributional Framework for Risk-Sensitive 
-# End-to-End Planning in Continuous MDPs" by Patton et al., AAAI 2022.
-#
-# Original risk functions:
-# - entropic utility
-# - mean-variance approximation
-# - conditional value at risk with straight-through gradient trick
-#
-# ***********************************************************************
-
-
-@jax.jit
-def entropic_utility(returns: jnp.ndarray, beta: float) -> float:
-    return (-1.0 / beta) * jax.scipy.special.logsumexp(
-        -beta * returns, b=1.0 / returns.size)
-
-
-@jax.jit
-def mean_variance_utility(returns: jnp.ndarray, beta: float) -> float:
-    return jnp.mean(returns) - 0.5 * beta * jnp.var(returns)
-
-
-@jax.jit
-def mean_std_utility(returns: jnp.ndarray, beta: float) -> float:
-    return jnp.mean(returns) - 0.5 * beta * jnp.std(returns)
-
-
-@jax.jit
-def mean_semideviation_utility(returns: jnp.ndarray, beta: float) -> float:
-    mu = jnp.mean(returns)
-    msd = jnp.sqrt(jnp.mean(jnp.minimum(0.0, returns - mu) ** 2))
-    return mu - 0.5 * beta * msd
-
-
-@jax.jit
-def cvar_utility(returns: jnp.ndarray, alpha: float) -> float:
-    var = jnp.percentile(returns, q=100 * alpha)
-    mask = returns <= var
-    weights = mask / jnp.maximum(1, jnp.sum(mask))
-    return jnp.sum(returns * weights)
-   
+       
 
 # ***********************************************************************
 # ALL VERSIONS OF CONTROLLERS
