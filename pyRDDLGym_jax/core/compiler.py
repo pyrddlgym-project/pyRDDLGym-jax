@@ -43,8 +43,7 @@ try:
     from tensorflow_probability.substrates import jax as tfp
 except Exception:
     raise_warning('Failed to import tensorflow-probability: '
-                  'compilation of some complex distributions '
-                  '(Binomial, Negative-Binomial, Multinomial) will fail.', 'red')
+                  'compilation of some probability distributions will fail.', 'red')
     traceback.print_exc()
     tfp = None
 
@@ -53,8 +52,6 @@ class JaxRDDLCompiler:
     '''Compiles a RDDL AST representation into an equivalent JAX representation.
     All operations are identical to their numpy equivalents.
     '''
-    
-    MODEL_PARAM_TAG_SEPARATOR = '___'
     
     # ===========================================================================
     # EXACT RDDL TO JAX COMPILATION RULES BY DEFAULT
@@ -127,10 +124,6 @@ class JaxRDDLCompiler:
         'gamma': wrap_logic.__func__(ExactLogic.exact_unary_function(scipy.special.gamma))
     }              
     
-    @staticmethod
-    def _jax_wrapped_calc_log_exact(x, y, params):
-        return jnp.log(x) / jnp.log(y), params
-    
     EXACT_RDDL_TO_JAX_BINARY = {
         'div': wrap_logic.__func__(ExactLogic.exact_binary_function(jnp.floor_divide)),
         'mod': wrap_logic.__func__(ExactLogic.exact_binary_function(jnp.mod)),
@@ -138,18 +131,22 @@ class JaxRDDLCompiler:
         'min': wrap_logic.__func__(ExactLogic.exact_binary_function(jnp.minimum)),
         'max': wrap_logic.__func__(ExactLogic.exact_binary_function(jnp.maximum)),
         'pow': wrap_logic.__func__(ExactLogic.exact_binary_function(jnp.power)),
-        'log': wrap_logic.__func__(_jax_wrapped_calc_log_exact.__func__),
+        'log': wrap_logic.__func__(ExactLogic.exact_binary_log),
         'hypot': wrap_logic.__func__(ExactLogic.exact_binary_function(jnp.hypot)),
     }
-    
-    EXACT_RDDL_TO_JAX_IF = wrap_logic.__func__(ExactLogic.exact_if_then_else)
-    EXACT_RDDL_TO_JAX_SWITCH = wrap_logic.__func__(ExactLogic.exact_switch)
-    
-    EXACT_RDDL_TO_JAX_BERNOULLI = wrap_logic.__func__(ExactLogic.exact_bernoulli)
-    EXACT_RDDL_TO_JAX_DISCRETE = wrap_logic.__func__(ExactLogic.exact_discrete)
-    EXACT_RDDL_TO_JAX_POISSON = wrap_logic.__func__(ExactLogic.exact_poisson)
-    EXACT_RDDL_TO_JAX_GEOMETRIC = wrap_logic.__func__(ExactLogic.exact_geometric)
 
+    EXACT_RDDL_TO_JAX_CONTROL = {
+        'if': wrap_logic.__func__(ExactLogic.exact_if_then_else),
+        'switch': wrap_logic.__func__(ExactLogic.exact_switch)
+    }
+
+    EXACT_RDDL_TO_JAX_SAMPLING = {
+        'Bernoulli': wrap_logic.__func__(ExactLogic.exact_bernoulli),
+        'Discrete': wrap_logic.__func__(ExactLogic.exact_discrete),
+        'Poisson': wrap_logic.__func__(ExactLogic.exact_poisson),
+        'Geometric': wrap_logic.__func__(ExactLogic.exact_geometric)
+    }
+    
     def __init__(self, rddl: RDDLLiftedModel,
                  allow_synchronous_state: bool=True,
                  logger: Optional[Logger]=None,
@@ -217,12 +214,8 @@ class JaxRDDLCompiler:
         self.AGGREGATION_BOOL = {'forall', 'exists'}
         self.KNOWN_UNARY = JaxRDDLCompiler.EXACT_RDDL_TO_JAX_UNARY.copy()
         self.KNOWN_BINARY = JaxRDDLCompiler.EXACT_RDDL_TO_JAX_BINARY.copy()
-        self.IF_HELPER = JaxRDDLCompiler.EXACT_RDDL_TO_JAX_IF
-        self.SWITCH_HELPER = JaxRDDLCompiler.EXACT_RDDL_TO_JAX_SWITCH
-        self.BERNOULLI_HELPER = JaxRDDLCompiler.EXACT_RDDL_TO_JAX_BERNOULLI
-        self.DISCRETE_HELPER = JaxRDDLCompiler.EXACT_RDDL_TO_JAX_DISCRETE
-        self.POISSON_HELPER = JaxRDDLCompiler.EXACT_RDDL_TO_JAX_POISSON
-        self.GEOMETRIC_HELPER = JaxRDDLCompiler.EXACT_RDDL_TO_JAX_GEOMETRIC
+        self.CONTROL_OPS = JaxRDDLCompiler.EXACT_RDDL_TO_JAX_CONTROL.copy()
+        self.SAMPLING_OPS = JaxRDDLCompiler.EXACT_RDDL_TO_JAX_SAMPLING.copy()
     
     # ===========================================================================
     # main compilation subroutines
@@ -1041,9 +1034,9 @@ class JaxRDDLCompiler:
         
         # if predicate is non-fluent, always use the exact operation
         if self.compile_non_fluent_exact and not self.traced.cached_is_fluent(pred):
-            if_op = JaxRDDLCompiler.EXACT_RDDL_TO_JAX_IF
+            if_op = JaxRDDLCompiler.EXACT_RDDL_TO_JAX_CONTROL['if']
         else:
-            if_op = self.IF_HELPER
+            if_op = self.CONTROL_OPS['if']
         jax_op = if_op(expr.id, init_params)
         
         # recursively compile arguments   
@@ -1069,9 +1062,9 @@ class JaxRDDLCompiler:
         # if predicate is non-fluent, always use the exact operation
         # case conditions are currently only literals so they are non-fluent
         if self.compile_non_fluent_exact and not self.traced.cached_is_fluent(pred):
-            switch_op = JaxRDDLCompiler.EXACT_RDDL_TO_JAX_SWITCH
+            switch_op = JaxRDDLCompiler.EXACT_RDDL_TO_JAX_CONTROL['switch']
         else:
-            switch_op = self.SWITCH_HELPER
+            switch_op = self.CONTROL_OPS['switch']
         jax_op = switch_op(expr.id, init_params)
         
         # recursively compile predicate
@@ -1113,6 +1106,7 @@ class JaxRDDLCompiler:
     # Bernoulli: complete (subclass uses Gumbel-softmax)
     # Normal: complete
     # Exponential: complete
+    # Geometric: complete
     # Weibull: complete
     # Pareto: complete
     # Gumbel: complete
@@ -1125,14 +1119,16 @@ class JaxRDDLCompiler:
     # Discrete(p): complete (subclass uses Gumbel-softmax)
     # UnnormDiscrete(p): complete (subclass uses Gumbel-softmax)
     
+    # distributions which seem to support backpropagation (need more testing):
+    # Beta
+    # Student
+    # Gamma
+    # ChiSquare   
+
     # distributions with incomplete reparameterization support (TODO):
-    # Binomial: (use truncation and Gumbel-softmax)
-    # NegativeBinomial: (no reparameterization)
-    # Poisson: (use truncation and Gumbel-softmax)
-    # Gamma, ChiSquare: (no shape reparameterization)
-    # Beta: (no reparameterization)
-    # Geometric: (implement safe floor)
-    # Student: (no reparameterization)
+    # Binomial
+    # NegativeBinomial
+    # Poisson
     
     def _jax_random(self, expr, init_params):
         _, name = expr.etype
@@ -1303,9 +1299,9 @@ class JaxRDDLCompiler:
         
         # if probability is non-fluent, always use the exact operation
         if self.compile_non_fluent_exact and not self.traced.cached_is_fluent(arg_prob):
-            bern_op = JaxRDDLCompiler.EXACT_RDDL_TO_JAX_BERNOULLI
+            bern_op = JaxRDDLCompiler.EXACT_RDDL_TO_JAX_SAMPLING['Bernoulli']
         else:
-            bern_op = self.BERNOULLI_HELPER
+            bern_op = self.SAMPLING_OPS['Bernoulli']
         jax_op = bern_op(expr.id, init_params)
         
         # recursively compile arguments
@@ -1328,9 +1324,9 @@ class JaxRDDLCompiler:
         
         # if rate is non-fluent, always use the exact operation
         if self.compile_non_fluent_exact and not self.traced.cached_is_fluent(arg_rate):
-            poisson_op = JaxRDDLCompiler.EXACT_RDDL_TO_JAX_POISSON
+            poisson_op = JaxRDDLCompiler.EXACT_RDDL_TO_JAX_SAMPLING['Poisson']
         else:
-            poisson_op = self.POISSON_HELPER
+            poisson_op = self.SAMPLING_OPS['Poisson']
         jax_op = poisson_op(expr.id, init_params)
         
         # recursively compile arguments
@@ -1446,9 +1442,9 @@ class JaxRDDLCompiler:
         
         # if prob is non-fluent, always use the exact operation
         if self.compile_non_fluent_exact and not self.traced.cached_is_fluent(arg_prob):
-            geom_op = JaxRDDLCompiler.EXACT_RDDL_TO_JAX_GEOMETRIC
+            geom_op = JaxRDDLCompiler.EXACT_RDDL_TO_JAX_SAMPLING['Geometric']
         else:
-            geom_op = self.GEOMETRIC_HELPER
+            geom_op = self.SAMPLING_OPS['Geometric']
         jax_op = geom_op(expr.id, init_params)
         
         # recursively compile arguments        
@@ -1646,9 +1642,9 @@ class JaxRDDLCompiler:
         has_fluent_arg = any(self.traced.cached_is_fluent(arg) 
                              for arg in ordered_args)
         if self.compile_non_fluent_exact and not has_fluent_arg:
-            discrete_op = JaxRDDLCompiler.EXACT_RDDL_TO_JAX_DISCRETE
+            discrete_op = JaxRDDLCompiler.EXACT_RDDL_TO_JAX_SAMPLING['Discrete']
         else:
-            discrete_op = self.DISCRETE_HELPER
+            discrete_op = self.SAMPLING_OPS['Discrete']
         jax_op = discrete_op(expr.id, init_params)
         
         # compile probability expressions
@@ -1687,9 +1683,9 @@ class JaxRDDLCompiler:
         
         # if probabilities are non-fluent, then always sample exact
         if self.compile_non_fluent_exact and not self.traced.cached_is_fluent(arg):
-            discrete_op = JaxRDDLCompiler.EXACT_RDDL_TO_JAX_DISCRETE
+            discrete_op = JaxRDDLCompiler.EXACT_RDDL_TO_JAX_SAMPLING['Discrete']
         else:
-            discrete_op = self.DISCRETE_HELPER
+            discrete_op = self.SAMPLING_OPS['Discrete']
         jax_op = discrete_op(expr.id, init_params)
         
         # compile probability function

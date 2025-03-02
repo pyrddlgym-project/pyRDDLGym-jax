@@ -321,12 +321,16 @@ class JaxRDDLCompilerWithGrad(JaxRDDLCompiler):
         self.KNOWN_BINARY['div'] = logic.div
         self.KNOWN_BINARY['mod'] = logic.mod
         self.KNOWN_BINARY['fmod'] = logic.mod
-        self.IF_HELPER = logic.control_if
-        self.SWITCH_HELPER = logic.control_switch
-        self.BERNOULLI_HELPER = logic.bernoulli
-        self.DISCRETE_HELPER = logic.discrete
-        self.POISSON_HELPER = logic.poisson
-        self.GEOMETRIC_HELPER = logic.geometric
+        self.CONTROL_OPS = {
+            'if': logic.control_if,
+            'switch': logic.control_switch
+        }
+        self.SAMPLING_OPS = {
+            'Bernoulli': logic.bernoulli,
+            'Discrete': logic.discrete,
+            'Poisson': logic.poisson,
+            'Geometric': logic.geometric
+        }
         
     def _jax_stop_grad(self, jax_expr):        
         def _jax_wrapped_stop_grad(x, params, key):
