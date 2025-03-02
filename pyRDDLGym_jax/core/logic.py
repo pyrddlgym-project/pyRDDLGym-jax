@@ -668,6 +668,10 @@ class ExactLogic(Logic):
     # special functions
     # ===========================================================================
      
+    @staticmethod
+    def exact_binary_log(x, y, params):
+        return jnp.log(x) / jnp.log(y), params
+    
     def sgn(self, id, init_params):
         return self.exact_unary_function(jnp.sign)
     
