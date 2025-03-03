@@ -20,7 +20,6 @@ from typing import Any, Callable, Dict, List, Optional
 import jax
 import jax.numpy as jnp
 import jax.random as random
-import jax.scipy as scipy 
 
 from pyRDDLGym.core.compiler.initializer import RDDLValueInitializer
 from pyRDDLGym.core.compiler.levels import RDDLLevelAnalysis
@@ -52,100 +51,6 @@ class JaxRDDLCompiler:
     '''Compiles a RDDL AST representation into an equivalent JAX representation.
     All operations are identical to their numpy equivalents.
     '''
-    
-    # ===========================================================================
-    # EXACT RDDL TO JAX COMPILATION RULES BY DEFAULT
-    # ===========================================================================
-    
-    @staticmethod
-    def wrap_logic(func):
-        def exact_func(id, init_params):
-            return func
-        return exact_func
-        
-    EXACT_RDDL_TO_JAX_NEGATIVE = wrap_logic.__func__(ExactLogic.exact_unary_function(jnp.negative))
-    EXACT_RDDL_TO_JAX_ARITHMETIC = {
-        '+': wrap_logic.__func__(ExactLogic.exact_binary_function(jnp.add)),
-        '-': wrap_logic.__func__(ExactLogic.exact_binary_function(jnp.subtract)),
-        '*': wrap_logic.__func__(ExactLogic.exact_binary_function(jnp.multiply)),
-        '/': wrap_logic.__func__(ExactLogic.exact_binary_function(jnp.divide))
-    }            
-    
-    EXACT_RDDL_TO_JAX_RELATIONAL = {
-        '>=': wrap_logic.__func__(ExactLogic.exact_binary_function(jnp.greater_equal)),
-        '<=': wrap_logic.__func__(ExactLogic.exact_binary_function(jnp.less_equal)),
-        '<': wrap_logic.__func__(ExactLogic.exact_binary_function(jnp.less)),
-        '>': wrap_logic.__func__(ExactLogic.exact_binary_function(jnp.greater)),
-        '==': wrap_logic.__func__(ExactLogic.exact_binary_function(jnp.equal)),
-        '~=': wrap_logic.__func__(ExactLogic.exact_binary_function(jnp.not_equal))
-    }        
-    
-    EXACT_RDDL_TO_JAX_LOGICAL_NOT = wrap_logic.__func__(ExactLogic.exact_unary_function(jnp.logical_not))
-    EXACT_RDDL_TO_JAX_LOGICAL = {
-        '^': wrap_logic.__func__(ExactLogic.exact_binary_function(jnp.logical_and)),
-        '&': wrap_logic.__func__(ExactLogic.exact_binary_function(jnp.logical_and)),
-        '|': wrap_logic.__func__(ExactLogic.exact_binary_function(jnp.logical_or)),
-        '~': wrap_logic.__func__(ExactLogic.exact_binary_function(jnp.logical_xor)),
-        '=>': wrap_logic.__func__(ExactLogic.exact_binary_implies),
-        '<=>': wrap_logic.__func__(ExactLogic.exact_binary_function(jnp.equal))
-    }    
-    
-    EXACT_RDDL_TO_JAX_AGGREGATION = {
-        'sum': wrap_logic.__func__(ExactLogic.exact_aggregation(jnp.sum)),
-        'avg': wrap_logic.__func__(ExactLogic.exact_aggregation(jnp.mean)),
-        'prod': wrap_logic.__func__(ExactLogic.exact_aggregation(jnp.prod)),
-        'minimum': wrap_logic.__func__(ExactLogic.exact_aggregation(jnp.min)),
-        'maximum': wrap_logic.__func__(ExactLogic.exact_aggregation(jnp.max)),
-        'forall': wrap_logic.__func__(ExactLogic.exact_aggregation(jnp.all)),
-        'exists': wrap_logic.__func__(ExactLogic.exact_aggregation(jnp.any)),
-        'argmin': wrap_logic.__func__(ExactLogic.exact_aggregation(jnp.argmin)),
-        'argmax': wrap_logic.__func__(ExactLogic.exact_aggregation(jnp.argmax))
-    }
-    
-    EXACT_RDDL_TO_JAX_UNARY = {        
-        'abs': wrap_logic.__func__(ExactLogic.exact_unary_function(jnp.abs)),
-        'sgn': wrap_logic.__func__(ExactLogic.exact_unary_function(jnp.sign)),
-        'round': wrap_logic.__func__(ExactLogic.exact_unary_function(jnp.round)),
-        'floor': wrap_logic.__func__(ExactLogic.exact_unary_function(jnp.floor)),
-        'ceil': wrap_logic.__func__(ExactLogic.exact_unary_function(jnp.ceil)),
-        'cos': wrap_logic.__func__(ExactLogic.exact_unary_function(jnp.cos)),
-        'sin': wrap_logic.__func__(ExactLogic.exact_unary_function(jnp.sin)),
-        'tan': wrap_logic.__func__(ExactLogic.exact_unary_function(jnp.tan)),
-        'acos': wrap_logic.__func__(ExactLogic.exact_unary_function(jnp.arccos)),
-        'asin': wrap_logic.__func__(ExactLogic.exact_unary_function(jnp.arcsin)),
-        'atan': wrap_logic.__func__(ExactLogic.exact_unary_function(jnp.arctan)),
-        'cosh': wrap_logic.__func__(ExactLogic.exact_unary_function(jnp.cosh)),
-        'sinh': wrap_logic.__func__(ExactLogic.exact_unary_function(jnp.sinh)),
-        'tanh': wrap_logic.__func__(ExactLogic.exact_unary_function(jnp.tanh)),
-        'exp': wrap_logic.__func__(ExactLogic.exact_unary_function(jnp.exp)),
-        'ln': wrap_logic.__func__(ExactLogic.exact_unary_function(jnp.log)),
-        'sqrt': wrap_logic.__func__(ExactLogic.exact_unary_function(jnp.sqrt)),
-        'lngamma': wrap_logic.__func__(ExactLogic.exact_unary_function(scipy.special.gammaln)),
-        'gamma': wrap_logic.__func__(ExactLogic.exact_unary_function(scipy.special.gamma))
-    }              
-    
-    EXACT_RDDL_TO_JAX_BINARY = {
-        'div': wrap_logic.__func__(ExactLogic.exact_binary_function(jnp.floor_divide)),
-        'mod': wrap_logic.__func__(ExactLogic.exact_binary_function(jnp.mod)),
-        'fmod': wrap_logic.__func__(ExactLogic.exact_binary_function(jnp.mod)),
-        'min': wrap_logic.__func__(ExactLogic.exact_binary_function(jnp.minimum)),
-        'max': wrap_logic.__func__(ExactLogic.exact_binary_function(jnp.maximum)),
-        'pow': wrap_logic.__func__(ExactLogic.exact_binary_function(jnp.power)),
-        'log': wrap_logic.__func__(ExactLogic.exact_binary_log),
-        'hypot': wrap_logic.__func__(ExactLogic.exact_binary_function(jnp.hypot)),
-    }
-
-    EXACT_RDDL_TO_JAX_CONTROL = {
-        'if': wrap_logic.__func__(ExactLogic.exact_if_then_else),
-        'switch': wrap_logic.__func__(ExactLogic.exact_switch)
-    }
-
-    EXACT_RDDL_TO_JAX_SAMPLING = {
-        'Bernoulli': wrap_logic.__func__(ExactLogic.exact_bernoulli),
-        'Discrete': wrap_logic.__func__(ExactLogic.exact_discrete),
-        'Poisson': wrap_logic.__func__(ExactLogic.exact_poisson),
-        'Geometric': wrap_logic.__func__(ExactLogic.exact_geometric)
-    }
     
     def __init__(self, rddl: RDDLLiftedModel,
                  allow_synchronous_state: bool=True,
@@ -205,18 +110,10 @@ class JaxRDDLCompiler:
         
         # basic operations - these can be override in subclasses
         self.compile_non_fluent_exact = compile_non_fluent_exact
-        self.NEGATIVE = JaxRDDLCompiler.EXACT_RDDL_TO_JAX_NEGATIVE
-        self.ARITHMETIC_OPS = JaxRDDLCompiler.EXACT_RDDL_TO_JAX_ARITHMETIC.copy()
-        self.RELATIONAL_OPS = JaxRDDLCompiler.EXACT_RDDL_TO_JAX_RELATIONAL.copy()
-        self.LOGICAL_NOT = JaxRDDLCompiler.EXACT_RDDL_TO_JAX_LOGICAL_NOT
-        self.LOGICAL_OPS = JaxRDDLCompiler.EXACT_RDDL_TO_JAX_LOGICAL.copy()
-        self.AGGREGATION_OPS = JaxRDDLCompiler.EXACT_RDDL_TO_JAX_AGGREGATION.copy()
         self.AGGREGATION_BOOL = {'forall', 'exists'}
-        self.KNOWN_UNARY = JaxRDDLCompiler.EXACT_RDDL_TO_JAX_UNARY.copy()
-        self.KNOWN_BINARY = JaxRDDLCompiler.EXACT_RDDL_TO_JAX_BINARY.copy()
-        self.CONTROL_OPS = JaxRDDLCompiler.EXACT_RDDL_TO_JAX_CONTROL.copy()
-        self.SAMPLING_OPS = JaxRDDLCompiler.EXACT_RDDL_TO_JAX_SAMPLING.copy()
-    
+        self.EXACT_OPS = ExactLogic(use64bit=self.use64bit).get_operator_dicts()
+        self.OPS = self.EXACT_OPS.copy()
+        
     # ===========================================================================
     # main compilation subroutines
     # ===========================================================================
@@ -878,11 +775,11 @@ class JaxRDDLCompiler:
         
         # if expression is non-fluent, always use the exact operation
         if self.compile_non_fluent_exact and not self.traced.cached_is_fluent(expr):
-            valid_ops = JaxRDDLCompiler.EXACT_RDDL_TO_JAX_ARITHMETIC
-            negative_op = JaxRDDLCompiler.EXACT_RDDL_TO_JAX_NEGATIVE
+            valid_ops = self.EXACT_OPS['arithmetic']
+            negative_op = self.EXACT_OPS['negative']
         else:
-            valid_ops = self.ARITHMETIC_OPS
-            negative_op = self.NEGATIVE            
+            valid_ops = self.OPS['arithmetic']
+            negative_op = self.OPS['negative']            
         JaxRDDLCompiler._check_valid_op(expr, valid_ops)
         
         # recursively compile arguments
@@ -909,9 +806,9 @@ class JaxRDDLCompiler:
         
         # if expression is non-fluent, always use the exact operation
         if self.compile_non_fluent_exact and not self.traced.cached_is_fluent(expr):
-            valid_ops = JaxRDDLCompiler.EXACT_RDDL_TO_JAX_RELATIONAL
+            valid_ops = self.EXACT_OPS['relational']
         else:
-            valid_ops = self.RELATIONAL_OPS
+            valid_ops = self.OPS['relational']
         JaxRDDLCompiler._check_valid_op(expr, valid_ops)
         
         # recursively compile arguments
@@ -927,11 +824,11 @@ class JaxRDDLCompiler:
         
         # if expression is non-fluent, always use the exact operation
         if self.compile_non_fluent_exact and not self.traced.cached_is_fluent(expr):
-            valid_ops = JaxRDDLCompiler.EXACT_RDDL_TO_JAX_LOGICAL  
-            logical_not_op = JaxRDDLCompiler.EXACT_RDDL_TO_JAX_LOGICAL_NOT
+            valid_ops = self.EXACT_OPS['logical']  
+            logical_not_op = self.EXACT_OPS['logical_not']
         else:
-            valid_ops = self.LOGICAL_OPS 
-            logical_not_op = self.LOGICAL_NOT 
+            valid_ops = self.OPS['logical']
+            logical_not_op = self.OPS['logical_not'] 
         JaxRDDLCompiler._check_valid_op(expr, valid_ops)
                 
         # recursively compile arguments
@@ -959,9 +856,9 @@ class JaxRDDLCompiler:
         
         # if expression is non-fluent, always use the exact operation
         if self.compile_non_fluent_exact and not self.traced.cached_is_fluent(expr):
-            valid_ops = JaxRDDLCompiler.EXACT_RDDL_TO_JAX_AGGREGATION   
+            valid_ops = self.EXACT_OPS['aggregation']   
         else:
-            valid_ops = self.AGGREGATION_OPS   
+            valid_ops = self.OPS['aggregation']   
         JaxRDDLCompiler._check_valid_op(expr, valid_ops) 
         is_floating = op not in self.AGGREGATION_BOOL
         
@@ -988,11 +885,11 @@ class JaxRDDLCompiler:
         
         # if expression is non-fluent, always use the exact operation
         if self.compile_non_fluent_exact and not self.traced.cached_is_fluent(expr):            
-            unary_ops = JaxRDDLCompiler.EXACT_RDDL_TO_JAX_UNARY
-            binary_ops = JaxRDDLCompiler.EXACT_RDDL_TO_JAX_BINARY
+            unary_ops = self.EXACT_OPS['unary']
+            binary_ops = self.EXACT_OPS['binary']
         else:
-            unary_ops = self.KNOWN_UNARY
-            binary_ops = self.KNOWN_BINARY
+            unary_ops = self.OPS['unary']
+            binary_ops = self.OPS['binary']
         
         # recursively compile arguments
         if op in unary_ops:
@@ -1034,9 +931,9 @@ class JaxRDDLCompiler:
         
         # if predicate is non-fluent, always use the exact operation
         if self.compile_non_fluent_exact and not self.traced.cached_is_fluent(pred):
-            if_op = JaxRDDLCompiler.EXACT_RDDL_TO_JAX_CONTROL['if']
+            if_op = self.EXACT_OPS['control']['if']
         else:
-            if_op = self.CONTROL_OPS['if']
+            if_op = self.OPS['control']['if']
         jax_op = if_op(expr.id, init_params)
         
         # recursively compile arguments   
@@ -1062,9 +959,9 @@ class JaxRDDLCompiler:
         # if predicate is non-fluent, always use the exact operation
         # case conditions are currently only literals so they are non-fluent
         if self.compile_non_fluent_exact and not self.traced.cached_is_fluent(pred):
-            switch_op = JaxRDDLCompiler.EXACT_RDDL_TO_JAX_CONTROL['switch']
+            switch_op = self.EXACT_OPS['control']['switch']
         else:
-            switch_op = self.CONTROL_OPS['switch']
+            switch_op = self.OPS['control']['switch']
         jax_op = switch_op(expr.id, init_params)
         
         # recursively compile predicate
@@ -1299,9 +1196,9 @@ class JaxRDDLCompiler:
         
         # if probability is non-fluent, always use the exact operation
         if self.compile_non_fluent_exact and not self.traced.cached_is_fluent(arg_prob):
-            bern_op = JaxRDDLCompiler.EXACT_RDDL_TO_JAX_SAMPLING['Bernoulli']
+            bern_op = self.EXACT_OPS['sampling']['Bernoulli']
         else:
-            bern_op = self.SAMPLING_OPS['Bernoulli']
+            bern_op = self.OPS['sampling']['Bernoulli']
         jax_op = bern_op(expr.id, init_params)
         
         # recursively compile arguments
@@ -1324,9 +1221,9 @@ class JaxRDDLCompiler:
         
         # if rate is non-fluent, always use the exact operation
         if self.compile_non_fluent_exact and not self.traced.cached_is_fluent(arg_rate):
-            poisson_op = JaxRDDLCompiler.EXACT_RDDL_TO_JAX_SAMPLING['Poisson']
+            poisson_op = self.EXACT_OPS['sampling']['Poisson']
         else:
-            poisson_op = self.SAMPLING_OPS['Poisson']
+            poisson_op = self.OPS['sampling']['Poisson']
         jax_op = poisson_op(expr.id, init_params)
         
         # recursively compile arguments
@@ -1442,9 +1339,9 @@ class JaxRDDLCompiler:
         
         # if prob is non-fluent, always use the exact operation
         if self.compile_non_fluent_exact and not self.traced.cached_is_fluent(arg_prob):
-            geom_op = JaxRDDLCompiler.EXACT_RDDL_TO_JAX_SAMPLING['Geometric']
+            geom_op = self.EXACT_OPS['sampling']['Geometric']
         else:
-            geom_op = self.SAMPLING_OPS['Geometric']
+            geom_op = self.OPS['sampling']['Geometric']
         jax_op = geom_op(expr.id, init_params)
         
         # recursively compile arguments        
@@ -1642,9 +1539,9 @@ class JaxRDDLCompiler:
         has_fluent_arg = any(self.traced.cached_is_fluent(arg) 
                              for arg in ordered_args)
         if self.compile_non_fluent_exact and not has_fluent_arg:
-            discrete_op = JaxRDDLCompiler.EXACT_RDDL_TO_JAX_SAMPLING['Discrete']
+            discrete_op = self.EXACT_OPS['sampling']['Discrete']
         else:
-            discrete_op = self.SAMPLING_OPS['Discrete']
+            discrete_op = self.OPS['sampling']['Discrete']
         jax_op = discrete_op(expr.id, init_params)
         
         # compile probability expressions
@@ -1683,9 +1580,9 @@ class JaxRDDLCompiler:
         
         # if probabilities are non-fluent, then always sample exact
         if self.compile_non_fluent_exact and not self.traced.cached_is_fluent(arg):
-            discrete_op = JaxRDDLCompiler.EXACT_RDDL_TO_JAX_SAMPLING['Discrete']
+            discrete_op = self.EXACT_OPS['sampling']['Discrete']
         else:
-            discrete_op = self.SAMPLING_OPS['Discrete']
+            discrete_op = self.OPS['sampling']['Discrete']
         jax_op = discrete_op(expr.id, init_params)
         
         # compile probability function
