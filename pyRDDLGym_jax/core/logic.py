@@ -26,10 +26,12 @@
 #
 # ***********************************************************************
 
+from typing import Callable, Dict, Union
 
 import jax
 import jax.numpy as jnp
 import jax.random as random
+import jax.scipy as scipy 
 
 
 def enumerate_literals(shape, axis, dtype=jnp.int32):
@@ -336,13 +338,11 @@ class RandomSampling:
             return discrete_approx(key, prob, params)        
         return _jax_wrapped_calc_bernoulli_approx
     
-    @staticmethod
-    def _jax_wrapped_calc_poisson_exact(key, rate, params):
-        sample = random.poisson(key=key, lam=rate, dtype=logic.INT)
-        return sample, params
-        
     def poisson(self, id, init_params, logic):
-        return self._jax_wrapped_calc_poisson_exact
+        def _jax_wrapped_calc_poisson_exact(key, rate, params):
+            sample = random.poisson(key=key, lam=rate, dtype=logic.INT)
+            return sample, params
+        return _jax_wrapped_calc_poisson_exact
     
     def geometric(self, id, init_params, logic):
         approx_floor = logic.floor(id, init_params)
@@ -373,14 +373,12 @@ class GumbelSoftmax(RandomSampling):
 class Determinization(RandomSampling):
     '''Random sampling of variables using their deterministic mean estimate.'''
     
-    @staticmethod
-    def _jax_wrapped_calc_discrete_determinized(key, prob, params):
-        literals = enumerate_literals(prob.shape, axis=-1)
-        sample = jnp.sum(literals * prob, axis=-1)
-        return sample, params
-        
     def discrete(self, id, init_params, logic):
-        return self._jax_wrapped_calc_discrete_determinized
+        def _jax_wrapped_calc_discrete_determinized(key, prob, params):
+            literals = enumerate_literals(prob.shape, axis=-1, dtype=logic.INT)
+            sample = jnp.sum(literals * prob, axis=-1)
+            return sample, params
+        return _jax_wrapped_calc_discrete_determinized
     
     @staticmethod
     def _jax_wrapped_calc_poisson_determinized(key, rate, params):
@@ -477,6 +475,93 @@ class Logic:
             self.INT = jnp.int32
             jax.config.update('jax_enable_x64', False)
     
+    @staticmethod
+    def wrap_logic(func):
+        def exact_func(id, init_params):
+            return func
+        return exact_func
+        
+    def get_operator_dicts(self) -> Dict[str, Union[Callable, Dict[str, Callable]]]:
+        '''Returns a dictionary of all operators in the current logic.'''
+        return {
+            'negative': self.wrap_logic(ExactLogic.exact_unary_function(jnp.negative)),
+            'arithmetic': {
+                '+': self.wrap_logic(ExactLogic.exact_binary_function(jnp.add)),
+                '-': self.wrap_logic(ExactLogic.exact_binary_function(jnp.subtract)),
+                '*': self.wrap_logic(ExactLogic.exact_binary_function(jnp.multiply)),
+                '/': self.wrap_logic(ExactLogic.exact_binary_function(jnp.divide))
+            },
+            'relational': {
+                '>=': self.greater_equal,
+                '<=': self.less_equal,
+                '<': self.less,
+                '>': self.greater,
+                '==': self.equal,
+                '~=': self.not_equal
+            },
+            'logical_not': self.logical_not,
+            'logical': {
+                '^': self.logical_and,
+                '&': self.logical_and,
+                '|': self.logical_or,
+                '~': self.xor,
+                '=>': self.implies,
+                '<=>': self.equiv
+            },
+            'aggregation': {
+                'sum': self.wrap_logic(ExactLogic.exact_aggregation(jnp.sum)),
+                'avg': self.wrap_logic(ExactLogic.exact_aggregation(jnp.mean)),
+                'prod': self.wrap_logic(ExactLogic.exact_aggregation(jnp.prod)),
+                'minimum': self.wrap_logic(ExactLogic.exact_aggregation(jnp.min)),
+                'maximum': self.wrap_logic(ExactLogic.exact_aggregation(jnp.max)),
+                'forall': self.forall,
+                'exists': self.exists,
+                'argmin': self.argmin,
+                'argmax': self.argmax
+            },
+            'unary': {
+                'abs': self.wrap_logic(ExactLogic.exact_unary_function(jnp.abs)),
+                'sgn': self.sgn,
+                'round': self.round,
+                'floor': self.floor,
+                'ceil': self.ceil,
+                'cos': self.wrap_logic(ExactLogic.exact_unary_function(jnp.cos)),
+                'sin': self.wrap_logic(ExactLogic.exact_unary_function(jnp.sin)),
+                'tan': self.wrap_logic(ExactLogic.exact_unary_function(jnp.tan)),
+                'acos': self.wrap_logic(ExactLogic.exact_unary_function(jnp.arccos)),
+                'asin': self.wrap_logic(ExactLogic.exact_unary_function(jnp.arcsin)),
+                'atan': self.wrap_logic(ExactLogic.exact_unary_function(jnp.arctan)),
+                'cosh': self.wrap_logic(ExactLogic.exact_unary_function(jnp.cosh)),
+                'sinh': self.wrap_logic(ExactLogic.exact_unary_function(jnp.sinh)),
+                'tanh': self.wrap_logic(ExactLogic.exact_unary_function(jnp.tanh)),
+                'exp': self.wrap_logic(ExactLogic.exact_unary_function(jnp.exp)),
+                'ln': self.wrap_logic(ExactLogic.exact_unary_function(jnp.log)),
+                'sqrt': self.sqrt,
+                'lngamma': self.wrap_logic(ExactLogic.exact_unary_function(scipy.special.gammaln)),
+                'gamma': self.wrap_logic(ExactLogic.exact_unary_function(scipy.special.gamma))
+            },
+            'binary': {
+                'div': self.div,
+                'mod': self.mod,
+                'fmod': self.mod,
+                'min': self.wrap_logic(ExactLogic.exact_binary_function(jnp.minimum)),
+                'max': self.wrap_logic(ExactLogic.exact_binary_function(jnp.maximum)),
+                'pow': self.wrap_logic(ExactLogic.exact_binary_function(jnp.power)),
+                'log': self.wrap_logic(ExactLogic.exact_binary_log),
+                'hypot': self.wrap_logic(ExactLogic.exact_binary_function(jnp.hypot)),
+            },
+            'control': {
+                'if': self.control_if,
+                'switch': self.control_switch
+            },
+            'sampling': {
+                'Bernoulli': self.bernoulli,
+                'Discrete': self.discrete,
+                'Poisson': self.poisson,
+                'Geometric': self.geometric
+            }
+        }
+
     # ===========================================================================
     # logical operators
     # ===========================================================================
@@ -627,11 +712,11 @@ class ExactLogic(Logic):
         return self.exact_binary_function(jnp.logical_xor)
     
     @staticmethod
-    def exact_binary_implies(x, y, params):
+    def _jax_wrapped_calc_implies_exact(x, y, params):
         return jnp.logical_or(jnp.logical_not(x), y), params     
     
     def implies(self, id, init_params):
-        return self.exact_binary_implies
+        return self._jax_wrapped_calc_implies_exact
     
     def equiv(self, id, init_params):
         return self.exact_binary_function(jnp.equal)
@@ -708,53 +793,52 @@ class ExactLogic(Logic):
     # ===========================================================================
     
     @staticmethod
-    def exact_if_then_else(c, a, b, params):
+    def _jax_wrapped_calc_if_then_else_exact(c, a, b, params):
         return jnp.where(c > 0.5, a, b), params
          
     def control_if(self, id, init_params):
-        return self.exact_if_then_else
+        return self._jax_wrapped_calc_if_then_else_exact
     
     @staticmethod
-    def exact_switch(pred, cases, params):
+    def _jax_wrapped_calc_switch_exact(pred, cases, params):
         pred = pred[jnp.newaxis, ...]
         sample = jnp.take_along_axis(cases, pred, axis=0)
         assert sample.shape[0] == 1
         return sample[0, ...], params
     
     def control_switch(self, id, init_params):
-        return self.exact_switch
+        return self._jax_wrapped_calc_switch_exact
     
     # ===========================================================================
     # random variables
     # ===========================================================================
     
     @staticmethod
-    def exact_discrete(key, prob, params):
-        return random.categorical(key=key, logits=jnp.log(prob), axis=-1), params  
+    def _jax_wrapped_calc_discrete_exact(key, prob, params):
+        sample = random.categorical(key=key, logits=jnp.log(prob), axis=-1)
+        return sample, params  
     
     def discrete(self, id, init_params):
-        return self.exact_discrete
+        return self._jax_wrapped_calc_discrete_exact
     
     @staticmethod
-    def exact_bernoulli(key, prob, params):
+    def _jax_wrapped_calc_bernoulli_exact(key, prob, params):
         return random.bernoulli(key, prob), params
     
     def bernoulli(self, id, init_params):
-        return self.exact_bernoulli
-    
-    @staticmethod
-    def exact_poisson(key, rate, params):
-        return random.poisson(key=key, lam=rate), params   
+        return self._jax_wrapped_calc_bernoulli_exact
     
     def poisson(self, id, init_params):
-        return self.exact_poisson
-    
-    @staticmethod
-    def exact_geometric(key, prob, params):
-        return random.geometric(key=key, p=prob), params
+        def _jax_wrapped_calc_poisson_exact(key, rate, params):
+            sample = random.poisson(key=key, lam=rate, dtype=self.INT)
+            return sample, params
+        return _jax_wrapped_calc_poisson_exact
     
     def geometric(self, id, init_params):
-        return self.exact_geometric
+        def _jax_wrapped_calc_geometric_exact(key, prob, params):
+            sample = random.geometric(key=key, p=prob, dtype=self.INT)
+            return sample, params
+        return _jax_wrapped_calc_geometric_exact
     
     
 class FuzzyLogic(Logic):

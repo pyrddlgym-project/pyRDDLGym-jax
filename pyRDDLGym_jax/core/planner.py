@@ -292,45 +292,7 @@ class JaxRDDLCompilerWithGrad(JaxRDDLCompiler):
                           f'of p-variables {pvars_cast} be cast to float.')   
         
         # overwrite basic operations with fuzzy ones
-        self.RELATIONAL_OPS = {
-            '>=': logic.greater_equal,
-            '<=': logic.less_equal,
-            '<': logic.less,
-            '>': logic.greater,
-            '==': logic.equal,
-            '~=': logic.not_equal
-        }
-        self.LOGICAL_NOT = logic.logical_not
-        self.LOGICAL_OPS = {
-            '^': logic.logical_and,
-            '&': logic.logical_and,
-            '|': logic.logical_or,
-            '~': logic.xor,
-            '=>': logic.implies,
-            '<=>': logic.equiv
-        }
-        self.AGGREGATION_OPS['forall'] = logic.forall
-        self.AGGREGATION_OPS['exists'] = logic.exists
-        self.AGGREGATION_OPS['argmin'] = logic.argmin
-        self.AGGREGATION_OPS['argmax'] = logic.argmax
-        self.KNOWN_UNARY['sgn'] = logic.sgn
-        self.KNOWN_UNARY['floor'] = logic.floor
-        self.KNOWN_UNARY['ceil'] = logic.ceil
-        self.KNOWN_UNARY['round'] = logic.round
-        self.KNOWN_UNARY['sqrt'] = logic.sqrt
-        self.KNOWN_BINARY['div'] = logic.div
-        self.KNOWN_BINARY['mod'] = logic.mod
-        self.KNOWN_BINARY['fmod'] = logic.mod
-        self.CONTROL_OPS = {
-            'if': logic.control_if,
-            'switch': logic.control_switch
-        }
-        self.SAMPLING_OPS = {
-            'Bernoulli': logic.bernoulli,
-            'Discrete': logic.discrete,
-            'Poisson': logic.poisson,
-            'Geometric': logic.geometric
-        }
+        self.OPS = logic.get_operator_dicts()
         
     def _jax_stop_grad(self, jax_expr):        
         def _jax_wrapped_stop_grad(x, params, key):
