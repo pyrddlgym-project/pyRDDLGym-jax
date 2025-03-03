@@ -91,8 +91,7 @@ class JaxRDDLCompiler:
         self.init_values = initializer.initialize()
         
         # compute dependency graph for CPFs and sort them by evaluation order
-        sorter = RDDLLevelAnalysis(
-            rddl, allow_synchronous_state=allow_synchronous_state)
+        sorter = RDDLLevelAnalysis(rddl, allow_synchronous_state=allow_synchronous_state)
         self.levels = sorter.compute_levels()        
         
         # trace expressions to cache information to be used later
@@ -104,7 +103,8 @@ class JaxRDDLCompiler:
             rddl=self.rddl,
             init_values=self.init_values,
             levels=self.levels,
-            trace_info=self.traced)  
+            trace_info=self.traced
+        )  
         constraints = RDDLConstraints(simulator, vectorized=True)
         self.constraints = constraints
         
@@ -112,7 +112,7 @@ class JaxRDDLCompiler:
         self.compile_non_fluent_exact = compile_non_fluent_exact
         self.AGGREGATION_BOOL = {'forall', 'exists'}
         self.EXACT_OPS = ExactLogic(use64bit=self.use64bit).get_operator_dicts()
-        self.OPS = self.EXACT_OPS.copy()
+        self.OPS = self.EXACT_OPS
         
     # ===========================================================================
     # main compilation subroutines
@@ -282,7 +282,8 @@ class JaxRDDLCompiler:
         
         # compile constraint information
         if constraint_func:
-            inequality_fns, equality_fns = self._jax_nonlinear_constraints(init_params_constr)
+            inequality_fns, equality_fns = self._jax_nonlinear_constraints(
+                init_params_constr)
         else:
             inequality_fns, equality_fns = None, None
         
@@ -476,7 +477,11 @@ class JaxRDDLCompiler:
         for (id, value) in self.model_params.items():
             expr_id = int(str(id).split('_')[0])
             expr = self.traced.lookup(expr_id)
-            result[id] = {'id': expr_id, 'rddl_op': ' '.join(expr.etype), 'init_value': value}
+            result[id] = {
+                'id': expr_id, 
+                'rddl_op': ' '.join(expr.etype), 
+                'init_value': value
+            }
         return result
         
     @staticmethod
@@ -627,7 +632,7 @@ class JaxRDDLCompiler:
         return _jax_wrapped_cast
    
     def _fix_dtype(self, value):
-        dtype = jnp.atleast_1d(value).dtype
+        dtype = jnp.result_type(value)
         if jnp.issubdtype(dtype, jnp.integer):
             return self.INT
         elif jnp.issubdtype(dtype, jnp.floating):
@@ -983,8 +988,7 @@ class JaxRDDLCompiler:
             for (i, jax_case) in enumerate(jax_cases):
                 sample_cases[i], key, err_case, params = jax_case(x, params, key)
                 err |= err_case                
-            sample_cases = jnp.asarray(
-                sample_cases, dtype=self._fix_dtype(sample_cases))
+            sample_cases = jnp.asarray(sample_cases, dtype=self._fix_dtype(sample_cases))
             
             # predicate (enum) is an integer - use it to extract from case array
             sample, params = jax_op(sample_pred, sample_cases, params)
@@ -1081,8 +1085,7 @@ class JaxRDDLCompiler:
             return self._jax_discrete_pvar(expr, init_params, unnorm=True)
         else:
             raise RDDLNotImplementedError(
-                f'Distribution {name} is not supported.\n' + 
-                print_stack_trace(expr))
+                f'Distribution {name} is not supported.\n' + print_stack_trace(expr))
         
     def _jax_kron(self, expr, init_params):
         ERR = JaxRDDLCompiler.ERROR_CODES['INVALID_PARAM_KRON_DELTA']
@@ -1159,8 +1162,7 @@ class JaxRDDLCompiler:
         def _jax_wrapped_distribution_exp(x, params, key):
             scale, key, err, params = jax_scale(x, params, key)
             key, subkey = random.split(key)
-            Exp1 = random.exponential(
-                key=subkey, shape=jnp.shape(scale), dtype=self.REAL)
+            Exp1 = random.exponential(key=subkey, shape=jnp.shape(scale), dtype=self.REAL)
             sample = scale * Exp1
             out_of_bounds = jnp.logical_not(jnp.all(scale > 0))
             err |= (out_of_bounds * ERR)
@@ -1305,8 +1307,7 @@ class JaxRDDLCompiler:
             dist = tfp.distributions.NegativeBinomial(total_count=trials, probs=prob)
             sample = dist.sample(seed=subkey).astype(self.INT)
             out_of_bounds = jnp.logical_not(jnp.all(
-                (prob >= 0) & (prob <= 1) & (trials > 0))
-            )
+                (prob >= 0) & (prob <= 1) & (trials > 0)))
             err = err1 | err2 | (out_of_bounds * ERR)
             return sample, key, err, params
         
@@ -1390,8 +1391,7 @@ class JaxRDDLCompiler:
         def _jax_wrapped_distribution_t(x, params, key):
             df, key, err, params = jax_df(x, params, key)
             key, subkey = random.split(key)
-            sample = random.t(
-                key=subkey, df=df, shape=jnp.shape(df), dtype=self.REAL)
+            sample = random.t(key=subkey, df=df, shape=jnp.shape(df), dtype=self.REAL)
             out_of_bounds = jnp.logical_not(jnp.all(df > 0))
             err |= (out_of_bounds * ERR)
             return sample, key, err, params
@@ -1411,8 +1411,7 @@ class JaxRDDLCompiler:
             mean, key, err1, params = jax_mean(x, params, key)
             scale, key, err2, params = jax_scale(x, params, key)
             key, subkey = random.split(key)
-            Gumbel01 = random.gumbel(
-                key=subkey, shape=jnp.shape(mean), dtype=self.REAL)
+            Gumbel01 = random.gumbel(key=subkey, shape=jnp.shape(mean), dtype=self.REAL)
             sample = mean + scale * Gumbel01
             out_of_bounds = jnp.logical_not(jnp.all(scale > 0))
             err = err1 | err2 | (out_of_bounds * ERR)
@@ -1433,8 +1432,7 @@ class JaxRDDLCompiler:
             mean, key, err1, params = jax_mean(x, params, key)
             scale, key, err2, params = jax_scale(x, params, key)
             key, subkey = random.split(key)
-            Laplace01 = random.laplace(
-                key=subkey, shape=jnp.shape(mean), dtype=self.REAL)
+            Laplace01 = random.laplace(key=subkey, shape=jnp.shape(mean), dtype=self.REAL)
             sample = mean + scale * Laplace01
             out_of_bounds = jnp.logical_not(jnp.all(scale > 0))
             err = err1 | err2 | (out_of_bounds * ERR)
@@ -1455,8 +1453,7 @@ class JaxRDDLCompiler:
             mean, key, err1, params = jax_mean(x, params, key)
             scale, key, err2, params = jax_scale(x, params, key)
             key, subkey = random.split(key)
-            Cauchy01 = random.cauchy(
-                key=subkey, shape=jnp.shape(mean), dtype=self.REAL)
+            Cauchy01 = random.cauchy(key=subkey, shape=jnp.shape(mean), dtype=self.REAL)
             sample = mean + scale * Cauchy01
             out_of_bounds = jnp.logical_not(jnp.all(scale > 0))
             err = err1 | err2 | (out_of_bounds * ERR)
@@ -1624,8 +1621,7 @@ class JaxRDDLCompiler:
             return self._jax_multinomial(expr, init_params)
         else:
             raise RDDLNotImplementedError(
-                f'Distribution {name} is not supported.\n' + 
-                print_stack_trace(expr))
+                f'Distribution {name} is not supported.\n' + print_stack_trace(expr))
     
     def _jax_multivariate_normal(self, expr, init_params): 
         _, args = expr.args
