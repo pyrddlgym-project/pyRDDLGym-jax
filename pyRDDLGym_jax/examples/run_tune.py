@@ -3,7 +3,7 @@ is performed using a batched parallelized Bayesian optimization.
 
 The syntax is:
 
-    python run_tune.py <domain> <instance> <method> [<trials>] [<iters>] [<workers>]
+    python run_tune.py <domain> <instance> <method> [<trials>] [<iters>] [<workers>] [<dashboard>]
     
 where:
     <domain> is the name of a domain located in the /Examples directory
@@ -15,6 +15,7 @@ where:
     (defaults to 20)
     <workers> is the number of parallel workers (i.e. batch size), which must
     not exceed the number of cores available on the machine (defaults to 4)
+    <dashboard> is whether the dashboard is displayed
 '''
 import os
 import sys
@@ -35,7 +36,7 @@ def power_10(x):
     return 10.0 ** x
 
 
-def main(domain, instance, method, trials=5, iters=20, workers=4):
+def main(domain, instance, method, trials=5, iters=20, workers=4, dashboard=False):
     
     # set up the environment   
     env = pyRDDLGym.make(domain, instance, vectorized=True)
@@ -48,9 +49,9 @@ def main(domain, instance, method, trials=5, iters=20, workers=4):
     
     # map parameters in the config that will be tuned
     hyperparams = [
-        Hyperparameter('MODEL_WEIGHT_TUNE', -1., 5., power_10),
+        Hyperparameter('MODEL_WEIGHT_TUNE', -1., 4., power_10),
         Hyperparameter('POLICY_WEIGHT_TUNE', -2., 2., power_10),
-        Hyperparameter('LEARNING_RATE_TUNE', -5., 1., power_10),
+        Hyperparameter('LEARNING_RATE_TUNE', -5., 0., power_10),
         Hyperparameter('LAYER1_TUNE', 1, 8, power_2),
         Hyperparameter('LAYER2_TUNE', 1, 8, power_2),
         Hyperparameter('ROLLOUT_HORIZON_TUNE', 1, min(env.horizon, 100), int)       
@@ -64,7 +65,9 @@ def main(domain, instance, method, trials=5, iters=20, workers=4):
                                 eval_trials=trials,
                                 num_workers=workers,
                                 gp_iters=iters)
-    tuning.tune(key=42, log_file=f'gp_{method}_{domain}_{instance}.csv')
+    tuning.tune(key=42, 
+                log_file=f'gp_{method}_{domain}_{instance}.csv', 
+                show_dashboard=dashboard)
     
     # evaluate the agent on the best parameters
     planner_args, _, train_args = load_config_from_string(tuning.best_config)
@@ -77,7 +80,7 @@ def main(domain, instance, method, trials=5, iters=20, workers=4):
 
 def run_from_args(args):
     if len(args) < 3:
-        print('python run_tune.py <domain> <instance> <method> [<trials>] [<iters>] [<workers>]')
+        print('python run_tune.py <domain> <instance> <method> [<trials>] [<iters>] [<workers>] [<dashboard>]')
         exit(1)
     if args[2] not in ['drp', 'slp', 'replan']:
         print('<method> in [drp, slp, replan]')
@@ -86,6 +89,7 @@ def run_from_args(args):
     if len(args) >= 4: kwargs['trials'] = int(args[3])
     if len(args) >= 5: kwargs['iters'] = int(args[4])
     if len(args) >= 6: kwargs['workers'] = int(args[5])
+    if len(args) >= 7: kwargs['dashboard'] = bool(args[6])
     main(**kwargs) 
 
 

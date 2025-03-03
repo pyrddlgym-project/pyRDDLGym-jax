@@ -20,8 +20,7 @@ import math
 import numpy as np
 import time
 import threading
-from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
-import warnings
+from typing import Any, Dict, Optional, Tuple, TYPE_CHECKING
 import webbrowser
 
 # prevent endless console prints
@@ -32,7 +31,7 @@ log.setLevel(logging.ERROR)
 import dash
 from dash.dcc import Interval, Graph, Store
 from dash.dependencies import Input, Output, State, ALL
-from dash.html import Div, B, H4, P, Img, Hr
+from dash.html import Div, B, H4, P, Hr
 import dash_bootstrap_components as dbc
 
 import plotly.colors as pc 
@@ -53,6 +52,7 @@ REWARD_ERROR_DIST_SUBPLOTS = 20
 MODEL_STATE_ERROR_HEIGHT = 300
 POLICY_STATE_VIZ_MAX_HEIGHT = 800
 GP_POSTERIOR_MAX_HEIGHT = 800
+GP_POSTERIOR_PIXELS = 100
 
 PLOT_AXES_FONT_SIZE = 11
 EXPERIMENT_ENTRY_FONT_SIZE = 14
@@ -1486,8 +1486,8 @@ class JaxPlannerDashboard:
                 if i2 > i1:
                     
                     # Generate a grid for visualization
-                    p1_values = np.linspace(*bounds[param1], 100)
-                    p2_values = np.linspace(*bounds[param2], 100)
+                    p1_values = np.linspace(*bounds[param1], GP_POSTERIOR_PIXELS)
+                    p2_values = np.linspace(*bounds[param2], GP_POSTERIOR_PIXELS)
                     P1, P2 = np.meshgrid(p1_values, p2_values)
                     
                     # Predict the mean and deviation of the surrogate model
@@ -1500,8 +1500,7 @@ class JaxPlannerDashboard:
                     for p1, p2 in zip(np.ravel(P1), np.ravel(P2)):
                         params = {param1: p1, param2: p2}
                         params.update(fixed_params)
-                        param_grid.append(
-                            [params[key] for key in optimizer.space.keys])
+                        param_grid.append([params[key] for key in optimizer.space.keys])
                     param_grid = np.asarray(param_grid)
                     mean, std = optimizer._gp.predict(param_grid, return_std=True)
                     mean = mean.reshape(P1.shape)
