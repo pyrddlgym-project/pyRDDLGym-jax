@@ -69,8 +69,7 @@ try:
     from pyRDDLGym_jax.core.visualization import JaxPlannerDashboard
 except Exception:
     raise_warning('Failed to load the dashboard visualization tool: '
-                  'please make sure you have installed the required packages.', 
-                  'red')
+                  'please make sure you have installed the required packages.', 'red')
     traceback.print_exc()
     JaxPlannerDashboard = None
 
@@ -285,7 +284,7 @@ class JaxRDDLCompilerWithGrad(JaxRDDLCompiler):
         pvars_cast = set()
         for (var, values) in self.init_values.items():
             self.init_values[var] = np.asarray(values, dtype=self.REAL) 
-            if not np.issubdtype(np.atleast_1d(values).dtype, np.floating):
+            if not np.issubdtype(np.result_type(values), np.floating):
                 pvars_cast.add(var)
         if pvars_cast:
             raise_warning(f'JAX gradient compiler requires that initial values '
@@ -541,8 +540,7 @@ class JaxStraightLinePlan(JaxPlan):
         def _jax_non_bool_param_to_action(var, param, hyperparams):
             if wrap_non_bool:
                 lower, upper = bounds_safe[var]
-                mb, ml, mu, mn = [mask.astype(compiled.REAL) 
-                                  for mask in cond_lists[var]]       
+                mb, ml, mu, mn = [mask.astype(compiled.REAL) for mask in cond_lists[var]]       
                 action = (
                     mb * (lower + (upper - lower) * jax.nn.sigmoid(param)) + 
                     ml * (lower + (jax.nn.elu(param) + 1.0)) + 
@@ -927,12 +925,11 @@ class JaxDeepReactivePolicy(JaxPlan):
             non_bool_dims = 0
             for (var, values) in observed_vars.items():
                 if ranges[var] != 'bool':
-                    value_size = np.atleast_1d(values).size
+                    value_size = np.size(values)
                     if normalize_per_layer and value_size == 1:
                         raise_warning(
                             f'Cannot apply layer norm to state-fluent <{var}> '
-                            f'of size 1: setting normalize_per_layer = False.',
-                            'red')
+                            f'of size 1: setting normalize_per_layer = False.', 'red')
                         normalize_per_layer = False
                     non_bool_dims += value_size
             if not normalize_per_layer and non_bool_dims == 1:
@@ -956,9 +953,11 @@ class JaxDeepReactivePolicy(JaxPlan):
                     else:
                         if normalize and normalize_per_layer:
                             normalizer = hk.LayerNorm(
-                                axis=-1, param_axis=-1,
+                                axis=-1, 
+                                param_axis=-1,
                                 name=f'input_norm_{input_names[var]}',
-                                **self._normalizer_kwargs)
+                                **self._normalizer_kwargs
+                            )
                             state = normalizer(state)
                         states_non_bool.append(state)
                         non_bool_dims += state.size
@@ -967,8 +966,11 @@ class JaxDeepReactivePolicy(JaxPlan):
             # optionally perform layer normalization on the non-bool inputs
             if normalize and not normalize_per_layer and non_bool_dims:
                 normalizer = hk.LayerNorm(
-                    axis=-1, param_axis=-1, name='input_norm',
-                    **self._normalizer_kwargs)
+                    axis=-1, 
+                    param_axis=-1, 
+                    name='input_norm',
+                    **self._normalizer_kwargs
+                )
                 normalized = normalizer(state[:non_bool_dims])
                 state = state.at[:non_bool_dims].set(normalized)
             return state
@@ -987,7 +989,8 @@ class JaxDeepReactivePolicy(JaxPlan):
             actions = {}
             for (var, size) in layer_sizes.items():
                 linear = hk.Linear(size, name=layer_names[var], w_init=init)
-                reshape = hk.Reshape(output_shape=shapes[var], preserve_dims=-1,
+                reshape = hk.Reshape(output_shape=shapes[var], 
+                                     preserve_dims=-1,
                                      name=f'reshape_{layer_names[var]}')
                 output = reshape(linear(hidden))
                 if not shapes[var]:
@@ -1014,8 +1017,7 @@ class JaxDeepReactivePolicy(JaxPlan):
             
             # for constraint satisfaction wrap bool actions with softmax
             if use_constraint_satisfaction:
-                linear = hk.Linear(
-                    bool_action_count, name='output_bool', w_init=init)
+                linear = hk.Linear(bool_action_count, name='output_bool', w_init=init)
                 output = jax.nn.softmax(linear(hidden))
                 actions[bool_key] = output
              
@@ -1053,8 +1055,7 @@ class JaxDeepReactivePolicy(JaxPlan):
         
         # test action prediction
         def _jax_wrapped_drp_predict_test(key, params, hyperparams, step, subs):
-            actions = _jax_wrapped_drp_predict_train(
-                key, params, hyperparams, step, subs)
+            actions = _jax_wrapped_drp_predict_train(key, params, hyperparams, step, subs)
             new_actions = {}
             for (var, action) in actions.items():
                 prange = ranges[var]
@@ -2435,8 +2436,7 @@ r"""
         for (var, values) in subs.items():
             
             # must not be grounded
-            if RDDLPlanningModel.FLUENT_SEP in var \
-            or RDDLPlanningModel.OBJECT_SEP in var:
+            if RDDLPlanningModel.FLUENT_SEP in var or RDDLPlanningModel.OBJECT_SEP in var:
                 raise ValueError(f'State dictionary passed to the JAX policy is '
                                  f'grounded, since it contains the key <{var}>, '
                                  f'but a vectorized environment is required: '
@@ -2444,9 +2444,8 @@ r"""
             
             # must be numeric array
             # exception is for POMDPs at 1st epoch when observ-fluents are None
-            dtype = np.atleast_1d(values).dtype
-            if not np.issubdtype(dtype, np.number) \
-            and not np.issubdtype(dtype, np.bool_):
+            dtype = np.result_type(values)
+            if not np.issubdtype(dtype, np.number) and not np.issubdtype(dtype, np.bool_):
                 if step == 0 and var in self.rddl.observ_fluents:
                     subs[var] = self.test_compiled.init_values[var]
                 else:
@@ -2570,8 +2569,7 @@ class JaxOnlineController(BaseAgent):
         self.callback = callback
         params = callback['best_params']
         self.key, subkey = random.split(self.key)
-        actions = planner.get_action(
-            subkey, params, 0, state, self.eval_hyperparams)
+        actions = planner.get_action(subkey, params, 0, state, self.eval_hyperparams)
         if self.warm_start:
             self.guess = planner.plan.guess_next_epoch(params)
         return actions
