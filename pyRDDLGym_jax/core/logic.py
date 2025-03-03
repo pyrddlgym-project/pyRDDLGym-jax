@@ -372,13 +372,15 @@ class GumbelSoftmax(RandomSampling):
 
 class Determinization(RandomSampling):
     '''Random sampling of variables using their deterministic mean estimate.'''
+
+    @staticmethod
+    def _jax_wrapped_calc_discrete_determinized(key, prob, params):
+        literals = enumerate_literals(prob.shape, axis=-1)
+        sample = jnp.sum(literals * prob, axis=-1)
+        return sample, params
     
     def discrete(self, id, init_params, logic):
-        def _jax_wrapped_calc_discrete_determinized(key, prob, params):
-            literals = enumerate_literals(prob.shape, axis=-1, dtype=logic.INT)
-            sample = jnp.sum(literals * prob, axis=-1)
-            return sample, params
-        return _jax_wrapped_calc_discrete_determinized
+        return self._jax_wrapped_calc_discrete_determinized
     
     @staticmethod
     def _jax_wrapped_calc_poisson_determinized(key, rate, params):
