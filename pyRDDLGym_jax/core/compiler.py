@@ -1025,10 +1025,12 @@ class JaxRDDLCompiler:
     # Student
     # Gamma
     # ChiSquare   
+    # Dirichlet
 
     # distributions with incomplete reparameterization support (TODO):
     # Binomial
     # NegativeBinomial
+    # Multinomial
     # Poisson
     
     def _jax_random(self, expr, init_params):
@@ -1236,7 +1238,6 @@ class JaxRDDLCompiler:
             rate, key, err, params = jax_rate(x, params, key)
             key, subkey = random.split(key)
             sample, params = jax_op(subkey, rate, params)
-            sample = sample.astype(self.INT)
             out_of_bounds = jnp.logical_not(jnp.all(rate >= 0))
             err |= (out_of_bounds * ERR)
             return sample, key, err, params
@@ -1268,8 +1269,17 @@ class JaxRDDLCompiler:
     def _jax_binomial(self, expr, init_params):
         ERR = JaxRDDLCompiler.ERROR_CODES['INVALID_PARAM_BINOMIAL']
         JaxRDDLCompiler._check_num_args(expr, 2)
-        
         arg_trials, arg_prob = expr.args
+
+        # if prob is non-fluent, always use the exact operation
+        if self.compile_non_fluent_exact \
+        and not self.traced.cached_is_fluent(arg_trials) \
+        and not self.traced.cached_is_fluent(arg_prob):
+            bin_op = self.EXACT_OPS['sampling']['Binomial']
+        else:
+            bin_op = self.OPS['sampling']['Binomial']
+        jax_op = bin_op(expr.id, init_params)
+
         jax_trials = self._jax(arg_trials, init_params)
         jax_prob = self._jax(arg_prob, init_params)
         
@@ -1280,8 +1290,7 @@ class JaxRDDLCompiler:
             trials = jnp.asarray(trials, dtype=self.REAL)
             prob = jnp.asarray(prob, dtype=self.REAL)
             key, subkey = random.split(key)
-            dist = tfp.distributions.Binomial(total_count=trials, probs=prob)
-            sample = dist.sample(seed=subkey).astype(self.INT)
+            sample, params = jax_op(subkey, trials, prob, params)
             out_of_bounds = jnp.logical_not(jnp.all(
                 (prob >= 0) & (prob <= 1) & (trials >= 0)))
             err = err1 | err2 | (out_of_bounds * ERR)
@@ -1352,7 +1361,6 @@ class JaxRDDLCompiler:
             prob, key, err, params = jax_prob(x, params, key)
             key, subkey = random.split(key)
             sample, params = jax_op(subkey, prob, params)
-            sample = sample.astype(self.INT)
             out_of_bounds = jnp.logical_not(jnp.all((prob >= 0) & (prob <= 1)))
             err |= (out_of_bounds * ERR)
             return sample, key, err, params
