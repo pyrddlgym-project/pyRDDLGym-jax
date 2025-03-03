@@ -353,6 +353,13 @@ class RandomSampling:
             return sample, params
         return _jax_wrapped_calc_geometric_approx
 
+    def binomial(self, id, init_params, logic):
+        def _jax_wrapped_calc_binomial_exact(key, trials, prob, params):
+            sample = random.binomial(key=key, n=trials, p=prob, dtype=logic.REAL)
+            sample = sample.astype(logic.INT)
+            return sample, params
+        return _jax_wrapped_calc_binomial_exact
+
 
 class GumbelSoftmax(RandomSampling):
     '''Random sampling of discrete variables using Gumbel-softmax trick.'''
@@ -396,6 +403,14 @@ class Determinization(RandomSampling):
     
     def geometric(self, id, init_params, logic):
         return self._jax_wrapped_calc_geometric_determinized
+    
+    @staticmethod
+    def _jax_wrapped_calc_binomial_determinized(key, trials, prob, params):
+        sample = trials * prob
+        return sample, params
+    
+    def binomial(self, id, init_params, logic):
+        return self._jax_wrapped_calc_binomial_determinized
     
     def __str__(self) -> str:
         return 'Deterministic'
@@ -560,7 +575,8 @@ class Logic:
                 'Bernoulli': self.bernoulli,
                 'Discrete': self.discrete,
                 'Poisson': self.poisson,
-                'Geometric': self.geometric
+                'Geometric': self.geometric,
+                'Binomial': self.binomial
             }
         }
 
@@ -673,6 +689,9 @@ class Logic:
         raise NotImplementedError
     
     def geometric(self, id, init_params):
+        raise NotImplementedError
+    
+    def binomial(self, id, init_params):
         raise NotImplementedError
 
 
@@ -842,6 +861,13 @@ class ExactLogic(Logic):
             return sample, params
         return _jax_wrapped_calc_geometric_exact
     
+    def binomial(self, id, init_params):
+        def _jax_wrapped_calc_binomial_exact(key, trials, prob, params):
+            sample = random.binomial(key=key, n=trials, p=prob, dtype=self.REAL)
+            sample = sample.astype(self.INT)
+            return sample, params
+        return _jax_wrapped_calc_binomial_exact
+
     
 class FuzzyLogic(Logic):
     '''A class representing fuzzy logic in JAX.'''
@@ -1067,6 +1093,9 @@ class FuzzyLogic(Logic):
     
     def geometric(self, id, init_params):
         return self.sampling.geometric(id, init_params, self)
+    
+    def binomial(self, id, init_params):
+        return self.sampling.binomial(id, init_params, self)
 
 
 # ===========================================================================
