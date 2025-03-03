@@ -24,9 +24,12 @@
 # Gumble-Softmax." In International Conference on Learning Representations (ICLR 2017). 
 # OpenReview. net, 2017.
 #
+# [6] Vafaii, H., Galor, D., & Yates, J. (2025). Poisson Variational Autoencoder. 
+# Advances in Neural Information Processing Systems, 37, 44871-44906.
+#
 # ***********************************************************************
 
-from typing import Callable, Dict, Union
+from typing import Callable, Dict, Optional, Union
 
 import jax
 import jax.numpy as jnp
@@ -328,6 +331,9 @@ class RandomSampling:
     '''An abstract class that describes how discrete and non-reparameterizable 
     random variables are sampled.'''
     
+    def __init__(self, poisson_samples: Optional[int]=100):
+        self.poisson_samples = poisson_samples
+
     def discrete(self, id, init_params, logic):
         raise NotImplementedError
     
@@ -338,11 +344,33 @@ class RandomSampling:
             return discrete_approx(key, prob, params)        
         return _jax_wrapped_calc_bernoulli_approx
     
-    def poisson(self, id, init_params, logic):
+    # https://arxiv.org/abs/2405.14473
+    def _poisson_variational(self, id, init_params, logic):
+        less_approx = logic.less(id, init_params)
+        def _jax_wrapped_calc_poisson_approx(key, rate, params):
+            Exp1 = random.exponential(
+                key=key, 
+                shape=(self.poisson_samples,) + jnp.shape(rate), 
+                dtype=logic.REAL
+            )
+            delta_t = Exp1 / rate[jnp.newaxis, ...]
+            times = jnp.cumsum(delta_t, axis=0)
+            indicator, params = less_approx(times, 1.0, params)
+            sample = jnp.sum(indicator, axis=0)
+            return sample, params
+        return _jax_wrapped_calc_poisson_approx
+
+    def _poisson_exact(self, id, init_params, logic):
         def _jax_wrapped_calc_poisson_exact(key, rate, params):
             sample = random.poisson(key=key, lam=rate, dtype=logic.INT)
             return sample, params
         return _jax_wrapped_calc_poisson_exact
+    
+    def poisson(self, id, init_params, logic):
+        if self.poisson_samples is None:
+            return self._poisson_exact(id, init_params, logic)
+        else:
+            return self._poisson_variational(id, init_params, logic)
     
     def geometric(self, id, init_params, logic):
         approx_floor = logic.floor(id, init_params)
@@ -364,6 +392,10 @@ class RandomSampling:
 class GumbelSoftmax(RandomSampling):
     '''Random sampling of discrete variables using Gumbel-softmax trick.'''
     
+    def __init__(self, *args, poisson_bins: Optional[int]=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.poisson_bins = poisson_bins
+
     # https://arxiv.org/pdf/1611.01144
     def discrete(self, id, init_params, logic):
         argmax_approx = logic.argmax(id, init_params)
@@ -373,8 +405,25 @@ class GumbelSoftmax(RandomSampling):
             return argmax_approx(sample, axis=-1, params=params)
         return _jax_wrapped_calc_discrete_gumbel_softmax
     
+    def poisson(self, id, init_params, logic):
+        if self.poisson_bins is None:
+            return super().poisson(id, init_params, logic)
+        
+        argmax_approx = logic.argmax(id, init_params)
+        def _jax_wrapped_calc_poisson_approx(key, rate, params):
+            ks = jnp.arange(0, self.poisson_bins)
+            ks = ks[(jnp.newaxis,) * len(rate.shape) + (...,)]
+            rate = rate[..., jnp.newaxis]
+            log_prob = ks * jnp.log(rate + logic.eps) - rate - scipy.special.gammaln(ks + 1)
+            Gumbel01 = random.gumbel(key=key, shape=log_prob.shape, dtype=logic.REAL)
+            sample = Gumbel01 + log_prob
+            return argmax_approx(sample, axis=-1, params=params)
+        return _jax_wrapped_calc_poisson_approx
+    
     def __str__(self) -> str:
-        return 'Gumbel-Softmax'
+        return (f'Gumbel-Softmax '
+                f'(poisson_bins={self.poisson_bins}, '
+                f'poisson_samples={self.poisson_samples})')
     
 
 class Determinization(RandomSampling):
