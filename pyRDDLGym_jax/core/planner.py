@@ -132,7 +132,7 @@ def _load_config(config, args):
         comp_kwargs = model_args.get('complement_kwargs', {})
         compare_name = model_args.get('comparison', 'SigmoidComparison')
         compare_kwargs = model_args.get('comparison_kwargs', {})
-        sampling_name = model_args.get('sampling', 'GumbelSoftmax')
+        sampling_name = model_args.get('sampling', 'SoftRandomSampling')
         sampling_kwargs = model_args.get('sampling_kwargs', {})
         rounding_name = model_args.get('rounding', 'SoftRounding')
         rounding_kwargs = model_args.get('rounding_kwargs', {})
