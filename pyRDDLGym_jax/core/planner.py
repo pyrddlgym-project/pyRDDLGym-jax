@@ -540,7 +540,8 @@ class JaxStraightLinePlan(JaxPlan):
         def _jax_non_bool_param_to_action(var, param, hyperparams):
             if wrap_non_bool:
                 lower, upper = bounds_safe[var]
-                mb, ml, mu, mn = [mask.astype(compiled.REAL) for mask in cond_lists[var]]       
+                mb, ml, mu, mn = [jnp.asarray(mask, dtype=compiled.REAL) 
+                                  for mask in cond_lists[var]]       
                 action = (
                     mb * (lower + (upper - lower) * jax.nn.sigmoid(param)) + 
                     ml * (lower + (jax.nn.elu(param) + 1.0)) + 
@@ -624,7 +625,7 @@ class JaxStraightLinePlan(JaxPlan):
                     action = _jax_non_bool_param_to_action(var, action, hyperparams)
                     action = jnp.clip(action, *bounds[var])
                     if ranges[var] == 'int':
-                        action = jnp.round(action).astype(compiled.INT)
+                        action = jnp.asarray(jnp.round(action), dtype=compiled.INT)
                     actions[var] = action
             return actions
         
@@ -1003,7 +1004,7 @@ class JaxDeepReactivePolicy(JaxPlan):
                 else:
                     if wrap_non_bool:
                         lower, upper = bounds_safe[var]
-                        mb, ml, mu, mn = [mask.astype(compiled.REAL) 
+                        mb, ml, mu, mn = [jnp.asarray(mask, dtype=compiled.REAL) 
                                           for mask in cond_lists[var]]       
                         action = (
                             mb * (lower + (upper - lower) * jax.nn.sigmoid(output)) + 
@@ -1063,7 +1064,7 @@ class JaxDeepReactivePolicy(JaxPlan):
                     new_action = action > 0.5
                 elif prange == 'int':
                     action = jnp.clip(action, *bounds[var])
-                    new_action = jnp.round(action).astype(compiled.INT)
+                    new_action = jnp.asarray(jnp.round(action), dtype=compiled.INT)
                 else:
                     new_action = jnp.clip(action, *bounds[var])
                 new_actions[var] = new_action
@@ -1889,7 +1890,7 @@ r"""
                     f'{set(self.test_compiled.init_values.keys())}.')
             value = np.reshape(value, newshape=np.shape(init_value))[np.newaxis, ...]
             train_value = np.repeat(value, repeats=n_train, axis=0)
-            train_value = train_value.astype(self.compiled.REAL)
+            train_value = np.asarray(train_value, dtype=self.compiled.REAL)
             init_train[name] = train_value
             init_test[name] = np.repeat(value, repeats=n_test, axis=0)
         

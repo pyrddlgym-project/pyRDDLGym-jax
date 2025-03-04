@@ -110,7 +110,7 @@ class SigmoidComparison(Comparison):
         id_ = str(id)
         init_params[id_] = self.weight
         def _jax_wrapped_calc_argmax_approx(x, axis, params):
-            literals = enumerate_literals(x.shape, axis=axis)
+            literals = enumerate_literals(jnp.shape(x), axis=axis)
             softmax = jax.nn.softmax(params[id_] * x, axis=axis)
             sample = jnp.sum(literals * softmax, axis=axis)
             return sample, params
@@ -350,9 +350,11 @@ class RandomSampling:
         return _jax_wrapped_calc_poisson_exact
     
     def binomial(self, id, init_params, logic):
-        def _jax_wrapped_calc_binomial_exact(key, trials, prob, params):
+        def _jax_wrapped_calc_binomial_exact(key, trials, prob, params):            
+            trials = jnp.asarray(trials, dtype=logic.REAL)
+            prob = jnp.asarray(prob, dtype=logic.REAL)
             sample = random.binomial(key=key, n=trials, p=prob, dtype=logic.REAL)
-            sample = sample.astype(logic.INT)
+            sample = jnp.asarray(sample, dtype=logic.INT)
             return sample, params
         return _jax_wrapped_calc_binomial_exact
     
@@ -373,15 +375,17 @@ class GumbelSoftmax(RandomSampling):
     '''Random sampling of discrete variables using Gumbel-softmax trick.'''
     
     def __init__(self, poisson_bins: Optional[int]=100, 
-                 poisson_truncate: bool=False) -> None:
+                 poisson_truncate: bool=False,
+                 binomial_bins: Optional[int]=100) -> None:
         self.poisson_bins = poisson_bins
         self.poisson_truncate = poisson_truncate
+        self.binomial_bins = binomial_bins
 
     # https://arxiv.org/pdf/1611.01144
     def discrete(self, id, init_params, logic):
         argmax_approx = logic.argmax(id, init_params)
         def _jax_wrapped_calc_discrete_gumbel_softmax(key, prob, params):
-            Gumbel01 = random.gumbel(key=key, shape=prob.shape, dtype=logic.REAL)
+            Gumbel01 = random.gumbel(key=key, shape=jnp.shape(prob), dtype=logic.REAL)
             sample = Gumbel01 + jnp.log(prob + logic.eps)
             return argmax_approx(sample, axis=-1, params=params)
         return _jax_wrapped_calc_discrete_gumbel_softmax
@@ -390,10 +394,10 @@ class GumbelSoftmax(RandomSampling):
         argmax_approx = logic.argmax(id, init_params)
         def _jax_wrapped_calc_poisson_approx(key, rate, params):
             ks = jnp.arange(0, self.poisson_bins)
-            ks = ks[(jnp.newaxis,) * len(jnp.shape(rate)) + (...,)]
+            ks = ks[(jnp.newaxis,) * jnp.ndim(rate) + (...,)]
             rate = rate[..., jnp.newaxis]
             log_prob = ks * jnp.log(rate + logic.eps) - rate - scipy.special.gammaln(ks + 1)
-            Gumbel01 = random.gumbel(key=key, shape=log_prob.shape, dtype=logic.REAL)
+            Gumbel01 = random.gumbel(key=key, shape=jnp.shape(log_prob), dtype=logic.REAL)
             sample = Gumbel01 + log_prob
             return argmax_approx(sample, axis=-1, params=params)
         return _jax_wrapped_calc_poisson_approx
@@ -422,10 +426,38 @@ class GumbelSoftmax(RandomSampling):
         else:
             return self._poisson_exponential(id, init_params, logic)
     
+    def binomial(self, id, init_params, logic):
+        def _jax_wrapped_calc_binomial_exact(key, trials, prob, params):            
+            trials = jnp.asarray(trials, dtype=logic.REAL)
+            prob = jnp.asarray(prob, dtype=logic.REAL)
+            sample = random.binomial(key=key, n=trials, p=prob, dtype=logic.REAL)
+            return sample, params
+        
+        bernoulli_approx = self.bernoulli(id, init_params, logic)
+        def _jax_wrapped_calc_binomial_sum(key, trials, prob, params):
+            prob_full = jnp.broadcast_to(
+                prob[..., jnp.newaxis], shape=jnp.shape(prob) + (self.binomial_bins,))
+            sample_bern, params = bernoulli_approx(key, prob_full, params)
+            indices = jnp.arange(self.binomial_bins)[
+                (jnp.newaxis,) * jnp.ndim(prob) + (...,)]
+            mask = indices < trials[..., jnp.newaxis]
+            sample = jnp.sum(sample_bern * mask, axis=-1)
+            return sample, params
+        
+        def _jax_wrapped_calc_binomial_approx(key, trials, prob, params):
+            return jax.lax.cond(
+                jnp.logical_and(self.binomial_bins is not None, 
+                                jnp.max(trials) < self.binomial_bins), 
+                _jax_wrapped_calc_binomial_sum, 
+                _jax_wrapped_calc_binomial_exact, 
+                key, trials, prob, params)
+        return _jax_wrapped_calc_binomial_approx
+    
     def __str__(self) -> str:
         return (f'Gumbel-Softmax '
                 f'(poisson_bins={self.poisson_bins}, '
-                f'poisson_truncate={self.poisson_truncate})')
+                f'poisson_truncate={self.poisson_truncate}), '
+                f'binomial_bins={self.binomial_bins})')
     
 
 class Determinization(RandomSampling):
@@ -433,7 +465,7 @@ class Determinization(RandomSampling):
 
     @staticmethod
     def _jax_wrapped_calc_discrete_determinized(key, prob, params):
-        literals = enumerate_literals(prob.shape, axis=-1)
+        literals = enumerate_literals(jnp.shape(prob), axis=-1)
         sample = jnp.sum(literals * prob, axis=-1)
         return sample, params
     
@@ -501,8 +533,8 @@ class SoftControlFlow(ControlFlow):
         id_ = str(id)
         init_params[id_] = self.weight
         def _jax_wrapped_calc_switch_soft(pred, cases, params):
-            literals = enumerate_literals(cases.shape, axis=0)
-            pred = jnp.broadcast_to(pred[jnp.newaxis, ...], shape=cases.shape)
+            literals = enumerate_literals(jnp.shape(cases), axis=0)
+            pred = jnp.broadcast_to(pred[jnp.newaxis, ...], shape=jnp.shape(cases))
             proximity = -jnp.square(pred - literals)
             softcase = jax.nn.softmax(params[id_] * proximity, axis=0)
             sample = jnp.sum(cases * softcase, axis=0)
@@ -914,8 +946,10 @@ class ExactLogic(Logic):
     
     def binomial(self, id, init_params):
         def _jax_wrapped_calc_binomial_exact(key, trials, prob, params):
+            trials = jnp.asarray(trials, dtype=self.REAL)
+            prob = jnp.asarray(prob, dtype=self.REAL)
             sample = random.binomial(key=key, n=trials, p=prob, dtype=self.REAL)
-            sample = sample.astype(self.INT)
+            sample = jnp.asarray(sample, dtype=self.INT)
             return sample, params
         return _jax_wrapped_calc_binomial_exact
 
@@ -1181,8 +1215,8 @@ def _test_logical():
         pred, w = _if(cond, +1, -1, w)
         return pred
     
-    x1 = jnp.asarray([1, 1, -1, -1, 0.1, 15, -0.5]).astype(float)
-    x2 = jnp.asarray([1, -1, 1, -1, 10, -30, 6]).astype(float)
+    x1 = jnp.asarray([1, 1, -1, -1, 0.1, 15, -0.5], dtype=float)
+    x2 = jnp.asarray([1, -1, 1, -1, 10, -30, 6], dtype=float)
     print(test_logic(x1, x2, init_params))    
 
 

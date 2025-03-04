@@ -1026,12 +1026,12 @@ class JaxRDDLCompiler:
     # Gamma
     # ChiSquare   
     # Dirichlet
+    # Poisson (subclass uses Gumbel-softmax or Poisson process trick)
 
     # distributions with incomplete reparameterization support (TODO):
     # Binomial
     # NegativeBinomial
     # Multinomial
-    # Poisson
     
     def _jax_random(self, expr, init_params):
         _, name = expr.etype
@@ -1282,13 +1282,11 @@ class JaxRDDLCompiler:
 
         jax_trials = self._jax(arg_trials, init_params)
         jax_prob = self._jax(arg_prob, init_params)
-        
-        # uses the JAX substrate of tensorflow-probability
+
+        # uses reduction for constant trials
         def _jax_wrapped_distribution_binomial(x, params, key):
             trials, key, err2, params = jax_trials(x, params, key)       
             prob, key, err1, params = jax_prob(x, params, key)
-            trials = jnp.asarray(trials, dtype=self.REAL)
-            prob = jnp.asarray(prob, dtype=self.REAL)
             key, subkey = random.split(key)
             sample, params = jax_op(subkey, trials, prob, params)
             out_of_bounds = jnp.logical_not(jnp.all(
@@ -1314,7 +1312,7 @@ class JaxRDDLCompiler:
             prob = jnp.asarray(prob, dtype=self.REAL)
             key, subkey = random.split(key)
             dist = tfp.distributions.NegativeBinomial(total_count=trials, probs=prob)
-            sample = dist.sample(seed=subkey).astype(self.INT)
+            sample = jnp.asarray(dist.sample(seed=subkey), dtype=self.INT)
             out_of_bounds = jnp.logical_not(jnp.all(
                 (prob >= 0) & (prob <= 1) & (trials > 0)))
             err = err1 | err2 | (out_of_bounds * ERR)
@@ -1683,7 +1681,7 @@ class JaxRDDLCompiler:
             
             # sample StudentT(0, 1, df) -- broadcast df to same shape as cov
             sample_df = sample_df[..., jnp.newaxis, jnp.newaxis]
-            sample_df = jnp.broadcast_to(sample_df, shape=sample_mean.shape + (1,))
+            sample_df = jnp.broadcast_to(sample_df, shape=jnp.shape(sample_mean) + (1,))
             key, subkey = random.split(key)
             Z = random.t(
                 key=subkey, 
@@ -1738,7 +1736,7 @@ class JaxRDDLCompiler:
             prob = jnp.asarray(prob, dtype=self.REAL)
             key, subkey = random.split(key)
             dist = tfp.distributions.Multinomial(total_count=trials, probs=prob)
-            sample = dist.sample(seed=subkey).astype(self.INT)
+            sample = jnp.asarray(dist.sample(seed=subkey), dtype=self.INT)
             sample = jnp.moveaxis(sample, source=-1, destination=index)
             out_of_bounds = jnp.logical_not(jnp.all(
                 (prob >= 0)
