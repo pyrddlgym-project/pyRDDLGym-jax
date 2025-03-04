@@ -29,7 +29,7 @@
 #
 # ***********************************************************************
 
-from typing import Callable, Dict, Optional, Union
+from typing import Callable, Dict, Union
 
 import jax
 import jax.numpy as jnp
@@ -331,10 +331,16 @@ class RandomSampling:
     '''Describes how non-reparameterizable random variables are sampled.'''
     
     def discrete(self, id, init_params, logic):
-        def _jax_wrapped_calc_discrete_exact(key, prob, params):
-            sample = random.categorical(key=key, logits=jnp.log(prob), axis=-1)
-            return sample, params  
-        return _jax_wrapped_calc_discrete_exact
+        raise NotImplementedError
+    
+    def poisson(self, id, init_params, logic):
+        raise NotImplementedError
+    
+    def binomial(self, id, init_params, logic):
+        raise NotImplementedError
+    
+    def geometric(self, id, init_params, logic):
+        raise NotImplementedError
     
     def bernoulli(self, id, init_params, logic):
         discrete_approx = self.discrete(id, init_params, logic)        
@@ -342,30 +348,6 @@ class RandomSampling:
             prob = jnp.stack([1.0 - prob, prob], axis=-1)
             return discrete_approx(key, prob, params)        
         return _jax_wrapped_calc_bernoulli_approx
-    
-    def poisson(self, id, init_params, logic):
-        def _jax_wrapped_calc_poisson_exact(key, rate, params):
-            sample = random.poisson(key=key, lam=rate, dtype=logic.INT)
-            return sample, params
-        return _jax_wrapped_calc_poisson_exact
-    
-    def binomial(self, id, init_params, logic):
-        def _jax_wrapped_calc_binomial_exact(key, trials, prob, params):            
-            trials = jnp.asarray(trials, dtype=logic.REAL)
-            prob = jnp.asarray(prob, dtype=logic.REAL)
-            sample = random.binomial(key=key, n=trials, p=prob, dtype=logic.REAL)
-            sample = jnp.asarray(sample, dtype=logic.INT)
-            return sample, params
-        return _jax_wrapped_calc_binomial_exact
-    
-    def geometric(self, id, init_params, logic):
-        approx_floor = logic.floor(id, init_params)
-        def _jax_wrapped_calc_geometric_approx(key, prob, params):
-            U = random.uniform(key=key, shape=jnp.shape(prob), dtype=logic.REAL)
-            floor, params = approx_floor(jnp.log(U) / jnp.log(1.0 - prob), params)
-            sample = floor + 1
-            return sample, params
-        return _jax_wrapped_calc_geometric_approx
 
     def __str__(self) -> str:
         return 'RandomSampling'
@@ -374,12 +356,14 @@ class RandomSampling:
 class GumbelSoftmax(RandomSampling):
     '''Random sampling of discrete variables using Gumbel-softmax trick.'''
     
-    def __init__(self, poisson_bins: Optional[int]=100, 
-                 poisson_truncate: bool=False,
-                 binomial_bins: Optional[int]=100) -> None:
-        self.poisson_bins = poisson_bins
-        self.poisson_truncate = poisson_truncate
-        self.binomial_bins = binomial_bins
+    def __init__(self, poisson_max_bins: int=100, 
+                 poisson_min_cdf: float=0.999,
+                 poisson_exp_sampling: bool=True,
+                 binomial_max_bins: int=100) -> None:
+        self.poisson_bins = poisson_max_bins
+        self.poisson_min_cdf = poisson_min_cdf
+        self.poisson_exp_method = poisson_exp_sampling
+        self.binomial_bins = binomial_max_bins
 
     # https://arxiv.org/pdf/1611.01144
     def discrete(self, id, init_params, logic):
@@ -392,7 +376,7 @@ class GumbelSoftmax(RandomSampling):
     
     def _poisson_gumbel_softmax(self, id, init_params, logic):        
         argmax_approx = logic.argmax(id, init_params)
-        def _jax_wrapped_calc_poisson_approx(key, rate, params):
+        def _jax_wrapped_calc_poisson_gumbel_softmax(key, rate, params):
             ks = jnp.arange(0, self.poisson_bins)
             ks = ks[(jnp.newaxis,) * jnp.ndim(rate) + (...,)]
             rate = rate[..., jnp.newaxis]
@@ -400,12 +384,12 @@ class GumbelSoftmax(RandomSampling):
             Gumbel01 = random.gumbel(key=key, shape=jnp.shape(log_prob), dtype=logic.REAL)
             sample = Gumbel01 + log_prob
             return argmax_approx(sample, axis=-1, params=params)
-        return _jax_wrapped_calc_poisson_approx
+        return _jax_wrapped_calc_poisson_gumbel_softmax
     
     # https://arxiv.org/abs/2405.14473
     def _poisson_exponential(self, id, init_params, logic):
         less_approx = logic.less(id, init_params)
-        def _jax_wrapped_calc_poisson_approx(key, rate, params):
+        def _jax_wrapped_calc_poisson_exponential(key, rate, params):
             Exp1 = random.exponential(
                 key=key, 
                 shape=(self.poisson_bins,) + jnp.shape(rate), 
@@ -416,23 +400,51 @@ class GumbelSoftmax(RandomSampling):
             indicator, params = less_approx(times, 1.0, params)
             sample = jnp.sum(indicator, axis=0)
             return sample, params
-        return _jax_wrapped_calc_poisson_approx
+        return _jax_wrapped_calc_poisson_exponential
 
     def poisson(self, id, init_params, logic):
-        if self.poisson_bins is None:
-            return super().poisson(id, init_params, logic)
-        elif self.poisson_truncate:
-            return self._poisson_gumbel_softmax(id, init_params, logic)
+        def _jax_wrapped_calc_poisson_exact(key, rate, params):
+            sample = random.poisson(key=key, lam=rate, dtype=logic.INT)
+            sample = jnp.asarray(sample, dtype=logic.REAL)
+            return sample, params      
+              
+        if self.poisson_exp_method:
+            _jax_wrapped_calc_poisson_diff = self._poisson_exponential(
+                id, init_params, logic)
         else:
-            return self._poisson_exponential(id, init_params, logic)
+            _jax_wrapped_calc_poisson_diff = self._poisson_gumbel_softmax(
+                id, init_params, logic)
+        
+        def _jax_wrapped_calc_poisson_approx(key, rate, params):
+            
+            # determine if error of truncation at rate is (approximately) acceptable
+            # https://stats.stackexchange.com/questions/35658/simple-approximation-of-poisson-cumulative-distribution-in-long-tail
+            x = self.poisson_bins
+            if self.poisson_bins > 0:
+                cuml_prob = scipy.stats.norm.cdf(
+                    jnp.sqrt(2 * (x * jnp.log(x / rate) + rate - x)) * jnp.sign(x - rate))
+                approx_cond = jax.lax.stop_gradient(
+                    jnp.min(cuml_prob) > self.poisson_min_cdf)
+            else:
+                approx_cond = False
+            
+            # for acceptable truncation use the approximation, use exact otherwise
+            return jax.lax.cond(
+                approx_cond, 
+                _jax_wrapped_calc_poisson_diff, 
+                _jax_wrapped_calc_poisson_exact, 
+                key, rate, params
+            )
+        return _jax_wrapped_calc_poisson_approx        
     
     def binomial(self, id, init_params, logic):
         def _jax_wrapped_calc_binomial_exact(key, trials, prob, params):            
             trials = jnp.asarray(trials, dtype=logic.REAL)
             prob = jnp.asarray(prob, dtype=logic.REAL)
             sample = random.binomial(key=key, n=trials, p=prob, dtype=logic.REAL)
-            return sample, params
+            return sample, params     
         
+        # Binomial(n, p) = sum_{i = 1 ... n} Bernoulli(p)
         bernoulli_approx = self.bernoulli(id, init_params, logic)
         def _jax_wrapped_calc_binomial_sum(key, trials, prob, params):
             prob_full = jnp.broadcast_to(
@@ -444,20 +456,27 @@ class GumbelSoftmax(RandomSampling):
             sample = jnp.sum(sample_bern * mask, axis=-1)
             return sample, params
         
+        # for trials not too large use the Bernoulli relaxation, use exact otherwise
         def _jax_wrapped_calc_binomial_approx(key, trials, prob, params):
             return jax.lax.cond(
-                jnp.logical_and(self.binomial_bins is not None, 
-                                jnp.max(trials) < self.binomial_bins), 
+                jax.lax.stop_gradient(jnp.max(trials) < self.binomial_bins), 
                 _jax_wrapped_calc_binomial_sum, 
                 _jax_wrapped_calc_binomial_exact, 
-                key, trials, prob, params)
+                key, trials, prob, params
+            )
         return _jax_wrapped_calc_binomial_approx
     
+    def geometric(self, id, init_params, logic):
+        approx_floor = logic.floor(id, init_params)
+        def _jax_wrapped_calc_geometric_approx(key, prob, params):
+            U = random.uniform(key=key, shape=jnp.shape(prob), dtype=logic.REAL)
+            floor, params = approx_floor(jnp.log(U) / jnp.log(1.0 - prob), params)
+            sample = floor + 1
+            return sample, params
+        return _jax_wrapped_calc_geometric_approx
+    
     def __str__(self) -> str:
-        return (f'Gumbel-Softmax '
-                f'(poisson_bins={self.poisson_bins}, '
-                f'poisson_truncate={self.poisson_truncate}), '
-                f'binomial_bins={self.binomial_bins})')
+        return 'Gumbel-Softmax'
     
 
 class Determinization(RandomSampling):
