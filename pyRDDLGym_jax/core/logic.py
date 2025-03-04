@@ -476,7 +476,7 @@ class SoftRandomSampling(RandomSampling):
         approx_floor = logic.floor(id, init_params)
         def _jax_wrapped_calc_geometric_approx(key, prob, params):
             U = random.uniform(key=key, shape=jnp.shape(prob), dtype=logic.REAL)
-            floor, params = approx_floor(jnp.log(U) / jnp.log(1.0 - prob), params)
+            floor, params = approx_floor(jnp.log1p(-U) / jnp.log1p(-prob), params)
             sample = floor + 1
             return sample, params
         return _jax_wrapped_calc_geometric_approx

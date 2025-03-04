@@ -1185,8 +1185,8 @@ class JaxRDDLCompiler:
             shape, key, err1, params = jax_shape(x, params, key)
             scale, key, err2, params = jax_scale(x, params, key)
             key, subkey = random.split(key)
-            U = random.uniform(key=subkey, shape=jnp.shape(scale), dtype=self.REAL)
-            sample = scale * jnp.power(-jnp.log(U), 1.0 / shape)
+            sample = random.weibull_min(
+                key=subkey, scale=scale, concentration=shape, dtype=self.REAL)
             out_of_bounds = jnp.logical_not(jnp.all((shape > 0) & (scale > 0)))
             err = err1 | err2 | (out_of_bounds * ERR)
             return sample, key, err, params
@@ -1481,7 +1481,7 @@ class JaxRDDLCompiler:
             scale, key, err2, params = jax_scale(x, params, key)
             key, subkey = random.split(key)
             U = random.uniform(key=subkey, shape=jnp.shape(scale), dtype=self.REAL)
-            sample = jnp.log(1.0 - jnp.log(U) / shape) / scale
+            sample = jnp.log(1.0 - jnp.log1p(-U) / shape) / scale
             out_of_bounds = jnp.logical_not(jnp.all((shape > 0) & (scale > 0)))
             err = err1 | err2 | (out_of_bounds * ERR)
             return sample, key, err, params
