@@ -417,12 +417,9 @@ class GumbelSoftmax(RandomSampling):
         
         def _jax_wrapped_calc_poisson_approx(key, rate, params):
             
-            # determine if error of truncation at rate is (approximately) acceptable
-            # https://stats.stackexchange.com/questions/35658/simple-approximation-of-poisson-cumulative-distribution-in-long-tail
-            x = self.poisson_bins
+            # determine if error of truncation at rate is acceptable
             if self.poisson_bins > 0:
-                cuml_prob = scipy.stats.norm.cdf(
-                    jnp.sqrt(2 * (x * jnp.log(x / rate) + rate - x)) * jnp.sign(x - rate))
+                cuml_prob = scipy.stats.poisson.cdf(self.poisson_bins, rate)
                 approx_cond = jax.lax.stop_gradient(
                     jnp.min(cuml_prob) > self.poisson_min_cdf)
             else:
