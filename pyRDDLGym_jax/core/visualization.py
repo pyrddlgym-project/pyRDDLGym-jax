@@ -1417,7 +1417,7 @@ class JaxPlannerDashboard:
         self.pgpe_return[experiment_id].append(callback['pgpe_return'])
         
         # data for return distributions
-        progress = callback['progress']
+        progress = int(callback['progress'])
         if progress - self.return_dist_last_progress[experiment_id] \
             >= PROGRESS_FOR_NEXT_RETURN_DIST:
             self.return_dist_ticks[experiment_id].append(iteration)
