@@ -155,8 +155,7 @@ def _load_config(config, args):
         initializer = _getattr_any(
             packages=[initializers, hk.initializers], item=plan_initializer)
         if initializer is None:
-            raise_warning(
-                f'Ignoring invalid initializer <{plan_initializer}>.', 'red')
+            raise_warning(f'Ignoring invalid initializer <{plan_initializer}>.', 'red')
             del plan_kwargs['initializer']
         else:
             init_kwargs = plan_kwargs.pop('initializer_kwargs', {})
@@ -173,8 +172,7 @@ def _load_config(config, args):
         activation = _getattr_any(
             packages=[jax.nn, jax.numpy], item=plan_activation)
         if activation is None:
-            raise_warning(
-                f'Ignoring invalid activation <{plan_activation}>.', 'red')
+            raise_warning(f'Ignoring invalid activation <{plan_activation}>.', 'red')
             del plan_kwargs['activation']
         else:
             plan_kwargs['activation'] = activation
@@ -188,8 +186,7 @@ def _load_config(config, args):
     if planner_optimizer is not None:
         optimizer = _getattr_any(packages=[optax], item=planner_optimizer)
         if optimizer is None:
-            raise_warning(
-                f'Ignoring invalid optimizer <{planner_optimizer}>.', 'red')
+            raise_warning(f'Ignoring invalid optimizer <{planner_optimizer}>.', 'red')
             del planner_args['optimizer']
         else:
             planner_args['optimizer'] = optimizer
@@ -2200,7 +2197,9 @@ r"""
         
         iters = range(epochs)
         if print_progress:
-            iters = tqdm(iters, total=100, position=tqdm_position)
+            iters = tqdm(iters, total=100, 
+                         bar_format='{l_bar}{bar}| {elapsed} {postfix}', 
+                         position=tqdm_position)
         position_str = '' if tqdm_position is None else f'[{tqdm_position}]'
         
         for it in iters:
@@ -2281,7 +2280,8 @@ r"""
                 status = JaxPlannerStatus.ITER_BUDGET_REACHED
             
             # build a callback
-            progress_percent = int(100 * min(1, max(elapsed / train_seconds, it / epochs)))
+            progress_percent = 100 * min(
+                1, max(0, elapsed / train_seconds, it / (epochs - 1)))
             callback = {
                 'status': status,
                 'iteration': it,
@@ -2304,7 +2304,7 @@ r"""
                 'train_log': train_log,
                 **test_log
             }
-            
+
             # stopping condition reached
             if stopping_rule is not None and stopping_rule.monitor(callback):
                 callback['status'] = status = JaxPlannerStatus.STOPPING_RULE_REACHED  
@@ -2315,8 +2315,10 @@ r"""
                 iters.set_description(
                     f'{position_str} {it:6} it / {-train_loss:14.5f} train / '
                     f'{-test_loss_smooth:14.5f} test / {-best_loss:14.5f} best / '
-                    f'{status.value} status / {total_pgpe_it:6} pgpe'
+                    f'{status.value} status / {total_pgpe_it:6} pgpe',
+                    refresh=False
                 )
+                iters.set_postfix_str(f"{(it + 1) / elapsed:.2f}it/s", refresh=True)
             
             # dash-board
             if dashboard is not None:
@@ -2357,7 +2359,7 @@ r"""
                 last_iter_improve, -train_loss, -test_loss_smooth, -best_loss, grad_norm)
             print(f'summary of optimization:\n'
                   f'    status        ={status}\n'
-                  f'    time          ={elapsed:.6f} sec.\n'
+                  f'    time          ={elapsed:.3f} sec.\n'
                   f'    iterations    ={it}\n'
                   f'    best objective={-best_loss:.6f}\n'
                   f'    best grad norm={grad_norm}\n'
@@ -2383,12 +2385,12 @@ r"""
                 return termcolor.colored(
                     '[FAILURE] no progress was made '
                     f'and max grad norm {max_grad_norm:.6f} was zero: '
-                    'the solver was likely stuck in a plateau.', 'red')
+                    'solver likely stuck in a plateau.', 'red')
             else:
                 return termcolor.colored(
                     '[FAILURE] no progress was made '
                     f'but max grad norm {max_grad_norm:.6f} was non-zero: '
-                    'the learning rate or other hyper-parameters were likely suboptimal.', 
+                    'learning rate or other hyper-parameters likely suboptimal.', 
                     'red')
         
         # model is likely poor IF:
@@ -2397,8 +2399,8 @@ r"""
             return termcolor.colored(
                 '[WARNING] progress was made '
                 f'but relative train-test error {validation_error:.6f} was high: '
-                'model relaxation around the solution was poor '
-                'or the batch size was too small.', 'yellow')
+                'poor model relaxation around solution or batch size too small.', 
+                'yellow')
         
         # model likely did not converge IF:
         # 1. the max grad relative to the return is high
@@ -2408,9 +2410,9 @@ r"""
                 return termcolor.colored(
                     '[WARNING] progress was made '
                     f'but max grad norm {max_grad_norm:.6f} was high: '
-                    'the solution was likely locally suboptimal, '
-                    'or the relaxed model was not smooth around the solution, '
-                    'or the batch size was too small.', 'yellow')
+                    'solution locally suboptimal '
+                    'or relaxed model not smooth around solution '
+                    'or batch size too small.', 'yellow')
         
         # likely successful
         return termcolor.colored(

@@ -502,7 +502,7 @@ class SoftRandomSampling(RandomSampling):
             return self._bernoulli_uniform(id, init_params, logic)
 
     def __str__(self) -> str:
-        return 'Gumbel-Softmax'
+        return 'SoftRandomSampling'
     
 
 class Determinization(RandomSampling):
