@@ -343,27 +343,36 @@ class RandomSampling:
         raise NotImplementedError
     
     def bernoulli(self, id, init_params, logic):
-        discrete_approx = self.discrete(id, init_params, logic)        
-        def _jax_wrapped_calc_bernoulli_approx(key, prob, params):
-            prob = jnp.stack([1.0 - prob, prob], axis=-1)
-            return discrete_approx(key, prob, params)        
-        return _jax_wrapped_calc_bernoulli_approx
-
+        raise NotImplementedError
+    
     def __str__(self) -> str:
         return 'RandomSampling'
 
 
-class GumbelSoftmax(RandomSampling):
+class SoftRandomSampling(RandomSampling):
     '''Random sampling of discrete variables using Gumbel-softmax trick.'''
     
     def __init__(self, poisson_max_bins: int=100, 
                  poisson_min_cdf: float=0.999,
                  poisson_exp_sampling: bool=True,
-                 binomial_max_bins: int=100) -> None:
+                 binomial_max_bins: int=100,
+                 bernoulli_gumbel_softmax: bool=False) -> None:
+        '''Creates a new instance of soft random sampling.
+
+        :param poisson_max_bins: maximum bins to use for Poisson distribution relaxation
+        :param poisson_min_cdf: minimum cdf value of Poisson within truncated region
+        in order to use Poisson relaxation
+        :param poisson_exp_sampling: whether to use Poisson process sampling method
+        instead of truncated Gumbel-Softmax
+        :param binomial_max_bins: maximum bins to use for Binomial distribution relaxation
+        :param bernoulli_gumbel_softmax: whether to use Gumbel-Softmax to approximate
+        Bernoulli samples, or the standard uniform reparameterization instead
+        '''
         self.poisson_bins = poisson_max_bins
         self.poisson_min_cdf = poisson_min_cdf
         self.poisson_exp_method = poisson_exp_sampling
         self.binomial_bins = binomial_max_bins
+        self.bernoulli_gumbel_softmax = bernoulli_gumbel_softmax
 
     # https://arxiv.org/pdf/1611.01144
     def discrete(self, id, init_params, logic):
@@ -472,6 +481,26 @@ class GumbelSoftmax(RandomSampling):
             return sample, params
         return _jax_wrapped_calc_geometric_approx
     
+    def _bernoulli_uniform(self, id, init_params, logic):
+        less_approx = logic.less(id, init_params)  
+        def _jax_wrapped_calc_bernoulli_uniform(key, prob, params):
+            U = random.uniform(key=key, shape=jnp.shape(prob), dtype=logic.REAL)
+            return less_approx(U, prob, params)   
+        return _jax_wrapped_calc_bernoulli_uniform
+    
+    def _bernoulli_gumbel_softmax(self, id, init_params, logic):
+        discrete_approx = self.discrete(id, init_params, logic)        
+        def _jax_wrapped_calc_bernoulli_gumbel_softmax(key, prob, params):
+            prob = jnp.stack([1.0 - prob, prob], axis=-1)
+            return discrete_approx(key, prob, params)        
+        return _jax_wrapped_calc_bernoulli_gumbel_softmax
+    
+    def bernoulli(self, id, init_params, logic):
+        if self.bernoulli_gumbel_softmax:
+            return self._bernoulli_gumbel_softmax(id, init_params, logic)
+        else:
+            return self._bernoulli_uniform(id, init_params, logic)
+
     def __str__(self) -> str:
         return 'Gumbel-Softmax'
     
@@ -511,6 +540,14 @@ class Determinization(RandomSampling):
     def geometric(self, id, init_params, logic):
         return self._jax_wrapped_calc_geometric_determinized
     
+    @staticmethod
+    def _jax_wrapped_calc_bernoulli_determinized(key, prob, params):
+        sample = prob
+        return sample, params
+    
+    def bernoulli(self, id, init_params, logic):
+        return self._jax_wrapped_calc_bernoulli_determinized
+
     def __str__(self) -> str:
         return 'Deterministic'
     
@@ -976,7 +1013,7 @@ class FuzzyLogic(Logic):
     def __init__(self, tnorm: TNorm=ProductTNorm(),
                  complement: Complement=StandardComplement(),
                  comparison: Comparison=SigmoidComparison(),
-                 sampling: RandomSampling=GumbelSoftmax(),
+                 sampling: RandomSampling=SoftRandomSampling(),
                  rounding: Rounding=SoftRounding(),
                  control: ControlFlow=SoftControlFlow(),
                  eps: float=1e-15,
