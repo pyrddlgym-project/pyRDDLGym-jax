@@ -250,7 +250,7 @@ tuning.tune(key=42, log_file='path/to/log.csv')
 A basic run script is provided to run the automatic hyper-parameter tuning for the most sensitive parameters of JaxPlan:
 
 ```shell
-jaxplan tune <domain> <instance> <method> <trials> <iters> <workers>
+jaxplan tune <domain> <instance> <method> <trials> <iters> <workers> <dashboard>
 ```
 
 where:
@@ -259,7 +259,8 @@ where:
 - ``method`` is the planning method to use (i.e. drp, slp, replan)
 - ``trials`` is the (optional) number of trials/episodes to average in evaluating each hyper-parameter setting
 - ``iters`` is the (optional) maximum number of iterations/evaluations of Bayesian optimization to perform
-- ``workers`` is the (optional) number of parallel evaluations to be done at each iteration, e.g. the total evaluations = ``iters * workers``.
+- ``workers`` is the (optional) number of parallel evaluations to be done at each iteration, e.g. the total evaluations = ``iters * workers``
+- ``dashboard`` is whether the optimizations are tracked in the dashboard application.
  
 
 ## Simulation
@@ -298,8 +299,15 @@ The [following citation](https://ojs.aaai.org/index.php/ICAPS/article/view/31480
 ```
 
 Some of the implementation details derive from the following literature, which you may wish to also cite in your research papers:
-- [A Distributional Framework for Risk-Sensitive End-to-End Planning in Continuous MDPs](https://ojs.aaai.org/index.php/AAAI/article/view/21226)
+- [A Distributional Framework for Risk-Sensitive End-to-End Planning in Continuous MDPs, AAAI 2022](https://ojs.aaai.org/index.php/AAAI/article/view/21226)
 - [Deep reactive policies for planning in stochastic nonlinear domains, AAAI 2019](https://ojs.aaai.org/index.php/AAAI/article/view/4744)
 - [Scalable planning with tensorflow for hybrid nonlinear domains, NeurIPS 2017](https://proceedings.neurips.cc/paper/2017/file/98b17f068d5d9b7668e19fb8ae470841-Paper.pdf)
 - [Baseline-Free Sampling in Parameter Exploring Policy Gradients: Super Symmetric PGPE](https://link.springer.com/chapter/10.1007/978-3-319-09903-3_13)
 
+The model relaxations in JaxPlan are based on the following works:
+- [Poisson Variational Autoencoder, NeurIPS 2025](https://proceedings.neurips.cc/paper_files/paper/2024/file/4f3cb9576dc99d62b80726690453716f-Paper-Conference.pdf)
+- [Analyzing Differentiable Fuzzy Logic Operators, AI 2022](https://www.sciencedirect.com/science/article/pii/S0004370221001533)
+- [Learning with algorithmic supervision via continuous relaxations, NeurIPS 2021](https://proceedings.neurips.cc/paper_files/paper/2021/file/89ae0fe22c47d374bc9350ef99e01685-Paper.pdf)
+- [Universally quantized neural compression, NeurIPS 2020](https://papers.nips.cc/paper_files/paper/2020/file/92049debbe566ca5782a3045cf300a3c-Paper.pdf)
+- [Generalized Gumbel-Softmax Gradient Estimator for Generic Discrete Random Variables](https://arxiv.org/pdf/2003.01847)
+- [Categorical Reparametrization with Gumbel-Softmax, ICLR 2017](https://openreview.net/pdf?id=rkE3y85ee)
