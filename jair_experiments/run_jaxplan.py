@@ -20,15 +20,19 @@ def main(instance):
     planner = JaxBackpropPlanner(rddl=env.model, **planner_args)
     
     # create the planning algorithm
-    all_returns = []
+    all_returns, all_times = [], []
     for it in range(NUM_TRIALS):
         train_args['key'] = jax.random.PRNGKey(it)
-        returns = []
+        returns, times = [], []
         for callback in planner.optimize_generator(**train_args):
             returns.append(callback['best_return'])
+            times.append(callback['elapsed_time'])
         all_returns.append(returns)
+        all_times.append(times)
     all_returns = np.asarray(all_returns).T
-    np.savetxt(f'jaxplan_instance{instance}.csv', all_returns)
+    all_times = np.asarray(all_times).T
+    np.savetxt(f'jaxplan_instance{instance}_return_slp.csv', all_returns)
+    np.savetxt(f'jaxplan_instance{instance}_time_slp.csv', all_times)
 
     env.close()
         
