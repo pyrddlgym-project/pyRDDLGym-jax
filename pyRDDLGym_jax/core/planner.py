@@ -47,7 +47,9 @@ import jax.random as random
 import numpy as np
 import optax
 import termcolor
-from tqdm import tqdm
+from tqdm import tqdm, TqdmWarning
+import warnings
+warnings.filterwarnings("ignore", category=TqdmWarning)
 
 from pyRDDLGym.core.compiler.model import RDDLPlanningModel, RDDLLiftedModel
 from pyRDDLGym.core.debug.logger import Logger
@@ -2318,7 +2320,8 @@ r"""
                     f'{status.value} status / {total_pgpe_it:6} pgpe',
                     refresh=False
                 )
-                iters.set_postfix_str(f"{(it + 1) / elapsed:.2f}it/s", refresh=True)
+                iters.set_postfix_str(
+                    f"{(it + 1) / (elapsed + 1e-6):.2f}it/s", refresh=True)
             
             # dash-board
             if dashboard is not None:
