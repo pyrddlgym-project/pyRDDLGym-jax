@@ -1214,6 +1214,7 @@ class GaussianPGPE(PGPE):
                  init_sigma: float=1.0,
                  sigma_range: Tuple[float, float]=(1e-5, 1e5),
                  scale_reward: bool=True,
+                 min_reward_scale: float=1e-5,
                  super_symmetric: bool=True,
                  super_symmetric_accurate: bool=True,
                  optimizer: Callable[..., optax.GradientTransformation]=optax.adam,
@@ -1225,6 +1226,7 @@ class GaussianPGPE(PGPE):
         :param init_sigma: initial standard deviation of Gaussian
         :param sigma_range: bounds to constrain standard deviation
         :param scale_reward: whether to apply reward scaling as in the paper
+        :param min_reward_scale: minimum reward scaling to avoid underflow
         :param super_symmetric: whether to use super-symmetric sampling as in the paper
         :param super_symmetric_accurate: whether to use the accurate formula for super-
         symmetric sampling or the simplified but biased formula
@@ -1240,6 +1242,7 @@ class GaussianPGPE(PGPE):
         self.init_sigma = init_sigma
         self.sigma_range = sigma_range
         self.scale_reward = scale_reward
+        self.min_reward_scale = min_reward_scale
         self.super_symmetric = super_symmetric
         self.super_symmetric_accurate = super_symmetric_accurate
         
@@ -1257,21 +1260,21 @@ class GaussianPGPE(PGPE):
     
     def __str__(self) -> str:
         return (f'PGPE hyper-parameters:\n'
-                f'    method         ={self.__class__.__name__}\n'
-                f'    batch_size     ={self.batch_size}\n'
-                f'    init_sigma     ={self.init_sigma}\n'
-                f'    sigma_range    ={self.sigma_range}\n'
-                f'    scale_reward   ={self.scale_reward}\n'
-                f'    super_symmetric={self.super_symmetric}\n'
-                f'        accurate   ={self.super_symmetric_accurate}\n'
-                f'    optimizer      ={self.optimizer_name}\n'
+                f'    method          ={self.__class__.__name__}\n'
+                f'    batch_size      ={self.batch_size}\n'
+                f'    init_sigma      ={self.init_sigma}\n'
+                f'    sigma_range     ={self.sigma_range}\n'
+                f'    scale_reward    ={self.scale_reward}\n'
+                f'    min_reward_scale={self.min_reward_scale}\n'
+                f'    super_symmetric ={self.super_symmetric}\n'
+                f'        accurate    ={self.super_symmetric_accurate}\n'
+                f'    optimizer       ={self.optimizer_name}\n'
                 f'    optimizer_kwargs:\n'
                 f'        mu   ={self.optimizer_kwargs_mu}\n'
                 f'        sigma={self.optimizer_kwargs_sigma}\n'
         )
 
     def compile(self, loss_fn: Callable, projection: Callable, real_dtype: Type) -> None:
-        MIN_NORM = 1e-5
         sigma0 = self.init_sigma
         sigma_range = self.sigma_range
         scale_reward = self.scale_reward
@@ -1341,8 +1344,8 @@ class GaussianPGPE(PGPE):
         def _jax_wrapped_mu_grad(epsilon, epsilon_star, r1, r2, r3, r4, m):
             if super_symmetric:
                 if scale_reward:
-                    scale1 = jnp.maximum(MIN_NORM, m - (r1 + r2) / 2)
-                    scale2 = jnp.maximum(MIN_NORM, m - (r3 + r4) / 2)
+                    scale1 = jnp.maximum(self.min_reward_scale, m - (r1 + r2) / 2)
+                    scale2 = jnp.maximum(self.min_reward_scale, m - (r3 + r4) / 2)
                 else:
                     scale1 = scale2 = 1.0
                 r_mu1 = (r1 - r2) / (2 * scale1)
@@ -1350,7 +1353,7 @@ class GaussianPGPE(PGPE):
                 grad = -(r_mu1 * epsilon + r_mu2 * epsilon_star)
             else:
                 if scale_reward:
-                    scale = jnp.maximum(MIN_NORM, m - (r1 + r2) / 2)
+                    scale = jnp.maximum(self.min_reward_scale, m - (r1 + r2) / 2)
                 else:
                     scale = 1.0
                 r_mu = (r1 - r2) / (2 * scale)
@@ -1363,14 +1366,15 @@ class GaussianPGPE(PGPE):
                 epsilon_tau = mask * epsilon + (1 - mask) * epsilon_star
                 s = epsilon_tau * epsilon_tau / sigma - sigma
                 if scale_reward:
-                    scale = jnp.maximum(MIN_NORM, m - (r1 + r2 + r3 + r4) / 4)
+                    scale = jnp.maximum(
+                        self.min_reward_scale, m - (r1 + r2 + r3 + r4) / 4)
                 else:
                     scale = 1.0
                 r_sigma = ((r1 + r2) - (r3 + r4)) / (4 * scale)
             else:
                 s = epsilon * epsilon / sigma - sigma
                 if scale_reward:
-                    scale = jnp.maximum(MIN_NORM, jnp.abs(m))
+                    scale = jnp.maximum(self.min_reward_scale, jnp.abs(m))
                 else:
                     scale = 1.0
                 r_sigma = (r1 + r2) / (2 * scale)
