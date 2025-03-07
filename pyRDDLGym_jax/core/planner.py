@@ -1322,9 +1322,9 @@ class GaussianPGPE(PGPE):
             return epsilon_star
 
         def _jax_wrapped_sample_params(key, mu, sigma):
-            keys = random.split(key, num=len(jax.tree_util.tree_leaves(mu)))
-            keys_pytree = jax.tree_util.tree_unflatten(
-                treedef=jax.tree_util.tree_structure(mu), leaves=keys)
+            treedef = jax.tree_util.tree_structure(sigma)
+            keys = random.split(key, num=treedef.num_leaves)
+            keys_pytree = jax.tree_util.tree_unflatten(treedef=treedef, leaves=keys)
             epsilon = jax.tree_map(_jax_wrapped_mu_noise, keys_pytree, sigma)
             p1 = jax.tree_map(jnp.add, mu, epsilon)
             p2 = jax.tree_map(jnp.subtract, mu, epsilon)
