@@ -2305,8 +2305,8 @@ r"""
                 key, subkey = random.split(key)
                 pgpe_params, r_max, pgpe_opt_state, pgpe_param, pgpe_converged = \
                     self.pgpe.update(subkey, pgpe_params, r_max, progress_percent, 
-                                     policy_hyperparams, 
-                                     test_subs, model_params, pgpe_opt_state)
+                                     policy_hyperparams, test_subs, model_params_test, 
+                                     pgpe_opt_state)
                 pgpe_loss, _ = self.test_loss(
                     subkey, pgpe_param, policy_hyperparams, test_subs, model_params_test)
                 pgpe_loss_smooth = rolling_pgpe_loss.update(pgpe_loss)
