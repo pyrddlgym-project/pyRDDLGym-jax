@@ -1770,7 +1770,6 @@ r"""
         
         # optimization
         self.update = self._jax_update(train_loss)
-        self.check_zero_grad = self._jax_check_zero_gradients()
 
         # pgpe option
         if self.use_pgpe:
@@ -1833,6 +1832,12 @@ r"""
         projection = self.plan.projection
         use_ls = self.line_search_kwargs is not None
         
+        # check if the gradients are all zeros
+        def _jax_wrapped_zero_gradients(grad):
+            leaves, _ = jax.tree_util.tree_flatten(
+                jax.tree_map(lambda g: jnp.allclose(g, 0), grad))
+            return jnp.all(jnp.asarray(leaves))
+        
         # calculate the plan gradient w.r.t. return loss and update optimizer
         # also perform a projection step to satisfy constraints on actions
         def _jax_wrapped_loss_swapped(policy_params, key, policy_hyperparams,
@@ -1857,23 +1862,12 @@ r"""
             policy_params, converged = projection(policy_params, policy_hyperparams)
             log['grad'] = grad
             log['updates'] = updates
+            zero_grads = _jax_wrapped_zero_gradients(grad)
             return policy_params, converged, opt_state, opt_aux, \
-                loss_val, log, model_params
+                loss_val, log, model_params, zero_grads
         
         return jax.jit(_jax_wrapped_plan_update)
             
-    def _jax_check_zero_gradients(self):
-        
-        def _jax_wrapped_zero_gradient(grad):
-            return jnp.allclose(grad, 0)
-
-        def _jax_wrapped_zero_gradients(grad):
-            leaves, _ = jax.tree_util.tree_flatten(
-                jax.tree_map(_jax_wrapped_zero_gradient, grad))
-            return jnp.all(jnp.asarray(leaves))
-        
-        return jax.jit(_jax_wrapped_zero_gradients)
-
     def _batched_init_subs(self, subs): 
         rddl = self.rddl
         n_train, n_test = self.batch_size_train, self.batch_size_test
@@ -2215,8 +2209,9 @@ r"""
             # update the parameters of the plan
             key, subkey = random.split(key)
             (policy_params, converged, opt_state, opt_aux, train_loss, train_log, 
-             model_params) = self.update(subkey, policy_params, policy_hyperparams,
-                                         train_subs, model_params, opt_state, opt_aux)
+             model_params, zero_grads) = self.update(
+                 subkey, policy_params, policy_hyperparams, train_subs, model_params, 
+                 opt_state, opt_aux)
             test_loss, (test_log, model_params_test) = self.test_loss(
                 subkey, policy_params, policy_hyperparams, test_subs, model_params_test)
             test_loss_smooth = rolling_test_loss.update(test_loss)
@@ -2254,7 +2249,7 @@ r"""
             # ==================================================================
             
             # no progress
-            if (not pgpe_improve) and self.check_zero_grad(train_log['grad']):
+            if (not pgpe_improve) and zero_grads:
                 status = JaxPlannerStatus.NO_PROGRESS
              
             # constraint satisfaction problem
