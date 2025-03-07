@@ -1221,7 +1221,8 @@ class GaussianPGPE(PGPE):
                  optimizer_kwargs_mu: Optional[Kwargs]=None,
                  optimizer_kwargs_sigma: Optional[Kwargs]=None,
                  start_entropy_coeff: float=1e-3,
-                 end_entropy_coeff: float=1e-8) -> None:
+                 end_entropy_coeff: float=1e-8,
+                 max_kl_update: Optional[float]=None) -> None:
         '''Creates a new Gaussian PGPE planner.
         
         :param batch_size: how many policy parameters to sample per optimization step
@@ -1239,6 +1240,7 @@ class GaussianPGPE(PGPE):
         factory for the standard deviation optimizer
         :param start_entropy_coeff: starting entropy regularization coeffient for Gaussian
         :param end_entropy_coeff: ending entropy regularization coeffient for Gaussian
+        :param max_kl_update: bound on kl-divergence between parameter updates
         '''
         super().__init__()
 
@@ -1249,6 +1251,8 @@ class GaussianPGPE(PGPE):
         self.min_reward_scale = min_reward_scale
         self.super_symmetric = super_symmetric
         self.super_symmetric_accurate = super_symmetric_accurate
+
+        # entropy regularization penalty is decayed exponentially between these values
         self.start_entropy_coeff = start_entropy_coeff
         self.end_entropy_coeff = end_entropy_coeff
         
@@ -1260,9 +1264,19 @@ class GaussianPGPE(PGPE):
             optimizer_kwargs_sigma = {'learning_rate': 0.1}
         self.optimizer_kwargs_sigma = optimizer_kwargs_sigma
         self.optimizer_name = optimizer
-        mu_optimizer = optimizer(**optimizer_kwargs_mu)
-        sigma_optimizer = optimizer(**optimizer_kwargs_sigma)
+        try:
+            mu_optimizer = optax.inject_hyperparams(optimizer)(**optimizer_kwargs_mu)
+            sigma_optimizer = optax.inject_hyperparams(optimizer)(**optimizer_kwargs_sigma)
+        except Exception as _:
+            raise_warning(
+                f'Failed to inject hyperparameters into optax optimizer for PGPE, '
+                'rolling back to safer method: please note that kl-divergence '
+                'constraints will be disabled.', 'red')
+            mu_optimizer = optimizer(**optimizer_kwargs_mu)   
+            sigma_optimizer = optimizer(**optimizer_kwargs_sigma) 
+            max_kl_update = None
         self.optimizers = (mu_optimizer, sigma_optimizer)
+        self.max_kl = max_kl_update
     
     def __str__(self) -> str:
         return (f'PGPE hyper-parameters:\n'
@@ -1280,20 +1294,26 @@ class GaussianPGPE(PGPE):
                 f'        sigma={self.optimizer_kwargs_sigma}\n'
                 f'    start_entropy_coeff={self.start_entropy_coeff}\n'
                 f'    end_entropy_coeff  ={self.end_entropy_coeff}\n'
+                f'    max_kl_update      ={self.max_kl}\n'
         )
 
     def compile(self, loss_fn: Callable, projection: Callable, real_dtype: Type) -> None:
         sigma0 = self.init_sigma
         sigma_range = self.sigma_range
         scale_reward = self.scale_reward
+        min_reward_scale = self.min_reward_scale
         super_symmetric = self.super_symmetric
         super_symmetric_accurate = self.super_symmetric_accurate
         batch_size = self.batch_size
         optimizers = (mu_optimizer, sigma_optimizer) = self.optimizers
-        if self.start_entropy_coeff == 0:
+        max_kl = self.max_kl
+        
+        # entropy regularization penalty is decayed exponentially by elapsed budget
+        start_entropy_coeff = self.start_entropy_coeff
+        if start_entropy_coeff == 0:
             entropy_coeff_decay = 0
         else:
-            entropy_coeff_decay = (self.end_entropy_coeff / self.start_entropy_coeff) ** 0.01
+            entropy_coeff_decay = (self.end_entropy_coeff / start_entropy_coeff) ** 0.01
         
         # ***********************************************************************
         # INITIALIZATION OF POLICY
@@ -1357,8 +1377,8 @@ class GaussianPGPE(PGPE):
         def _jax_wrapped_mu_grad(epsilon, epsilon_star, r1, r2, r3, r4, m):
             if super_symmetric:
                 if scale_reward:
-                    scale1 = jnp.maximum(self.min_reward_scale, m - (r1 + r2) / 2)
-                    scale2 = jnp.maximum(self.min_reward_scale, m - (r3 + r4) / 2)
+                    scale1 = jnp.maximum(min_reward_scale, m - (r1 + r2) / 2)
+                    scale2 = jnp.maximum(min_reward_scale, m - (r3 + r4) / 2)
                 else:
                     scale1 = scale2 = 1.0
                 r_mu1 = (r1 - r2) / (2 * scale1)
@@ -1366,7 +1386,7 @@ class GaussianPGPE(PGPE):
                 grad = -(r_mu1 * epsilon + r_mu2 * epsilon_star)
             else:
                 if scale_reward:
-                    scale = jnp.maximum(self.min_reward_scale, m - (r1 + r2) / 2)
+                    scale = jnp.maximum(min_reward_scale, m - (r1 + r2) / 2)
                 else:
                     scale = 1.0
                 r_mu = (r1 - r2) / (2 * scale)
@@ -1379,19 +1399,18 @@ class GaussianPGPE(PGPE):
                 epsilon_tau = mask * epsilon + (1 - mask) * epsilon_star
                 s = jnp.square(epsilon_tau) / sigma - sigma
                 if scale_reward:
-                    scale = jnp.maximum(
-                        self.min_reward_scale, m - (r1 + r2 + r3 + r4) / 4)
+                    scale = jnp.maximum(min_reward_scale, m - (r1 + r2 + r3 + r4) / 4)
                 else:
                     scale = 1.0
                 r_sigma = ((r1 + r2) - (r3 + r4)) / (4 * scale)
             else:
                 s = jnp.square(epsilon) / sigma - sigma
                 if scale_reward:
-                    scale = jnp.maximum(self.min_reward_scale, jnp.abs(m))
+                    scale = jnp.maximum(min_reward_scale, jnp.abs(m))
                 else:
                     scale = 1.0
                 r_sigma = (r1 + r2) / (2 * scale)
-            grad = -(r_sigma * s + ent * 0.5 / sigma)
+            grad = -(r_sigma * s + ent / sigma)
             return grad
             
         def _jax_wrapped_pgpe_grad(key, mu, sigma, r_max, ent,
@@ -1443,21 +1462,48 @@ class GaussianPGPE(PGPE):
         #
         # ***********************************************************************
 
+        def _jax_wrapped_pgpe_kl_term(mu, sigma, old_mu, old_sigma):
+            return 0.5 * jnp.sum(2 * jnp.log(sigma / old_sigma) + 
+                                 jnp.square(old_sigma / sigma) + 
+                                 jnp.square((mu - old_mu) / sigma) - 1)
+        
         def _jax_wrapped_pgpe_update(key, pgpe_params, r_max, progress,
                                      policy_hyperparams, subs, model_params, 
                                      pgpe_opt_state):
+            # regular update
             mu, sigma = pgpe_params
             mu_state, sigma_state = pgpe_opt_state
-            ent = self.start_entropy_coeff * jnp.power(entropy_coeff_decay, progress)
+            ent = start_entropy_coeff * jnp.power(entropy_coeff_decay, progress)
             mu_grad, sigma_grad, new_r_max = _jax_wrapped_pgpe_grad_batched(
                 key, pgpe_params, r_max, ent, policy_hyperparams, subs, model_params)
             mu_updates, new_mu_state = mu_optimizer.update(mu_grad, mu_state, params=mu) 
             sigma_updates, new_sigma_state = sigma_optimizer.update(
                 sigma_grad, sigma_state, params=sigma) 
             new_mu = optax.apply_updates(mu, mu_updates)
-            new_mu, converged = projection(new_mu, policy_hyperparams)
             new_sigma = optax.apply_updates(sigma, sigma_updates)
             new_sigma = jax.tree_map(lambda x: jnp.clip(x, *sigma_range), new_sigma)
+            
+            # respect KL divergence contraint with old parameters
+            if max_kl is not None:
+                old_mu_lr = new_mu_state.hyperparams['learning_rate']
+                old_sigma_lr = new_sigma_state.hyperparams['learning_rate']
+                kl_terms = jax.tree_map(
+                    _jax_wrapped_pgpe_kl_term, new_mu, new_sigma, mu, sigma)
+                total_kl = jax.tree_util.tree_reduce(jnp.add, kl_terms)
+                kl_reduction = jnp.minimum(1.0, jnp.sqrt(max_kl / total_kl))
+                mu_state.hyperparams['learning_rate'] = old_mu_lr * kl_reduction
+                sigma_state.hyperparams['learning_rate'] = old_sigma_lr * kl_reduction
+                mu_updates, new_mu_state = mu_optimizer.update(mu_grad, mu_state, params=mu) 
+                sigma_updates, new_sigma_state = sigma_optimizer.update(
+                    sigma_grad, sigma_state, params=sigma) 
+                new_mu = optax.apply_updates(mu, mu_updates)
+                new_sigma = optax.apply_updates(sigma, sigma_updates)
+                new_sigma = jax.tree_map(lambda x: jnp.clip(x, *sigma_range), new_sigma)
+                new_mu_state.hyperparams['learning_rate'] = old_mu_lr
+                new_sigma_state.hyperparams['learning_rate'] = old_sigma_lr
+
+            # apply projection step and finalize results
+            new_mu, converged = projection(new_mu, policy_hyperparams)
             new_pgpe_params = (new_mu, new_sigma)
             new_pgpe_opt_state = (new_mu_state, new_sigma_state)
             policy_params = new_mu
