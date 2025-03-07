@@ -1219,7 +1219,9 @@ class GaussianPGPE(PGPE):
                  super_symmetric_accurate: bool=True,
                  optimizer: Callable[..., optax.GradientTransformation]=optax.adam,
                  optimizer_kwargs_mu: Optional[Kwargs]=None,
-                 optimizer_kwargs_sigma: Optional[Kwargs]=None) -> None:
+                 optimizer_kwargs_sigma: Optional[Kwargs]=None,
+                 start_entropy_coeff: float=1e-3,
+                 end_entropy_coeff: float=1e-8) -> None:
         '''Creates a new Gaussian PGPE planner.
         
         :param batch_size: how many policy parameters to sample per optimization step
@@ -1235,6 +1237,8 @@ class GaussianPGPE(PGPE):
         factory for the mean optimizer
         :param optimizer_kwargs_sigma: a dictionary of parameters to pass to the SGD
         factory for the standard deviation optimizer
+        :param start_entropy_coeff: starting entropy regularization coeffient for Gaussian
+        :param end_entropy_coeff: ending entropy regularization coeffient for Gaussian
         '''
         super().__init__()
 
@@ -1245,6 +1249,8 @@ class GaussianPGPE(PGPE):
         self.min_reward_scale = min_reward_scale
         self.super_symmetric = super_symmetric
         self.super_symmetric_accurate = super_symmetric_accurate
+        self.start_entropy_coeff = start_entropy_coeff
+        self.end_entropy_coeff = end_entropy_coeff
         
         # set optimizers
         if optimizer_kwargs_mu is None:
@@ -1260,18 +1266,20 @@ class GaussianPGPE(PGPE):
     
     def __str__(self) -> str:
         return (f'PGPE hyper-parameters:\n'
-                f'    method          ={self.__class__.__name__}\n'
-                f'    batch_size      ={self.batch_size}\n'
-                f'    init_sigma      ={self.init_sigma}\n'
-                f'    sigma_range     ={self.sigma_range}\n'
-                f'    scale_reward    ={self.scale_reward}\n'
-                f'    min_reward_scale={self.min_reward_scale}\n'
-                f'    super_symmetric ={self.super_symmetric}\n'
-                f'        accurate    ={self.super_symmetric_accurate}\n'
-                f'    optimizer       ={self.optimizer_name}\n'
+                f'    method             ={self.__class__.__name__}\n'
+                f'    batch_size         ={self.batch_size}\n'
+                f'    init_sigma         ={self.init_sigma}\n'
+                f'    sigma_range        ={self.sigma_range}\n'
+                f'    scale_reward       ={self.scale_reward}\n'
+                f'    min_reward_scale   ={self.min_reward_scale}\n'
+                f'    super_symmetric    ={self.super_symmetric}\n'
+                f'        accurate       ={self.super_symmetric_accurate}\n'
+                f'    optimizer          ={self.optimizer_name}\n'
                 f'    optimizer_kwargs:\n'
                 f'        mu   ={self.optimizer_kwargs_mu}\n'
                 f'        sigma={self.optimizer_kwargs_sigma}\n'
+                f'    start_entropy_coeff={self.start_entropy_coeff}\n'
+                f'    end_entropy_coeff  ={self.end_entropy_coeff}\n'
         )
 
     def compile(self, loss_fn: Callable, projection: Callable, real_dtype: Type) -> None:
@@ -1282,6 +1290,10 @@ class GaussianPGPE(PGPE):
         super_symmetric_accurate = self.super_symmetric_accurate
         batch_size = self.batch_size
         optimizers = (mu_optimizer, sigma_optimizer) = self.optimizers
+        if self.start_entropy_coeff == 0:
+            entropy_coeff_decay = 0
+        else:
+            entropy_coeff_decay = (self.end_entropy_coeff / self.start_entropy_coeff) ** 0.01
         
         # ***********************************************************************
         # INITIALIZATION OF POLICY
@@ -1312,10 +1324,11 @@ class GaussianPGPE(PGPE):
             a = (sigma - jnp.abs(epsilon)) / sigma
             if super_symmetric_accurate:
                 aa = jnp.abs(a)
+                aa3 = jnp.power(aa, 3)
                 epsilon_star = jnp.sign(epsilon) * phi * jnp.where(
                     a <= 0,
-                    jnp.exp(c1 * aa * (aa * aa - 1) / jnp.log(aa + 1e-10) + c2 * aa),
-                    jnp.exp(aa - c3 * aa * jnp.log(1.0 - jnp.power(aa, 3) + 1e-10))
+                    jnp.exp(c1 * (aa3 - aa) / jnp.log(aa + 1e-10) + c2 * aa),
+                    jnp.exp(aa - c3 * aa * jnp.log(1.0 - aa3 + 1e-10))
                 )
             else:
                 epsilon_star = jnp.sign(epsilon) * phi * jnp.exp(a)
@@ -1334,7 +1347,7 @@ class GaussianPGPE(PGPE):
                 p4 = jax.tree_map(jnp.subtract, mu, epsilon_star)
             else:
                 epsilon_star, p3, p4 = epsilon, p1, p2
-            return (p1, p2, p3, p4), (epsilon, epsilon_star)
+            return p1, p2, p3, p4, epsilon, epsilon_star
                         
         # ***********************************************************************
         # POLICY GRADIENT CALCULATION
@@ -1360,11 +1373,11 @@ class GaussianPGPE(PGPE):
                 grad = -r_mu * epsilon
             return grad
         
-        def _jax_wrapped_sigma_grad(epsilon, epsilon_star, sigma, r1, r2, r3, r4, m):
+        def _jax_wrapped_sigma_grad(epsilon, epsilon_star, sigma, r1, r2, r3, r4, m, ent):
             if super_symmetric:
                 mask = r1 + r2 >= r3 + r4
                 epsilon_tau = mask * epsilon + (1 - mask) * epsilon_star
-                s = epsilon_tau * epsilon_tau / sigma - sigma
+                s = jnp.square(epsilon_tau) / sigma - sigma
                 if scale_reward:
                     scale = jnp.maximum(
                         self.min_reward_scale, m - (r1 + r2 + r3 + r4) / 4)
@@ -1372,19 +1385,19 @@ class GaussianPGPE(PGPE):
                     scale = 1.0
                 r_sigma = ((r1 + r2) - (r3 + r4)) / (4 * scale)
             else:
-                s = epsilon * epsilon / sigma - sigma
+                s = jnp.square(epsilon) / sigma - sigma
                 if scale_reward:
                     scale = jnp.maximum(self.min_reward_scale, jnp.abs(m))
                 else:
                     scale = 1.0
                 r_sigma = (r1 + r2) / (2 * scale)
-            grad = -r_sigma * s
+            grad = -(r_sigma * s + ent * 0.5 / sigma)
             return grad
             
-        def _jax_wrapped_pgpe_grad(key, mu, sigma, r_max, 
+        def _jax_wrapped_pgpe_grad(key, mu, sigma, r_max, ent,
                                    policy_hyperparams, subs, model_params):
             key, subkey = random.split(key)
-            (p1, p2, p3, p4), (epsilon, epsilon_star) = _jax_wrapped_sample_params(
+            p1, p2, p3, p4, epsilon, epsilon_star = _jax_wrapped_sample_params(
                 key, mu, sigma)
             r1 = -loss_fn(subkey, p1, policy_hyperparams, subs, model_params)[0]
             r2 = -loss_fn(subkey, p2, policy_hyperparams, subs, model_params)[0]
@@ -1402,23 +1415,24 @@ class GaussianPGPE(PGPE):
                 epsilon, epsilon_star
             ) 
             grad_sigma = jax.tree_map(
-                partial(_jax_wrapped_sigma_grad, r1=r1, r2=r2, r3=r3, r4=r4, m=r_max), 
+                partial(_jax_wrapped_sigma_grad, 
+                        r1=r1, r2=r2, r3=r3, r4=r4, m=r_max, ent=ent), 
                 epsilon, epsilon_star, sigma
             )
             return grad_mu, grad_sigma, r_max
 
-        def _jax_wrapped_pgpe_grad_batched(key, pgpe_params, r_max, 
+        def _jax_wrapped_pgpe_grad_batched(key, pgpe_params, r_max, ent,
                                            policy_hyperparams, subs, model_params):
             mu, sigma = pgpe_params
             if batch_size == 1:
                 mu_grad, sigma_grad, new_r_max = _jax_wrapped_pgpe_grad(
-                    key, mu, sigma, r_max, policy_hyperparams, subs, model_params)
+                    key, mu, sigma, r_max, ent, policy_hyperparams, subs, model_params)
             else:
                 keys = random.split(key, num=batch_size)
                 mu_grads, sigma_grads, r_maxs = jax.vmap(
                     _jax_wrapped_pgpe_grad, 
-                    in_axes=(0, None, None, None, None, None, None)
-                )(keys, mu, sigma, r_max, policy_hyperparams, subs, model_params)
+                    in_axes=(0, None, None, None, None, None, None, None)
+                )(keys, mu, sigma, r_max, ent, policy_hyperparams, subs, model_params)
                 mu_grad, sigma_grad = jax.tree_map(
                     partial(jnp.mean, axis=0), (mu_grads, sigma_grads))
                 new_r_max = jnp.max(r_maxs)
@@ -1429,13 +1443,14 @@ class GaussianPGPE(PGPE):
         #
         # ***********************************************************************
 
-        def _jax_wrapped_pgpe_update(key, pgpe_params, r_max, 
+        def _jax_wrapped_pgpe_update(key, pgpe_params, r_max, progress,
                                      policy_hyperparams, subs, model_params, 
                                      pgpe_opt_state):
             mu, sigma = pgpe_params
             mu_state, sigma_state = pgpe_opt_state
+            ent = self.start_entropy_coeff * jnp.power(entropy_coeff_decay, progress)
             mu_grad, sigma_grad, new_r_max = _jax_wrapped_pgpe_grad_batched(
-                key, pgpe_params, r_max, policy_hyperparams, subs, model_params)
+                key, pgpe_params, r_max, ent, policy_hyperparams, subs, model_params)
             mu_updates, new_mu_state = mu_optimizer.update(mu_grad, mu_state, params=mu) 
             sigma_updates, new_sigma_state = sigma_optimizer.update(
                 sigma_grad, sigma_state, params=sigma) 
@@ -2218,6 +2233,7 @@ r"""
                          bar_format='{l_bar}{bar}| {elapsed} {postfix}', 
                          position=tqdm_position)
         position_str = '' if tqdm_position is None else f'[{tqdm_position}]'
+        progress_percent = 0
         
         for it in iters:
             
@@ -2242,7 +2258,8 @@ r"""
             if self.use_pgpe:
                 key, subkey = random.split(key)
                 pgpe_params, r_max, pgpe_opt_state, pgpe_param, pgpe_converged = \
-                    self.pgpe.update(subkey, pgpe_params, r_max, policy_hyperparams, 
+                    self.pgpe.update(subkey, pgpe_params, r_max, progress_percent, 
+                                     policy_hyperparams, 
                                      test_subs, model_params, pgpe_opt_state)
                 pgpe_loss, _ = self.test_loss(
                     subkey, pgpe_param, policy_hyperparams, test_subs, model_params_test)
