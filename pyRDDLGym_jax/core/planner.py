@@ -1279,8 +1279,12 @@ class GaussianPGPE(PGPE):
         super_symmetric_accurate = self.super_symmetric_accurate
         batch_size = self.batch_size
         optimizers = (mu_optimizer, sigma_optimizer) = self.optimizers
-
-        # initializer
+        
+        # ***********************************************************************
+        # INITIALIZATION OF POLICY
+        #
+        # ***********************************************************************
+        
         def _jax_wrapped_pgpe_init(key, policy_params):
             mu = policy_params
             sigma = jax.tree_map(lambda x: sigma0 * jnp.ones_like(x), mu)
@@ -1291,7 +1295,11 @@ class GaussianPGPE(PGPE):
         
         self._initializer = jax.jit(_jax_wrapped_pgpe_init)
 
-        # parameter sampling functions
+        # ***********************************************************************
+        # PARAMETER SAMPLING FUNCTIONS
+        #
+        # ***********************************************************************
+
         def _jax_wrapped_mu_noise(key, sigma):
             return sigma * random.normal(key, shape=jnp.shape(sigma), dtype=real_dtype)
 
@@ -1325,7 +1333,11 @@ class GaussianPGPE(PGPE):
                 epsilon_star, p3, p4 = epsilon, p1, p2
             return (p1, p2, p3, p4), (epsilon, epsilon_star)
                         
-        # policy gradient update functions
+        # ***********************************************************************
+        # POLICY GRADIENT CALCULATION
+        #
+        # ***********************************************************************
+
         def _jax_wrapped_mu_grad(epsilon, epsilon_star, r1, r2, r3, r4, m):
             if super_symmetric:
                 if scale_reward:
@@ -1407,6 +1419,11 @@ class GaussianPGPE(PGPE):
                     partial(jnp.mean, axis=0), (mu_grads, sigma_grads))
                 new_r_max = jnp.max(r_maxs)
             return mu_grad, sigma_grad, new_r_max
+        
+        # ***********************************************************************
+        # PARAMETER UPDATE
+        #
+        # ***********************************************************************
 
         def _jax_wrapped_pgpe_update(key, pgpe_params, r_max, 
                                      policy_hyperparams, subs, model_params, 
@@ -1464,14 +1481,14 @@ def mean_deviation_utility(returns: jnp.ndarray, beta: float) -> float:
 @jax.jit
 def mean_semideviation_utility(returns: jnp.ndarray, beta: float) -> float:
     mu = jnp.mean(returns)
-    msd = jnp.sqrt(jnp.mean(jnp.minimum(0.0, returns - mu) ** 2))
+    msd = jnp.sqrt(jnp.mean(jnp.square(jnp.minimum(0.0, returns - mu))))
     return mu - 0.5 * beta * msd
 
 
 @jax.jit
 def mean_semivariance_utility(returns: jnp.ndarray, beta: float) -> float:
     mu = jnp.mean(returns)
-    msv = jnp.mean(jnp.minimum(0.0, returns - mu) ** 2)
+    msv = jnp.mean(jnp.square(jnp.minimum(0.0, returns - mu)))
     return mu - 0.5 * beta * msv
 
 
