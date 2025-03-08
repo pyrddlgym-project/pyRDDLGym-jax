@@ -12,8 +12,11 @@
 
 Purpose:
 
-1. automatic translation of any RDDL description file into a differentiable simulator in JAX
-2. flexible policy class representations, automatic model relaxations for working in discrete and hybrid domains, and Bayesian hyper-parameter tuning.
+1. automatic translation of RDDL description files into differentiable JAX simulators
+2. implementation of (highly configurable) operator relaxations for working in discrete and hybrid domains
+3. flexible policy representations and automated Bayesian hyper-parameter tuning
+4. interactive dashboard for dyanmic visualization and debugging
+5. hybridization with parameter-exploring policy gradients.
 
 Some demos of solved problems by JaxPlan:
 
