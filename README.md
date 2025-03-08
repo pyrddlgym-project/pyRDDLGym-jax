@@ -192,8 +192,23 @@ More documentation about this and other new features will be coming soon.
 
 ## Tuning the Planner
 
-It is easy to tune the planner's hyper-parameters efficiently and automatically using Bayesian optimization.
-To do this, first create a config file template with patterns replacing concrete parameter values that you want to tune, e.g.:
+A basic run script is provided to run automatic Bayesian hyper-parameter tuning for the most sensitive parameters of JaxPlan:
+
+```shell
+jaxplan tune <domain> <instance> <method> <trials> <iters> <workers> <dashboard>
+```
+
+where:
+- ``domain`` is the domain identifier as specified in rddlrepository
+- ``instance`` is the instance identifier
+- ``method`` is the planning method to use (i.e. drp, slp, replan)
+- ``trials`` is the (optional) number of trials/episodes to average in evaluating each hyper-parameter setting
+- ``iters`` is the (optional) maximum number of iterations/evaluations of Bayesian optimization to perform
+- ``workers`` is the (optional) number of parallel evaluations to be done at each iteration, e.g. the total evaluations = ``iters * workers``
+- ``dashboard`` is whether the optimizations are tracked in the dashboard application.
+
+It is easy to tune a custom range of the planner's hyper-parameters efficiently. 
+First create a config file template with patterns replacing concrete parameter values that you want to tune, e.g.:
 
 ```ini
 [Model]
@@ -217,7 +232,7 @@ train_on_reset=True
 
 would allow to tune the sharpness of model relaxations, and the learning rate of the optimizer.
 
-Next, you must link the patterns in the config with concrete hyper-parameter ranges the tuner will understand:
+Next, you must link the patterns in the config with concrete hyper-parameter ranges the tuner will understand, and run the optimizer:
 
 ```python
 import pyRDDLGym
@@ -249,22 +264,7 @@ tuning = JaxParameterTuning(env=env,
                             gp_iters=iters)
 tuning.tune(key=42, log_file='path/to/log.csv')
 ```
- 
-A basic run script is provided to run the automatic hyper-parameter tuning for the most sensitive parameters of JaxPlan:
-
-```shell
-jaxplan tune <domain> <instance> <method> <trials> <iters> <workers> <dashboard>
-```
-
-where:
-- ``domain`` is the domain identifier as specified in rddlrepository
-- ``instance`` is the instance identifier
-- ``method`` is the planning method to use (i.e. drp, slp, replan)
-- ``trials`` is the (optional) number of trials/episodes to average in evaluating each hyper-parameter setting
-- ``iters`` is the (optional) maximum number of iterations/evaluations of Bayesian optimization to perform
-- ``workers`` is the (optional) number of parallel evaluations to be done at each iteration, e.g. the total evaluations = ``iters * workers``
-- ``dashboard`` is whether the optimizations are tracked in the dashboard application.
- 
+  
 
 ## Simulation
 
