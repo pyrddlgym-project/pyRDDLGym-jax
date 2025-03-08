@@ -2253,11 +2253,12 @@ r"""
         # ======================================================================
         
         # initialize running statistics
-        best_params, best_loss, best_grad = policy_params, jnp.inf, jnp.inf
+        best_params, best_loss, best_grad = policy_params, jnp.inf, None
         last_iter_improve = 0
         rolling_test_loss = RollingMean(test_rolling_window)
         log = {}
         status = JaxPlannerStatus.NORMAL
+        progress_percent = 0
         
         # initialize stopping criterion
         if stopping_rule is not None:
@@ -2279,7 +2280,6 @@ r"""
                          bar_format='{l_bar}{bar}| {elapsed} {postfix}', 
                          position=tqdm_position)
         position_str = '' if tqdm_position is None else f'[{tqdm_position}]'
-        progress_percent = 0
         
         for it in iters:
             
