@@ -2270,18 +2270,19 @@ r"""
                 dashboard_id, dashboard.get_planner_info(self), 
                 key=dash_key, viz=self.dashboard_viz)
         
+        # progress bar
+        if print_progress:
+            progress_bar = tqdm(None, total=100, position=tqdm_position, 
+                                bar_format='{l_bar}{bar}| {elapsed} {postfix}')
+        else:
+            progress_bar = None
+        position_str = '' if tqdm_position is None else f'[{tqdm_position}]'
+        
         # ======================================================================
         # MAIN TRAINING LOOP BEGINS
         # ======================================================================
         
-        iters = range(epochs)
-        if print_progress:
-            iters = tqdm(iters, total=100, 
-                         bar_format='{l_bar}{bar}| {elapsed} {postfix}', 
-                         position=tqdm_position)
-        position_str = '' if tqdm_position is None else f'[{tqdm_position}]'
-        
-        for it in iters:
+        for it in range(epochs):
             
             # ==================================================================
             # NEXT GRADIENT DESCENT STEP
@@ -2392,15 +2393,15 @@ r"""
             
             # if the progress bar is used
             if print_progress:
-                iters.n = progress_percent
-                iters.set_description(
+                progress_bar.set_description(
                     f'{position_str} {it:6} it / {-train_loss:14.5f} train / '
                     f'{-test_loss_smooth:14.5f} test / {-best_loss:14.5f} best / '
                     f'{status.value} status / {total_pgpe_it:6} pgpe',
                     refresh=False
                 )
-                iters.set_postfix_str(
-                    f"{(it + 1) / (elapsed + 1e-6):.2f}it/s", refresh=True)
+                progress_bar.set_postfix_str(
+                    f"{(it + 1) / (elapsed + 1e-6):.2f}it/s", refresh=False)
+                progress_bar.update(progress_percent - progress_bar.n)
             
             # dash-board
             if dashboard is not None:
@@ -2421,7 +2422,7 @@ r"""
 
         # release resources
         if print_progress:
-            iters.close()
+            progress_bar.close()
         
         # validate the test return
         if log:
