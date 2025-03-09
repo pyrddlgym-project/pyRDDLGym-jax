@@ -104,13 +104,13 @@ class JaxMCTSPlanner:
     def __init__(self, rddl: RDDLLiftedModel,
                  batch_size_rollout: int=8,
                  rollout_horizon: Optional[int]=None,
-                 alpha_start: float=0.9,
+                 alpha_start: float=0.7,
                  alpha_end: float=0.1,
-                 beta_start: float=0.9,
+                 beta_start: float=0.7,
                  beta_end: float=0.1,
                  c: float=math.sqrt(2.0),
-                 grad_updates: bool=False,
                  adapt_c: bool=True,
+                 grad_updates: bool=False,
                  learning_rate: float=0.001,
                  delta: float=0.1,
                  logic: Logic=FuzzyLogic()) -> None:
@@ -122,8 +122,8 @@ class JaxMCTSPlanner:
         :param alpha: the growth factor for chance nodes
         :param beta: the growth factor for decision nodes
         :param c: initial scaling factor for UCT
-        :param grad_updates: whether to do gradient-based action refinement
         :param adapt_c: whether to adapt c to the scale of the reward
+        :param grad_updates: whether to do gradient-based action refinement
         :param learning_rate: learning rate for gradient-based action refinement
         :param delta: budget for gradient-based action refinement
         :param logic: a subclass of Logic for mapping exact mathematical
@@ -197,19 +197,21 @@ class JaxMCTSPlanner:
                 for action in action_keys:
                     prange = rddl.action_ranges[action]
                     noop_action = jnp.ravel(self.noop_actions[action])
-                    num_actions = noop_action.size
+                    num_actions = jnp.size(noop_action)
                     key, subkey1, subkey2 = random.split(key, num=3)
-                    permuted_index = random.permutation(subkey1, jnp.arange(num_actions))
+                    permuted_index = random.permutation(subkey1, num_actions)
                     if prange == 'bool':
                         new_values = random.uniform(subkey2, shape=(num_actions,)) < 0.5
                     elif prange == 'int':
                         lower, upper = self.action_bounds[action]
-                        lower, upper = jnp.ravel(lower), jnp.ravel(upper)
+                        lower = jnp.ravel(lower)
+                        upper = jnp.ravel(upper)
                         new_values = random.randint(
                             subkey2, shape=(num_actions,), minval=lower, maxval=upper + 1)
                     else:
                         lower, upper = self.action_bounds[action]
-                        lower, upper = jnp.ravel(lower), jnp.ravel(upper)
+                        lower = jnp.ravel(lower)
+                        upper = jnp.ravel(upper)
                         new_values = random.uniform(
                             subkey2, shape=(num_actions,), minval=lower, maxval=upper)
                     action_values = jnp.where(
@@ -313,9 +315,9 @@ class JaxMCTSPlanner:
             new_actions = {}
             for (name, action) in test_actions.items():
                 if rddl.variable_ranges[name] == 'real':
-                    lower = init_actions[name] - self.delta
-                    upper = init_actions[name] + self.delta
-                    new_actions[name] = jnp.clip(action, lower, upper)
+                    init_action = init_actions[name]
+                    new_actions[name] = jnp.clip(
+                        action, init_action - self.delta, init_action + self.delta)
                 else:
                     new_actions[name] = action
             return new_actions
@@ -330,9 +332,10 @@ class JaxMCTSPlanner:
                 return True
             
         def _jax_wrapped_plan_update(key, policy_params, subs, init_actions):
-            policy_params = {name: param.astype(compiled_with_grad.REAL)
+            policy_params = {name: jnp.asarray(param, dtype=compiled_with_grad.REAL)
                              for (name, param) in policy_params.items()}
-            subs = {name: value[jnp.newaxis, ...].astype(compiled_with_grad.REAL) 
+            subs = {name: jnp.asarray(
+                        value[jnp.newaxis, ...], dtype=compiled_with_grad.REAL) 
                     for (name, value) in subs.items()}
             grads = jax.grad(_jax_wrapped_plan_loss, argnums=1)(key, policy_params, subs)
             policy_params = {name: param + self.lr * grads[name]
@@ -487,8 +490,9 @@ class JaxMCTSPlanner:
         progress_percent = 0
 
         # main optimization loop
-        iters = tqdm(range(epochs), total=100)
-        for it in iters:
+        progress_bar = tqdm(None, total=100, 
+                            bar_format='{l_bar}{bar}| {elapsed} {postfix}')
+        for it in range(epochs):
 
             # update MCTS tree
             alpha = self.alpha_start * self.alpha_decay ** progress_percent
@@ -504,14 +508,17 @@ class JaxMCTSPlanner:
 
             # update progress bar
             elapsed = time.time() - start_time - elapsed_outside_loop
-            progress_percent = 100 * min(1, max(elapsed / train_seconds, it / epochs))
-            iters.set_description(
+            progress_percent = 100 * min(
+                1, max(elapsed / train_seconds, it / (epochs - 1)))
+            progress_bar.set_description(
                 f'{it:6} it / {R:14.4f} reward / {c:14.4f} c / '
                 f'{len(vD.children):3} width / {avg_depth:6.2f} depth / '
                 f'{vD.n_decision_subnodes:6} nD / {vD.n_chance_subnodes:6} nC / '
-                f'{total_grad_updates:6} grad'
+                f'{total_grad_updates:6} grad', refresh=False
             )
-            iters.n = progress_percent
+            progress_bar.set_postfix_str(
+                f"{(it + 1) / (elapsed + 1e-6):.2f}it/s", refresh=False)
+            progress_bar.update(progress_percent - progress_bar.n)
 
             # callback
             vC = vD.best()
@@ -628,7 +635,7 @@ class JaxMCTSController(BaseAgent):
 
 
 if __name__ == '__main__':
-    env = pyRDDLGym.make('Elevators', '0', vectorized=True)
+    env = pyRDDLGym.make('Pendulum_gym', '0', vectorized=True)
     rddl = env.model
     rddl.horizon = 120
     
@@ -639,8 +646,8 @@ if __name__ == '__main__':
             rollout_horizon=20, 
             delta=0.1,
             learning_rate=0.1,
-            grad_updates=True),
-        train_seconds=2
+            grad_updates=False),
+        train_seconds=1
     )
     
     agent.evaluate(env, episodes=1, verbose=True, render=True)
