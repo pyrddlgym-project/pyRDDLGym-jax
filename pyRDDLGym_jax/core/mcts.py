@@ -104,8 +104,10 @@ class JaxMCTSPlanner:
     def __init__(self, rddl: RDDLLiftedModel,
                  batch_size_rollout: int=8,
                  rollout_horizon: Optional[int]=None,
-                 alpha: float=0.5,
-                 beta: float=0.5,
+                 alpha_start: float=0.9,
+                 alpha_end: float=0.1,
+                 beta_start: float=0.9,
+                 beta_end: float=0.1,
                  c: float=math.sqrt(2.0),
                  grad_updates: bool=False,
                  adapt_c: bool=True,
@@ -132,8 +134,10 @@ class JaxMCTSPlanner:
         if rollout_horizon is None:
             rollout_horizon = rddl.horizon
         self.T = rollout_horizon
-        self.alpha = alpha
-        self.beta = beta
+        self.alpha_start = alpha_start
+        self.alpha_decay = (alpha_end / alpha_start) ** 0.01
+        self.beta_start = beta_start
+        self.beta_decay = (beta_end / beta_start) ** 0.01
         self.c = c
         self.adapt_c = adapt_c
         self.grad_updates = grad_updates
@@ -345,8 +349,8 @@ class JaxMCTSPlanner:
     # MCTS SUBROUTINES
     # ===========================================================================
 
-    def _select_action(self, subs, vD, c, key):
-        if int(vD.N ** self.alpha) >= len(vD.children):
+    def _select_action(self, subs, vD, c, key, alpha):
+        if int(vD.N ** alpha) >= len(vD.children):
             key, subkey = random.split(key)
             a = HashableDict(self.policy_fn(subkey, None, None, None, subs))
             child = vD.children.get(a, None)
@@ -362,9 +366,9 @@ class JaxMCTSPlanner:
             rollout = False
         return vC, rollout, key
 
-    def _select_state(self, vD, vC, subs, key):
+    def _select_state(self, vD, vC, subs, key, beta):
         _, Nc, _ = vD.children[vC.action]
-        if int(Nc ** self.beta) >= len(vC.children):
+        if int(Nc ** beta) >= len(vC.children):
             key, subkey = random.split(key)
             subs, log, _ = self.single_step_fn(subkey, vC.action.value, subs, None)
             s = HashableDict(subs)
@@ -402,13 +406,13 @@ class JaxMCTSPlanner:
                     update = 1
         return plan, length, update
     
-    def _simulate(self, subs, vD, t, c, key):
+    def _simulate(self, subs, vD, t, c, key, alpha, beta):
 
         # update the MCTS tree normally
         if t == self.T:
             return 0.0, key, None, 0, 0, 0, 0, 0
-        vC, rollout, key = self._select_action(subs, vD, c, key)
-        vD2, added, key = self._select_state(vD, vC, subs, key)
+        vC, rollout, key = self._select_action(subs, vD, c, key, alpha)
+        vD2, added, key = self._select_state(vD, vC, subs, key, beta)
         subs0 = subs
         subs, r, done = vD2.tr
         total_depth = 1
@@ -421,7 +425,7 @@ class JaxMCTSPlanner:
             R2, key, actions, length = self.rollout_fn(subs, t + 1, key)
         else:
             R2, key, actions, length, depth, d_subnodes, c_subnodes, grad_updates = \
-                self._simulate(subs, vD2, t + 1, c, key)
+                self._simulate(subs, vD2, t + 1, c, key, alpha, beta)
             total_depth += depth
             total_d_subnodes += d_subnodes
             total_c_subnodes += c_subnodes
@@ -480,13 +484,17 @@ class JaxMCTSPlanner:
         total_grad_updates = 0
         start_time = time.time()
         elapsed_outside_loop = 0
+        progress_percent = 0
 
         # main optimization loop
         iters = tqdm(range(epochs), total=100)
         for it in iters:
 
             # update MCTS tree
-            R, key, _, _, depth, _, _, grad_updates = self._simulate(subs, vD, 0, c, key)
+            alpha = self.alpha_start * self.alpha_decay ** progress_percent
+            beta = self.beta_start * self.beta_decay ** progress_percent
+            R, key, _, _, depth, _, _, grad_updates = self._simulate(
+                subs, vD, 0, c, key, alpha, beta)
             if self.adapt_c:
                 c += (abs(R) - c) / (it + 1)
             
@@ -496,7 +504,7 @@ class JaxMCTSPlanner:
 
             # update progress bar
             elapsed = time.time() - start_time - elapsed_outside_loop
-            progress_percent = int(100 * min(1, max(elapsed / train_seconds, it / epochs)))
+            progress_percent = 100 * min(1, max(elapsed / train_seconds, it / epochs))
             iters.set_description(
                 f'{it:6} it / {R:14.4f} reward / {c:14.4f} c / '
                 f'{len(vD.children):3} width / {avg_depth:6.2f} depth / '
@@ -629,8 +637,6 @@ if __name__ == '__main__':
         JaxMCTSPlanner(
             rddl, 
             rollout_horizon=20, 
-            alpha=0.4, 
-            beta=0.3,
             delta=0.1,
             learning_rate=0.1,
             grad_updates=True),
