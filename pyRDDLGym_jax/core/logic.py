@@ -29,12 +29,24 @@
 #
 # ***********************************************************************
 
+import traceback
 from typing import Callable, Dict, Union
 
 import jax
 import jax.numpy as jnp
 import jax.random as random
 import jax.scipy as scipy 
+
+from pyRDDLGym.core.debug.exception import raise_warning
+
+# more robust approach - if user does not have this or broken try to continue
+try:
+    from tensorflow_probability.substrates import jax as tfp
+except Exception:
+    raise_warning('Failed to import tensorflow-probability: '
+                  'compilation of some probability distributions will fail.', 'red')
+    traceback.print_exc()
+    tfp = None
 
 
 def enumerate_literals(shape, axis, dtype=jnp.int32):
@@ -339,6 +351,9 @@ class RandomSampling:
     def binomial(self, id, init_params, logic):
         raise NotImplementedError
     
+    def negative_binomial(self, id, init_params, logic):
+        raise NotImplementedError
+    
     def geometric(self, id, init_params, logic):
         raise NotImplementedError
     
@@ -411,46 +426,49 @@ class SoftRandomSampling(RandomSampling):
             return sample, params
         return _jax_wrapped_calc_poisson_exponential
 
+    # normal approximation to Poisson: Poisson(rate) -> Normal(rate, rate)
+    def _poisson_normal_approx(self, logic):
+        def _jax_wrapped_calc_poisson_normal_approx(key, rate, params):
+            normal = random.normal(key=key, shape=jnp.shape(rate), dtype=logic.REAL)
+            sample = rate + jnp.sqrt(rate) * normal
+            return sample, params    
+        return _jax_wrapped_calc_poisson_normal_approx
+    
     def poisson(self, id, init_params, logic):
-        def _jax_wrapped_calc_poisson_exact(key, rate, params):
-            sample = random.poisson(key=key, lam=rate, dtype=logic.INT)
-            sample = jnp.asarray(sample, dtype=logic.REAL)
-            return sample, params      
-              
         if self.poisson_exp_method:
             _jax_wrapped_calc_poisson_diff = self._poisson_exponential(
                 id, init_params, logic)
         else:
             _jax_wrapped_calc_poisson_diff = self._poisson_gumbel_softmax(
                 id, init_params, logic)
+        _jax_wrapped_calc_poisson_normal = self._poisson_normal_approx(logic)
         
+        # for small rate use the Poisson process or gumbel-softmax reparameterization
+        # for large rate use the normal approximation
         def _jax_wrapped_calc_poisson_approx(key, rate, params):
-            
-            # determine if error of truncation at rate is acceptable
             if self.poisson_bins > 0:
                 cuml_prob = scipy.stats.poisson.cdf(self.poisson_bins, rate)
-                approx_cond = jax.lax.stop_gradient(
-                    jnp.min(cuml_prob) > self.poisson_min_cdf)
+                small_rate = jax.lax.stop_gradient(cuml_prob >= self.poisson_min_cdf)
+                small_sample, params = _jax_wrapped_calc_poisson_diff(key, rate, params)
+                large_sample, params = _jax_wrapped_calc_poisson_normal(key, rate, params)
+                sample = jax.lax.select(small_rate, small_sample, large_sample)
+                return sample, params
             else:
-                approx_cond = False
-            
-            # for acceptable truncation use the approximation, use exact otherwise
-            return jax.lax.cond(
-                approx_cond, 
-                _jax_wrapped_calc_poisson_diff, 
-                _jax_wrapped_calc_poisson_exact, 
-                key, rate, params
-            )
+                return _jax_wrapped_calc_poisson_normal(key, rate, params)
         return _jax_wrapped_calc_poisson_approx        
     
-    def binomial(self, id, init_params, logic):
-        def _jax_wrapped_calc_binomial_exact(key, trials, prob, params):            
-            trials = jnp.asarray(trials, dtype=logic.REAL)
-            prob = jnp.asarray(prob, dtype=logic.REAL)
-            sample = random.binomial(key=key, n=trials, p=prob, dtype=logic.REAL)
-            return sample, params     
+    # normal approximation to Binomial: Bin(n, p) -> Normal(np, np(1-p))
+    def _binomial_normal_approx(self, logic):
+        def _jax_wrapped_calc_binomial_normal_approx(key, trials, prob, params):
+            normal = random.normal(key=key, shape=jnp.shape(trials), dtype=logic.REAL)
+            mean = trials * prob
+            std = jnp.sqrt(trials * prob * (1 - prob))
+            sample = mean + std * normal
+            return sample, params    
+        return _jax_wrapped_calc_binomial_normal_approx
         
-        # Binomial(n, p) = sum_{i = 1 ... n} Bernoulli(p)
+    # Binomial(n, p) = sum_{i = 1 ... n} Bernoulli(p)
+    def _binomial_sum(self, id, init_params, logic):
         bernoulli_approx = self.bernoulli(id, init_params, logic)
         def _jax_wrapped_calc_binomial_sum(key, trials, prob, params):
             prob_full = jnp.broadcast_to(
@@ -461,17 +479,34 @@ class SoftRandomSampling(RandomSampling):
             mask = indices < trials[..., jnp.newaxis]
             sample = jnp.sum(sample_bern * mask, axis=-1)
             return sample, params
+        return _jax_wrapped_calc_binomial_sum
         
-        # for trials not too large use the Bernoulli relaxation, use exact otherwise
+    def binomial(self, id, init_params, logic):
+        _jax_wrapped_calc_binomial_normal = self._binomial_normal_approx(logic)  
+        _jax_wrapped_calc_binomial_sum = self._binomial_sum(id, init_params, logic)
+        
+        # for small trials use the Bernoulli relaxation
+        # for large trials use the normal approximation
         def _jax_wrapped_calc_binomial_approx(key, trials, prob, params):
-            return jax.lax.cond(
-                jax.lax.stop_gradient(jnp.max(trials) < self.binomial_bins), 
-                _jax_wrapped_calc_binomial_sum, 
-                _jax_wrapped_calc_binomial_exact, 
-                key, trials, prob, params
-            )
+            small_trials = jax.lax.stop_gradient(trials < self.binomial_bins)
+            small_sample, params = _jax_wrapped_calc_binomial_sum(key, trials, prob, params)
+            large_sample, params = _jax_wrapped_calc_binomial_normal(key, trials, prob, params)
+            sample = jax.lax.select(small_trials, small_sample, large_sample)
+            return sample, params
         return _jax_wrapped_calc_binomial_approx
     
+    # https://en.wikipedia.org/wiki/Negative_binomial_distribution#Gamma%E2%80%93Poisson_mixture
+    def negative_binomial(self, id, init_params, logic):
+        poisson_approx = self.poisson(id, init_params, logic)
+        def _jax_wrapped_calc_negative_binomial_approx(key, trials, prob, params):
+            key, subkey = random.split(key)
+            trials = jnp.asarray(trials, dtype=logic.REAL)
+            Gamma = random.gamma(key=key, a=trials, dtype=logic.REAL)
+            scale = (1.0 - prob) / prob
+            poisson_rate = scale * Gamma
+            return poisson_approx(subkey, poisson_rate, params)
+        return _jax_wrapped_calc_negative_binomial_approx
+
     def geometric(self, id, init_params, logic):
         approx_floor = logic.floor(id, init_params)
         def _jax_wrapped_calc_geometric_approx(key, prob, params):
@@ -531,6 +566,14 @@ class Determinization(RandomSampling):
     
     def binomial(self, id, init_params, logic):
         return self._jax_wrapped_calc_binomial_determinized
+    
+    @staticmethod
+    def _jax_wrapped_calc_negative_binomial_determinized(key, trials, prob, params):
+        sample = trials * ((1.0 / prob) - 1.0)
+        return sample, params
+
+    def negative_binomial(self, id, init_params, logic):
+        return self._jax_wrapped_calc_negative_binomial_determinized
     
     @staticmethod
     def _jax_wrapped_calc_geometric_determinized(key, prob, params):
@@ -712,7 +755,8 @@ class Logic:
                 'Discrete': self.discrete,
                 'Poisson': self.poisson,
                 'Geometric': self.geometric,
-                'Binomial': self.binomial
+                'Binomial': self.binomial,
+                'NegativeBinomial': self.negative_binomial
             }
         }
 
@@ -828,6 +872,9 @@ class Logic:
         raise NotImplementedError
     
     def binomial(self, id, init_params):
+        raise NotImplementedError
+
+    def negative_binomial(self, id, init_params):
         raise NotImplementedError
 
 
@@ -1005,6 +1052,17 @@ class ExactLogic(Logic):
             sample = jnp.asarray(sample, dtype=self.INT)
             return sample, params
         return _jax_wrapped_calc_binomial_exact
+    
+    # note: for some reason tfp defines it as number of successes before trials failures
+    # I will define it as the number of failures before trials successes
+    def negative_binomial(self, id, init_params):
+        def _jax_wrapped_calc_negative_binomial_exact(key, trials, prob, params):
+            trials = jnp.asarray(trials, dtype=self.REAL)
+            prob = jnp.asarray(prob, dtype=self.REAL)
+            dist = tfp.distributions.NegativeBinomial(total_count=trials, probs=1.0 - prob)
+            sample = jnp.asarray(dist.sample(seed=key), dtype=self.INT)
+            return sample, params
+        return _jax_wrapped_calc_negative_binomial_exact
 
     
 class FuzzyLogic(Logic):
@@ -1234,6 +1292,9 @@ class FuzzyLogic(Logic):
     
     def binomial(self, id, init_params):
         return self.sampling.binomial(id, init_params, self)
+    
+    def negative_binomial(self, id, init_params):
+        return self.sampling.negative_binomial(id, init_params, self)
 
 
 # ===========================================================================

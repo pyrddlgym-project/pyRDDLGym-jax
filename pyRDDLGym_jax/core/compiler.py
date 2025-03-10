@@ -1019,6 +1019,9 @@ class JaxRDDLCompiler:
     # UnnormDiscrete: complete (subclass uses Gumbel-softmax)
     # Discrete(p): complete (subclass uses Gumbel-softmax)
     # UnnormDiscrete(p): complete (subclass uses Gumbel-softmax)
+    # Poisson (subclass uses Gumbel-softmax or Poisson process trick)
+    # Binomial (subclass uses Gumbel-softmax or Normal approximation)
+    # NegativeBinomial (subclass uses Poisson-Gamma mixture)
     
     # distributions which seem to support backpropagation (need more testing):
     # Beta
@@ -1026,11 +1029,8 @@ class JaxRDDLCompiler:
     # Gamma
     # ChiSquare   
     # Dirichlet
-    # Poisson (subclass uses Gumbel-softmax or Poisson process trick)
 
     # distributions with incomplete reparameterization support (TODO):
-    # Binomial
-    # NegativeBinomial
     # Multinomial
     
     def _jax_random(self, expr, init_params):
@@ -1299,8 +1299,17 @@ class JaxRDDLCompiler:
     def _jax_negative_binomial(self, expr, init_params):
         ERR = JaxRDDLCompiler.ERROR_CODES['INVALID_PARAM_NEGATIVE_BINOMIAL']
         JaxRDDLCompiler._check_num_args(expr, 2)
-        
         arg_trials, arg_prob = expr.args
+
+        # if prob is non-fluent, always use the exact operation
+        if self.compile_non_fluent_exact \
+        and not self.traced.cached_is_fluent(arg_trials) \
+        and not self.traced.cached_is_fluent(arg_prob):
+            negbin_op = self.EXACT_OPS['sampling']['NegativeBinomial']
+        else:
+            negbin_op = self.OPS['sampling']['NegativeBinomial']
+        jax_op = negbin_op(expr.id, init_params)
+
         jax_trials = self._jax(arg_trials, init_params)
         jax_prob = self._jax(arg_prob, init_params)
         
@@ -1308,11 +1317,8 @@ class JaxRDDLCompiler:
         def _jax_wrapped_distribution_negative_binomial(x, params, key):
             trials, key, err2, params = jax_trials(x, params, key)       
             prob, key, err1, params = jax_prob(x, params, key)
-            trials = jnp.asarray(trials, dtype=self.REAL)
-            prob = jnp.asarray(prob, dtype=self.REAL)
             key, subkey = random.split(key)
-            dist = tfp.distributions.NegativeBinomial(total_count=trials, probs=prob)
-            sample = jnp.asarray(dist.sample(seed=subkey), dtype=self.INT)
+            sample, params = jax_op(subkey, trials, prob, params)
             out_of_bounds = jnp.logical_not(jnp.all(
                 (prob >= 0) & (prob <= 1) & (trials > 0)))
             err = err1 | err2 | (out_of_bounds * ERR)
