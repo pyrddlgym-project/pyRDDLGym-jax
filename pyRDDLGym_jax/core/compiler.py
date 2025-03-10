@@ -1019,6 +1019,9 @@ class JaxRDDLCompiler:
     # UnnormDiscrete: complete (subclass uses Gumbel-softmax)
     # Discrete(p): complete (subclass uses Gumbel-softmax)
     # UnnormDiscrete(p): complete (subclass uses Gumbel-softmax)
+    # Poisson (subclass uses Gumbel-softmax or Poisson process trick)
+    # Binomial (subclass uses Gumbel-softmax or Normal approximation)
+    # NegativeBinomial (subclass uses Poisson-Gamma mixture)
     
     # distributions which seem to support backpropagation (need more testing):
     # Beta
@@ -1026,9 +1029,6 @@ class JaxRDDLCompiler:
     # Gamma
     # ChiSquare   
     # Dirichlet
-    # Poisson (subclass uses Gumbel-softmax or Poisson process trick)
-    # Binomial (subclass uses Gumbel-softmax and Normal approximation)
-    # NegativeBinomial (subclass uses Poisson-Gamma mixture and Normal approximation)
 
     # distributions with incomplete reparameterization support (TODO):
     # Multinomial
