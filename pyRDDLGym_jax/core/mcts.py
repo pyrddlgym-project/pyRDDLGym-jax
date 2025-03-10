@@ -3,7 +3,7 @@ import hashlib
 import math
 import numpy as np
 from tqdm import tqdm
-from typing import Any, Dict, Generator, Optional, Tuple
+from typing import Any, Callable, Dict, Generator, Optional, Tuple
 import sys
 import time
 
@@ -111,8 +111,8 @@ class JaxMCTSPlanner:
                  beta_end: float=0.2,
                  c: float=math.sqrt(2.0),
                  adapt_c: bool=True,
-                 optimizer=None,
-                 optimizer_kwargs=None,
+                 optimizer: Optional[Callable[..., optax.GradientTransformation]]=None,
+                 optimizer_kwargs: Optional[Dict[str, Any]]=None,
                  delta: float=0.1,
                  logic: Logic=FuzzyLogic()) -> None:
         '''Creates a new hybrid backprop + UCT-MCTS planner.
@@ -147,7 +147,7 @@ class JaxMCTSPlanner:
 
         if optimizer is not None:
             if optimizer_kwargs is None:
-                optimizer_kwargs = { 'learning_rate': 0.01 }
+                optimizer_kwargs = {'learning_rate': 0.1}
             self.optimizer = optimizer(**optimizer_kwargs)
         else:
             self.optimizer = None
@@ -656,9 +656,9 @@ if __name__ == '__main__':
         JaxMCTSPlanner(
             rddl, 
             rollout_horizon=5, 
-            delta=0.1,
+            delta=0.2,
             optimizer=optax.rmsprop,
-            optimizer_kwargs={'learning_rate':0.003}),
+            optimizer_kwargs={'learning_rate': 0.003}),
         train_seconds=1
     )
     
