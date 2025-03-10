@@ -1030,9 +1030,6 @@ class JaxRDDLCompiler:
     # Binomial (subclass uses Gumbel-softmax and Normal approximation)
     # NegativeBinomial (subclass uses Poisson-Gamma mixture and Normal approximation)
 
-    # distributions whose logic can be improved further (TODO):
-    # Binomial, Poisson (better conditioning when to use Normal approximation)
-
     # distributions with incomplete reparameterization support (TODO):
     # Multinomial
     
