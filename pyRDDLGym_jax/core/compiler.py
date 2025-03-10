@@ -1027,10 +1027,13 @@ class JaxRDDLCompiler:
     # ChiSquare   
     # Dirichlet
     # Poisson (subclass uses Gumbel-softmax or Poisson process trick)
+    # Binomial (subclass uses Gumbel-softmax and Normal approximation)
+    # NegativeBinomial (subclass uses Poisson-Gamma mixture and Normal approximation)
+
+    # distributions whose logic can be improved further (TODO):
+    # Binomial, Poisson (better conditioning when to use Normal approximation)
 
     # distributions with incomplete reparameterization support (TODO):
-    # Binomial
-    # NegativeBinomial
     # Multinomial
     
     def _jax_random(self, expr, init_params):
