@@ -441,26 +441,20 @@ class SoftRandomSampling(RandomSampling):
         else:
             _jax_wrapped_calc_poisson_diff = self._poisson_gumbel_softmax(
                 id, init_params, logic)
-        _jax_wrapped_calc_poisson_normal_approx = self._poisson_normal_approx(logic)
+        _jax_wrapped_calc_poisson_normal = self._poisson_normal_approx(logic)
         
+        # for small rate use the Poisson process or gumbel-softmax reparameterization
+        # for large rate use the normal approximation
         def _jax_wrapped_calc_poisson_approx(key, rate, params):
-            
-            # determine if error of truncation at rate is acceptable
             if self.poisson_bins > 0:
                 cuml_prob = scipy.stats.poisson.cdf(self.poisson_bins, rate)
-                approx_cond = jax.lax.stop_gradient(
-                    jnp.min(cuml_prob) > self.poisson_min_cdf)
+                small_rate = jax.lax.stop_gradient(cuml_prob >= self.poisson_min_cdf)
+                small_sample, params = _jax_wrapped_calc_poisson_diff(key, rate, params)
+                large_sample, params = _jax_wrapped_calc_poisson_normal(key, rate, params)
+                sample = jax.lax.select(small_rate, small_sample, large_sample)
+                return sample, params
             else:
-                approx_cond = False
-            
-            # for smaller rate use the differentiable approximation
-            # for larger rate use the normal approximation
-            return jax.lax.cond(
-                approx_cond, 
-                _jax_wrapped_calc_poisson_diff, 
-                _jax_wrapped_calc_poisson_normal_approx, 
-                key, rate, params
-            )
+                return _jax_wrapped_calc_poisson_normal(key, rate, params)
         return _jax_wrapped_calc_poisson_approx        
     
     # normal approximation to Binomial: Bin(n, p) -> Normal(np, np(1-p))
@@ -472,11 +466,9 @@ class SoftRandomSampling(RandomSampling):
             sample = mean + std * normal
             return sample, params    
         return _jax_wrapped_calc_binomial_normal_approx
-    
-    def binomial(self, id, init_params, logic):
-        _jax_wrapped_calc_binomial_normal_approx = self._binomial_normal_approx(logic)  
         
-        # Binomial(n, p) = sum_{i = 1 ... n} Bernoulli(p)
+    # Binomial(n, p) = sum_{i = 1 ... n} Bernoulli(p)
+    def _binomial_sum(self, id, init_params, logic):
         bernoulli_approx = self.bernoulli(id, init_params, logic)
         def _jax_wrapped_calc_binomial_sum(key, trials, prob, params):
             prob_full = jnp.broadcast_to(
@@ -487,15 +479,20 @@ class SoftRandomSampling(RandomSampling):
             mask = indices < trials[..., jnp.newaxis]
             sample = jnp.sum(sample_bern * mask, axis=-1)
             return sample, params
+        return _jax_wrapped_calc_binomial_sum
         
-        # for trials not too large use the Bernoulli relaxation, use exact otherwise
+    def binomial(self, id, init_params, logic):
+        _jax_wrapped_calc_binomial_normal = self._binomial_normal_approx(logic)  
+        _jax_wrapped_calc_binomial_sum = self._binomial_sum(id, init_params, logic)
+        
+        # for small trials use the Bernoulli relaxation
+        # for large trials use the normal approximation
         def _jax_wrapped_calc_binomial_approx(key, trials, prob, params):
-            return jax.lax.cond(
-                jax.lax.stop_gradient(jnp.max(trials) < self.binomial_bins), 
-                _jax_wrapped_calc_binomial_sum, 
-                _jax_wrapped_calc_binomial_normal_approx, 
-                key, trials, prob, params
-            )
+            small_trials = jax.lax.stop_gradient(trials < self.binomial_bins)
+            small_sample, params = _jax_wrapped_calc_binomial_sum(key, trials, prob, params)
+            large_sample, params = _jax_wrapped_calc_binomial_normal(key, trials, prob, params)
+            sample = jax.lax.select(small_trials, small_sample, large_sample)
+            return sample, params
         return _jax_wrapped_calc_binomial_approx
     
     # https://en.wikipedia.org/wiki/Negative_binomial_distribution#Gamma%E2%80%93Poisson_mixture
