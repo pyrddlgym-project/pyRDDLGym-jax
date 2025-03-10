@@ -369,7 +369,7 @@ class SoftRandomSampling(RandomSampling):
     
     def __init__(self, poisson_max_bins: int=100, 
                  poisson_min_cdf: float=0.999,
-                 poisson_exp_sampling: bool=False,
+                 poisson_exp_sampling: bool=True,
                  binomial_max_bins: int=100,
                  bernoulli_gumbel_softmax: bool=False) -> None:
         '''Creates a new instance of soft random sampling.
@@ -426,18 +426,22 @@ class SoftRandomSampling(RandomSampling):
             return sample, params
         return _jax_wrapped_calc_poisson_exponential
 
+    # normal approximation to Poisson: Poisson(rate) -> Normal(rate, rate)
+    def _poisson_normal_approx(self, logic):
+        def _jax_wrapped_calc_poisson_normal_approx(key, rate, params):
+            normal = random.normal(key=key, shape=jnp.shape(rate), dtype=logic.REAL)
+            sample = rate + jnp.sqrt(rate) * normal
+            return sample, params    
+        return _jax_wrapped_calc_poisson_normal_approx
+    
     def poisson(self, id, init_params, logic):
-        def _jax_wrapped_calc_poisson_exact(key, rate, params):
-            sample = random.poisson(key=key, lam=rate, dtype=logic.INT)
-            sample = jnp.asarray(sample, dtype=logic.REAL)
-            return sample, params      
-              
         if self.poisson_exp_method:
             _jax_wrapped_calc_poisson_diff = self._poisson_exponential(
                 id, init_params, logic)
         else:
             _jax_wrapped_calc_poisson_diff = self._poisson_gumbel_softmax(
                 id, init_params, logic)
+        _jax_wrapped_calc_poisson_normal_approx = self._poisson_normal_approx(logic)
         
         def _jax_wrapped_calc_poisson_approx(key, rate, params):
             
@@ -449,11 +453,12 @@ class SoftRandomSampling(RandomSampling):
             else:
                 approx_cond = False
             
-            # for acceptable truncation use the approximation, use exact otherwise
+            # for smaller rate use the differentiable approximation
+            # for larger rate use the normal approximation
             return jax.lax.cond(
                 approx_cond, 
                 _jax_wrapped_calc_poisson_diff, 
-                _jax_wrapped_calc_poisson_exact, 
+                _jax_wrapped_calc_poisson_normal_approx, 
                 key, rate, params
             )
         return _jax_wrapped_calc_poisson_approx        
