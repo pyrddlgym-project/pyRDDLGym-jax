@@ -29,12 +29,24 @@
 #
 # ***********************************************************************
 
+import traceback
 from typing import Callable, Dict, Union
 
 import jax
 import jax.numpy as jnp
 import jax.random as random
 import jax.scipy as scipy 
+
+from pyRDDLGym.core.debug.exception import raise_warning
+
+# more robust approach - if user does not have this or broken try to continue
+try:
+    from tensorflow_probability.substrates import jax as tfp
+except Exception:
+    raise_warning('Failed to import tensorflow-probability: '
+                  'compilation of some probability distributions will fail.', 'red')
+    traceback.print_exc()
+    tfp = None
 
 
 def enumerate_literals(shape, axis, dtype=jnp.int32):
@@ -339,6 +351,9 @@ class RandomSampling:
     def binomial(self, id, init_params, logic):
         raise NotImplementedError
     
+    def negative_binomial(self, id, init_params, logic):
+        raise NotImplementedError
+    
     def geometric(self, id, init_params, logic):
         raise NotImplementedError
     
@@ -354,7 +369,7 @@ class SoftRandomSampling(RandomSampling):
     
     def __init__(self, poisson_max_bins: int=100, 
                  poisson_min_cdf: float=0.999,
-                 poisson_exp_sampling: bool=True,
+                 poisson_exp_sampling: bool=False,
                  binomial_max_bins: int=100,
                  bernoulli_gumbel_softmax: bool=False) -> None:
         '''Creates a new instance of soft random sampling.
@@ -472,6 +487,18 @@ class SoftRandomSampling(RandomSampling):
             )
         return _jax_wrapped_calc_binomial_approx
     
+    # https://en.wikipedia.org/wiki/Negative_binomial_distribution#Gamma%E2%80%93Poisson_mixture
+    def negative_binomial(self, id, init_params, logic):
+        poisson_approx = self.poisson(id, init_params, logic)
+        def _jax_wrapped_calc_negative_binomial_approx(key, trials, prob, params):
+            key, subkey = random.split(key)
+            trials = jnp.asarray(trials, dtype=logic.REAL)
+            Gamma = random.gamma(key=key, a=trials, dtype=logic.REAL)
+            scale = (1.0 - prob) / prob
+            poisson_rate = scale * Gamma
+            return poisson_approx(subkey, poisson_rate, params)
+        return _jax_wrapped_calc_negative_binomial_approx
+
     def geometric(self, id, init_params, logic):
         approx_floor = logic.floor(id, init_params)
         def _jax_wrapped_calc_geometric_approx(key, prob, params):
@@ -531,6 +558,14 @@ class Determinization(RandomSampling):
     
     def binomial(self, id, init_params, logic):
         return self._jax_wrapped_calc_binomial_determinized
+    
+    @staticmethod
+    def _jax_wrapped_calc_negative_binomial_determinized(key, trials, prob, params):
+        sample = trials * ((1.0 / prob) - 1.0)
+        return sample, params
+
+    def negative_binomial(self, id, init_params, logic):
+        return self._jax_wrapped_calc_negative_binomial_determinized
     
     @staticmethod
     def _jax_wrapped_calc_geometric_determinized(key, prob, params):
@@ -712,7 +747,8 @@ class Logic:
                 'Discrete': self.discrete,
                 'Poisson': self.poisson,
                 'Geometric': self.geometric,
-                'Binomial': self.binomial
+                'Binomial': self.binomial,
+                'NegativeBinomial': self.negative_binomial
             }
         }
 
@@ -828,6 +864,9 @@ class Logic:
         raise NotImplementedError
     
     def binomial(self, id, init_params):
+        raise NotImplementedError
+
+    def negative_binomial(self, id, init_params):
         raise NotImplementedError
 
 
@@ -1005,6 +1044,17 @@ class ExactLogic(Logic):
             sample = jnp.asarray(sample, dtype=self.INT)
             return sample, params
         return _jax_wrapped_calc_binomial_exact
+    
+    # note: for some reason tfp defines it as number of successes before trials failures
+    # I will define it as the number of failures before trials successes
+    def negative_binomial(self, id, init_params):
+        def _jax_wrapped_calc_negative_binomial_exact(key, trials, prob, params):
+            trials = jnp.asarray(trials, dtype=self.REAL)
+            prob = jnp.asarray(prob, dtype=self.REAL)
+            dist = tfp.distributions.NegativeBinomial(total_count=trials, probs=1.0 - prob)
+            sample = jnp.asarray(dist.sample(seed=key), dtype=self.INT)
+            return sample, params
+        return _jax_wrapped_calc_negative_binomial_exact
 
     
 class FuzzyLogic(Logic):
@@ -1234,6 +1284,9 @@ class FuzzyLogic(Logic):
     
     def binomial(self, id, init_params):
         return self.sampling.binomial(id, init_params, self)
+    
+    def negative_binomial(self, id, init_params):
+        return self.sampling.negative_binomial(id, init_params, self)
 
 
 # ===========================================================================
