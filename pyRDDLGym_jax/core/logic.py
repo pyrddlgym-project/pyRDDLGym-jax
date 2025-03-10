@@ -463,12 +463,18 @@ class SoftRandomSampling(RandomSampling):
             )
         return _jax_wrapped_calc_poisson_approx        
     
+    # normal approximation to Binomial: Bin(n, p) -> Normal(np, np(1-p))
+    def _binomial_normal_approx(self, logic):
+        def _jax_wrapped_calc_binomial_normal_approx(key, trials, prob, params):
+            normal = random.normal(key=key, shape=jnp.shape(trials), dtype=logic.REAL)
+            mean = trials * prob
+            std = jnp.sqrt(trials * prob * (1 - prob))
+            sample = mean + std * normal
+            return sample, params    
+        return _jax_wrapped_calc_binomial_normal_approx
+    
     def binomial(self, id, init_params, logic):
-        def _jax_wrapped_calc_binomial_exact(key, trials, prob, params):            
-            trials = jnp.asarray(trials, dtype=logic.REAL)
-            prob = jnp.asarray(prob, dtype=logic.REAL)
-            sample = random.binomial(key=key, n=trials, p=prob, dtype=logic.REAL)
-            return sample, params     
+        _jax_wrapped_calc_binomial_normal_approx = self._binomial_normal_approx(logic)  
         
         # Binomial(n, p) = sum_{i = 1 ... n} Bernoulli(p)
         bernoulli_approx = self.bernoulli(id, init_params, logic)
@@ -487,7 +493,7 @@ class SoftRandomSampling(RandomSampling):
             return jax.lax.cond(
                 jax.lax.stop_gradient(jnp.max(trials) < self.binomial_bins), 
                 _jax_wrapped_calc_binomial_sum, 
-                _jax_wrapped_calc_binomial_exact, 
+                _jax_wrapped_calc_binomial_normal_approx, 
                 key, trials, prob, params
             )
         return _jax_wrapped_calc_binomial_approx
