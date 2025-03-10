@@ -10,6 +10,7 @@ import time
 import jax
 import jax.random as random
 import jax.numpy as jnp
+import optax
 
 import pyRDDLGym
 from pyRDDLGym.core.compiler.model import RDDLLiftedModel
@@ -105,13 +106,13 @@ class JaxMCTSPlanner:
                  batch_size_rollout: int=8,
                  rollout_horizon: Optional[int]=None,
                  alpha_start: float=0.7,
-                 alpha_end: float=0.1,
+                 alpha_end: float=0.2,
                  beta_start: float=0.7,
-                 beta_end: float=0.1,
+                 beta_end: float=0.2,
                  c: float=math.sqrt(2.0),
                  adapt_c: bool=True,
-                 grad_updates: bool=False,
-                 learning_rate: float=0.001,
+                 optimizer=None,
+                 optimizer_kwargs=None,
                  delta: float=0.1,
                  logic: Logic=FuzzyLogic()) -> None:
         '''Creates a new hybrid backprop + UCT-MCTS planner.
@@ -140,10 +141,16 @@ class JaxMCTSPlanner:
         self.beta_decay = (beta_end / beta_start) ** 0.01
         self.c = c
         self.adapt_c = adapt_c
-        self.grad_updates = grad_updates
-        self.lr = learning_rate
+        self.grad_updates = optimizer is not None
         self.delta = delta
         self.logic = logic
+
+        if optimizer is not None:
+            if optimizer_kwargs is None:
+                optimizer_kwargs = { 'learning_rate': 0.01 }
+            self.optimizer = optimizer(**optimizer_kwargs)
+        else:
+            self.optimizer = None
 
         self._jax_compile_rddl()
                     
@@ -331,20 +338,20 @@ class JaxMCTSPlanner:
             else:
                 return True
             
-        def _jax_wrapped_plan_update(key, policy_params, subs, init_actions):
+        def _jax_wrapped_plan_update(key, policy_params, subs, init_actions, opt_state):
             policy_params = {name: jnp.asarray(param, dtype=compiled_with_grad.REAL)
                              for (name, param) in policy_params.items()}
             subs = {name: jnp.asarray(
                         value[jnp.newaxis, ...], dtype=compiled_with_grad.REAL) 
                     for (name, value) in subs.items()}
             grads = jax.grad(_jax_wrapped_plan_loss, argnums=1)(key, policy_params, subs)
-            policy_params = {name: param + self.lr * grads[name]
-                             for (name, param) in policy_params.items()}
+            updates, opt_state = self.optimizer.update(grads, opt_state)
+            policy_params = optax.apply_updates(policy_params, updates)
             policy_params, _ = projection(policy_params, None)
             test_actions = test_policy(key, policy_params, None, 0, subs)
             test_actions = _jax_wrapped_plan_clip(test_actions, init_actions)
             valid_action = _jax_wrapped_check_action_valid(test_actions)
-            return test_actions, valid_action        
+            return test_actions, valid_action, opt_state 
 
         return jax.jit(_jax_wrapped_plan_update)
     
@@ -390,16 +397,19 @@ class JaxMCTSPlanner:
             added = False
         return vD2, added, key
 
-    def _grad_update(self, vD, vC, actions, length, subs, key):
+    def _grad_update(self, vD, vC, actions, length, subs, key, opt_state):
         plan = {name: action[np.newaxis, ...] 
                 for (name, action) in vC.action.value.items()}
         length = min(length + 1, self.T)
         update = 0
         if self.grad_updates and actions is not None:
             plan = {name: np.concatenate([action, actions[name]], axis=0)[:self.T, ...]
-                    for (name, action) in plan.items()}            
+                    for (name, action) in plan.items()}        
+            if opt_state is None:
+                opt_state = self.optimizer.init(plan)    
             if length >= self.T:
-                new_action, valid = self.update_slp_fn(key, plan, subs, vC.init_action)
+                new_action, valid, opt_state = self.update_slp_fn(
+                    key, plan, subs, vC.init_action, opt_state)
                 if valid:
                     new_action = HashableDict(new_action)
                     vD.children[new_action] = vD.children.pop(vC.action)
@@ -407,9 +417,9 @@ class JaxMCTSPlanner:
                     for (name, action) in plan.items():
                         action[0] = new_action.value[name]
                     update = 1
-        return plan, length, update
+        return plan, length, update, opt_state
     
-    def _simulate(self, subs, vD, t, c, key, alpha, beta):
+    def _simulate(self, subs, vD, t, c, key, alpha, beta, opt_state):
 
         # update the MCTS tree normally
         if t == self.T:
@@ -427,8 +437,8 @@ class JaxMCTSPlanner:
         elif rollout:
             R2, key, actions, length = self.rollout_fn(subs, t + 1, key)
         else:
-            R2, key, actions, length, depth, d_subnodes, c_subnodes, grad_updates = \
-                self._simulate(subs, vD2, t + 1, c, key, alpha, beta)
+            R2, key, actions, length, depth, d_subnodes, c_subnodes, grad_updates, opt_state = \
+                self._simulate(subs, vD2, t + 1, c, key, alpha, beta, opt_state)
             total_depth += depth
             total_d_subnodes += d_subnodes
             total_c_subnodes += c_subnodes
@@ -439,11 +449,12 @@ class JaxMCTSPlanner:
         vD.n_chance_subnodes += total_c_subnodes
        
         # perform an optional gradient update on the immediate action
-        actions, length, updates = self._grad_update(vD, vC, actions, length, subs0, key)
+        actions, length, updates, opt_state = self._grad_update(
+            vD, vC, actions, length, subs0, key, opt_state)
         total_grad_updates += updates
 
         return R, key, actions, length, \
-            total_depth, total_d_subnodes, total_c_subnodes, total_grad_updates
+            total_depth, total_d_subnodes, total_c_subnodes, total_grad_updates, opt_state
     
     def _state_to_subs(self, subs):
         rddl = self.rddl
@@ -481,6 +492,7 @@ class JaxMCTSPlanner:
         subs = self._state_to_subs(subs)
         vD = DecisionNode() if root is None else root
         c = self.c if c_guess is None else c_guess
+        opt_state = None
 
         # initialize statistics
         avg_depth = 0
@@ -497,8 +509,8 @@ class JaxMCTSPlanner:
             # update MCTS tree
             alpha = self.alpha_start * self.alpha_decay ** progress_percent
             beta = self.beta_start * self.beta_decay ** progress_percent
-            R, key, _, _, depth, _, _, grad_updates = self._simulate(
-                subs, vD, 0, c, key, alpha, beta)
+            R, key, _, _, depth, _, _, grad_updates, opt_state = self._simulate(
+                subs, vD, 0, c, key, alpha, beta, opt_state)
             if self.adapt_c:
                 c += (abs(R) - c) / (it + 1)
             
@@ -635,7 +647,7 @@ class JaxMCTSController(BaseAgent):
 
 
 if __name__ == '__main__':
-    env = pyRDDLGym.make('Pendulum_gym', '0', vectorized=True)
+    env = pyRDDLGym.make('Reservoir_Continuous', '0', vectorized=True)
     rddl = env.model
     rddl.horizon = 120
     
@@ -643,10 +655,10 @@ if __name__ == '__main__':
     agent = JaxMCTSController(
         JaxMCTSPlanner(
             rddl, 
-            rollout_horizon=20, 
+            rollout_horizon=5, 
             delta=0.1,
-            learning_rate=0.1,
-            grad_updates=False),
+            optimizer=optax.rmsprop,
+            optimizer_kwargs={'learning_rate':0.003}),
         train_seconds=1
     )
     
