@@ -6,7 +6,7 @@ import pyRDDLGym
 from pyRDDLGym_jax.core.planner import JaxOnlineController, JaxBackpropPlanner, load_config
 
 
-NUM_TRIALS = 5
+NUM_TRIALS = 20
 
     
 def main(instance):
