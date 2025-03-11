@@ -6,7 +6,7 @@ import pyRDDLGym
 from pyRDDLGym_gurobi.core.planner import GurobiOnlineController, load_config
 
 
-NUM_TRIALS = 5
+NUM_TRIALS = 20
 
     
 def main(instance):
