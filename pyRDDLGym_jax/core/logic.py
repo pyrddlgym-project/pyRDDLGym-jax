@@ -401,8 +401,7 @@ class SoftRandomSampling(RandomSampling):
     def _poisson_gumbel_softmax(self, id, init_params, logic):        
         argmax_approx = logic.argmax(id, init_params)
         def _jax_wrapped_calc_poisson_gumbel_softmax(key, rate, params):
-            ks = jnp.arange(0, self.poisson_bins)
-            ks = ks[(jnp.newaxis,) * jnp.ndim(rate) + (...,)]
+            ks = jnp.arange(self.poisson_bins)[(jnp.newaxis,) * jnp.ndim(rate) + (...,)]
             rate = rate[..., jnp.newaxis]
             log_prob = ks * jnp.log(rate + logic.eps) - rate - scipy.special.gammaln(ks + 1)
             Gumbel01 = random.gumbel(key=key, shape=jnp.shape(log_prob), dtype=logic.REAL)
@@ -415,10 +414,7 @@ class SoftRandomSampling(RandomSampling):
         less_approx = logic.less(id, init_params)
         def _jax_wrapped_calc_poisson_exponential(key, rate, params):
             Exp1 = random.exponential(
-                key=key, 
-                shape=(self.poisson_bins,) + jnp.shape(rate), 
-                dtype=logic.REAL
-            )
+                key=key,  shape=(self.poisson_bins,) + jnp.shape(rate), dtype=logic.REAL)
             delta_t = Exp1 / rate[jnp.newaxis, ...]
             times = jnp.cumsum(delta_t, axis=0)
             indicator, params = less_approx(times, 1.0, params)
@@ -467,29 +463,34 @@ class SoftRandomSampling(RandomSampling):
             return sample, params    
         return _jax_wrapped_calc_binomial_normal_approx
         
-    # Binomial(n, p) = sum_{i = 1 ... n} Bernoulli(p)
-    def _binomial_sum(self, id, init_params, logic):
-        bernoulli_approx = self.bernoulli(id, init_params, logic)
-        def _jax_wrapped_calc_binomial_sum(key, trials, prob, params):
-            prob_full = jnp.broadcast_to(
-                prob[..., jnp.newaxis], shape=jnp.shape(prob) + (self.binomial_bins,))
-            sample_bern, params = bernoulli_approx(key, prob_full, params)
-            indices = jnp.arange(self.binomial_bins)[
-                (jnp.newaxis,) * jnp.ndim(prob) + (...,)]
-            mask = indices < trials[..., jnp.newaxis]
-            sample = jnp.sum(sample_bern * mask, axis=-1)
-            return sample, params
-        return _jax_wrapped_calc_binomial_sum
+    def _binomial_gumbel_softmax(self, id, init_params, logic):
+        argmax_approx = logic.argmax(id, init_params)
+        def _jax_wrapped_calc_binomial_gumbel_softmax(key, trials, prob, params):
+            ks = jnp.arange(self.binomial_bins)[(jnp.newaxis,) * jnp.ndim(trials) + (...,)]
+            trials = trials[..., jnp.newaxis]
+            prob = prob[..., jnp.newaxis]
+            in_support = ks <= trials
+            ks = jnp.minimum(ks, trials)
+            log_prob = ((scipy.special.gammaln(trials + 1) - 
+                         scipy.special.gammaln(ks + 1) - 
+                         scipy.special.gammaln(trials - ks + 1)) +
+                        ks * jnp.log(prob + logic.eps) + 
+                        (trials - ks) * jnp.log(1.0 - prob + logic.eps))
+            log_prob = jnp.where(in_support, log_prob, jnp.log(logic.eps))
+            Gumbel01 = random.gumbel(key=key, shape=jnp.shape(log_prob), dtype=logic.REAL)
+            sample = Gumbel01 + log_prob
+            return argmax_approx(sample, axis=-1, params=params)
+        return _jax_wrapped_calc_binomial_gumbel_softmax
         
     def binomial(self, id, init_params, logic):
         _jax_wrapped_calc_binomial_normal = self._binomial_normal_approx(logic)  
-        _jax_wrapped_calc_binomial_sum = self._binomial_sum(id, init_params, logic)
+        _jax_wrapped_calc_binomial_gs = self._binomial_gumbel_softmax(id, init_params, logic)
         
         # for small trials use the Bernoulli relaxation
         # for large trials use the normal approximation
         def _jax_wrapped_calc_binomial_approx(key, trials, prob, params):
             small_trials = jax.lax.stop_gradient(trials < self.binomial_bins)
-            small_sample, params = _jax_wrapped_calc_binomial_sum(key, trials, prob, params)
+            small_sample, params = _jax_wrapped_calc_binomial_gs(key, trials, prob, params)
             large_sample, params = _jax_wrapped_calc_binomial_normal(key, trials, prob, params)
             sample = jax.lax.select(small_trials, small_sample, large_sample)
             return sample, params
