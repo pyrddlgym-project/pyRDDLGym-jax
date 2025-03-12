@@ -30,7 +30,7 @@
 # ***********************************************************************
 
 import traceback
-from typing import Callable, Dict, Union
+from typing import Callable, Dict, Tuple, Union
 
 import jax
 import jax.numpy as jnp
@@ -49,7 +49,7 @@ except Exception:
     tfp = None
 
 
-def enumerate_literals(shape, axis, dtype=jnp.int32):
+def enumerate_literals(shape: Tuple[int, ...], axis: int, dtype: type=jnp.int32) -> jnp.ndarray:
     literals = jnp.arange(shape[axis], dtype=dtype)
     literals = literals[(...,) + (jnp.newaxis,) * (len(shape) - 1)]
     literals = jnp.moveaxis(literals, source=0, destination=axis)
@@ -86,7 +86,7 @@ class Comparison:
 class SigmoidComparison(Comparison):
     '''Comparison operations approximated using sigmoid functions.'''
     
-    def __init__(self, weight: float=10.0):
+    def __init__(self, weight: float=10.0) -> None:
         self.weight = weight
         
     # https://arxiv.org/abs/2110.05651
@@ -152,7 +152,7 @@ class Rounding:
 class SoftRounding(Rounding):
     '''Rounding operations approximated using soft operations.'''
     
-    def __init__(self, weight: float=10.0):
+    def __init__(self, weight: float=10.0) -> None:
         self.weight = weight
         
     # https://www.tensorflow.org/probability/api_docs/python/tfp/substrates/jax/bijectors/Softfloor
@@ -303,7 +303,7 @@ class YagerTNorm(TNorm):
     '''Yager t-norm given by the expression 
     (x, y) -> max(1 - ((1 - x)^p + (1 - y)^p)^(1/p)).'''
     
-    def __init__(self, p=2.0):
+    def __init__(self, p: float=2.0) -> None:
         self.p = float(p)
     
     def norm(self, id, init_params):
