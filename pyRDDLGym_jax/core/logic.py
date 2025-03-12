@@ -447,7 +447,7 @@ class SoftRandomSampling(RandomSampling):
                 small_rate = jax.lax.stop_gradient(cuml_prob >= self.poisson_min_cdf)
                 small_sample, params = _jax_wrapped_calc_poisson_diff(key, rate, params)
                 large_sample, params = _jax_wrapped_calc_poisson_normal(key, rate, params)
-                sample = jax.lax.select(small_rate, small_sample, large_sample)
+                sample = jnp.where(small_rate, small_sample, large_sample)
                 return sample, params
             else:
                 return _jax_wrapped_calc_poisson_normal(key, rate, params)
@@ -492,7 +492,7 @@ class SoftRandomSampling(RandomSampling):
             small_trials = jax.lax.stop_gradient(trials < self.binomial_bins)
             small_sample, params = _jax_wrapped_calc_binomial_gs(key, trials, prob, params)
             large_sample, params = _jax_wrapped_calc_binomial_normal(key, trials, prob, params)
-            sample = jax.lax.select(small_trials, small_sample, large_sample)
+            sample = jnp.where(small_trials, small_sample, large_sample)
             return sample, params
         return _jax_wrapped_calc_binomial_approx
     
