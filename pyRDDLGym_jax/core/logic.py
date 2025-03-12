@@ -458,7 +458,7 @@ class SoftRandomSampling(RandomSampling):
         def _jax_wrapped_calc_binomial_normal_approx(key, trials, prob, params):
             normal = random.normal(key=key, shape=jnp.shape(trials), dtype=logic.REAL)
             mean = trials * prob
-            std = jnp.sqrt(trials * prob * (1 - prob))
+            std = jnp.sqrt(trials * prob * (1.0 - prob))
             sample = mean + std * normal
             return sample, params    
         return _jax_wrapped_calc_binomial_normal_approx
@@ -475,7 +475,7 @@ class SoftRandomSampling(RandomSampling):
                          scipy.special.gammaln(ks + 1) - 
                          scipy.special.gammaln(trials - ks + 1)) +
                         ks * jnp.log(prob + logic.eps) + 
-                        (trials - ks) * jnp.log(1.0 - prob + logic.eps))
+                        (trials - ks) * jnp.log1p(-prob + logic.eps))
             log_prob = jnp.where(in_support, log_prob, jnp.log(logic.eps))
             Gumbel01 = random.gumbel(key=key, shape=jnp.shape(log_prob), dtype=logic.REAL)
             sample = Gumbel01 + log_prob
@@ -512,7 +512,8 @@ class SoftRandomSampling(RandomSampling):
         approx_floor = logic.floor(id, init_params)
         def _jax_wrapped_calc_geometric_approx(key, prob, params):
             U = random.uniform(key=key, shape=jnp.shape(prob), dtype=logic.REAL)
-            floor, params = approx_floor(jnp.log1p(-U) / jnp.log1p(-prob), params)
+            floor, params = approx_floor(
+                jnp.log1p(-U) / jnp.log1p(-prob + logic.eps), params)
             sample = floor + 1
             return sample, params
         return _jax_wrapped_calc_geometric_approx
