@@ -29,6 +29,7 @@
 #
 # ***********************************************************************
 
+from abc import ABCMeta, abstractmethod
 import traceback
 from typing import Callable, Dict, Tuple, Union
 
@@ -64,23 +65,28 @@ def enumerate_literals(shape: Tuple[int, ...], axis: int, dtype: type=jnp.int32)
 #
 # ===========================================================================
 
-class Comparison:
+class Comparison(metaclass=ABCMeta):
     '''Base class for approximate comparison operations.'''
     
+    @abstractmethod
     def greater_equal(self, id, init_params):
-        raise NotImplementedError
+        pass
     
+    @abstractmethod
     def greater(self, id, init_params):
-        raise NotImplementedError
+        pass
     
+    @abstractmethod
     def equal(self, id, init_params):
-        raise NotImplementedError
+        pass
     
+    @abstractmethod
     def sgn(self, id, init_params):
-        raise NotImplementedError
+        pass
     
+    @abstractmethod
     def argmax(self, id, init_params):
-        raise NotImplementedError
+        pass
     
 
 class SigmoidComparison(Comparison):
@@ -139,14 +145,16 @@ class SigmoidComparison(Comparison):
 #
 # ===========================================================================
 
-class Rounding:
+class Rounding(metaclass=ABCMeta):
     '''Base class for approximate rounding operations.'''
     
+    @abstractmethod
     def floor(self, id, init_params):
-        raise NotImplementedError
+        pass
     
+    @abstractmethod
     def round(self, id, init_params):
-        raise NotImplementedError
+        pass
 
 
 class SoftRounding(Rounding):
@@ -189,11 +197,12 @@ class SoftRounding(Rounding):
 #
 # ===========================================================================
 
-class Complement:
+class Complement(metaclass=ABCMeta):
     '''Base class for approximate logical complement operations.'''
     
+    @abstractmethod
     def __call__(self, id, init_params):
-        raise NotImplementedError
+        pass
 
 
 class StandardComplement(Complement):
@@ -222,16 +231,18 @@ class StandardComplement(Complement):
 # https://www.sciencedirect.com/science/article/abs/pii/016501149190171L
 # ===========================================================================
 
-class TNorm:
+class TNorm(metaclass=ABCMeta):
     '''Base class for fuzzy differentiable t-norms.'''
     
+    @abstractmethod
     def norm(self, id, init_params):
         '''Elementwise t-norm of x and y.'''
-        raise NotImplementedError
+        pass
     
+    @abstractmethod
     def norms(self, id, init_params):
         '''T-norm computed for tensor x along axis.'''
-        raise NotImplementedError
+        pass
     
 
 class ProductTNorm(TNorm):
@@ -339,26 +350,32 @@ class YagerTNorm(TNorm):
 #
 # ===========================================================================
 
-class RandomSampling:
+class RandomSampling(metaclass=ABCMeta):
     '''Describes how non-reparameterizable random variables are sampled.'''
     
+    @abstractmethod
     def discrete(self, id, init_params, logic):
-        raise NotImplementedError
+        pass
     
+    @abstractmethod
     def poisson(self, id, init_params, logic):
-        raise NotImplementedError
+        pass
     
+    @abstractmethod
     def binomial(self, id, init_params, logic):
-        raise NotImplementedError
+        pass
     
+    @abstractmethod
     def negative_binomial(self, id, init_params, logic):
-        raise NotImplementedError
+        pass
     
+    @abstractmethod
     def geometric(self, id, init_params, logic):
-        raise NotImplementedError
+        pass
     
+    @abstractmethod
     def bernoulli(self, id, init_params, logic):
-        raise NotImplementedError
+        pass
     
     def __str__(self) -> str:
         return 'RandomSampling'
@@ -603,14 +620,16 @@ class Determinization(RandomSampling):
 #
 # ===========================================================================
 
-class ControlFlow:
+class ControlFlow(metaclass=ABCMeta):
     '''A base class for control flow, including if and switch statements.'''
     
+    @abstractmethod
     def if_then_else(self, id, init_params):
-        raise NotImplementedError
+        pass
     
+    @abstractmethod
     def switch(self, id, init_params):
-        raise NotImplementedError
+        pass
 
 
 class SoftControlFlow(ControlFlow):
@@ -651,7 +670,7 @@ class SoftControlFlow(ControlFlow):
 # ===========================================================================
 
 
-class Logic:
+class Logic(metaclass=ABCMeta):
     '''A base class for representing logic computations in JAX.'''
     
     def __init__(self, use64bit: bool=False) -> None:
@@ -765,119 +784,150 @@ class Logic:
     # ===========================================================================
     # logical operators
     # ===========================================================================
-     
+    
+    @abstractmethod
     def logical_and(self, id, init_params):
-        raise NotImplementedError
+        pass
     
+    @abstractmethod
     def logical_not(self, id, init_params):
-        raise NotImplementedError
+        pass
     
+    @abstractmethod
     def logical_or(self, id, init_params):
-        raise NotImplementedError
+        pass
     
+    @abstractmethod
     def xor(self, id, init_params):
-        raise NotImplementedError
+        pass
     
+    @abstractmethod
     def implies(self, id, init_params):
-        raise NotImplementedError
+        pass
     
+    @abstractmethod
     def equiv(self, id, init_params):
-        raise NotImplementedError
+        pass
     
+    @abstractmethod
     def forall(self, id, init_params):
-        raise NotImplementedError
+        pass
     
+    @abstractmethod
     def exists(self, id, init_params):    
-        raise NotImplementedError 
+        pass
     
     # ===========================================================================
     # comparison operators
     # ===========================================================================
     
+    @abstractmethod
     def greater_equal(self, id, init_params):
-        raise NotImplementedError 
+        pass
     
+    @abstractmethod
     def greater(self, id, init_params):
-        raise NotImplementedError 
+        pass
     
+    @abstractmethod
     def less_equal(self, id, init_params):
-        raise NotImplementedError 
+        pass
     
+    @abstractmethod
     def less(self, id, init_params):
-        raise NotImplementedError 
+        pass
     
+    @abstractmethod
     def equal(self, id, init_params):
-        raise NotImplementedError 
+        pass
     
+    @abstractmethod
     def not_equal(self, id, init_params):
-        raise NotImplementedError 
+        pass
     
     # ===========================================================================
     # special functions
     # ===========================================================================
      
+    @abstractmethod
     def sgn(self, id, init_params):
-        raise NotImplementedError 
+        pass
     
+    @abstractmethod
     def floor(self, id, init_params):
-        raise NotImplementedError 
+        pass
     
+    @abstractmethod
     def round(self, id, init_params):
-        raise NotImplementedError 
+        pass
     
+    @abstractmethod
     def ceil(self, id, init_params):
-        raise NotImplementedError 
+        pass 
     
+    @abstractmethod
     def div(self, id, init_params):
-        raise NotImplementedError 
+        pass 
     
+    @abstractmethod
     def mod(self, id, init_params):
-        raise NotImplementedError 
+        pass
     
+    @abstractmethod
     def sqrt(self, id, init_params):
-        raise NotImplementedError 
+        pass
     
     # ===========================================================================
     # indexing
     # ===========================================================================
-     
-    def argmax(self, id, init_params):   
-        raise NotImplementedError  
     
+    @abstractmethod
+    def argmax(self, id, init_params):   
+        pass
+    
+    @abstractmethod
     def argmin(self, id, init_params):   
-        raise NotImplementedError     
+        pass
     
     # ===========================================================================
     # control flow
     # ===========================================================================
      
+    @abstractmethod
     def control_if(self, id, init_params):
-        raise NotImplementedError
+        pass
         
+    @abstractmethod
     def control_switch(self, id, init_params):
-        raise NotImplementedError
+        pass
     
     # ===========================================================================
     # random variables
     # ===========================================================================
      
+    @abstractmethod
     def discrete(self, id, init_params):
-        raise NotImplementedError
+        pass
     
+    @abstractmethod
     def bernoulli(self, id, init_params):
-        raise NotImplementedError
+        pass
     
+    @abstractmethod
     def poisson(self, id, init_params):
-        raise NotImplementedError
+        pass
     
+    @abstractmethod
     def geometric(self, id, init_params):
-        raise NotImplementedError
+        pass
     
+    @abstractmethod
     def binomial(self, id, init_params):
-        raise NotImplementedError
+        pass
 
+    @abstractmethod
     def negative_binomial(self, id, init_params):
-        raise NotImplementedError
+        pass
 
 
 class ExactLogic(Logic):
