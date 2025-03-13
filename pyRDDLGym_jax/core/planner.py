@@ -2275,7 +2275,6 @@ r"""
         best_params, best_loss, best_grad = policy_params, jnp.inf, None
         last_iter_improve = 0
         rolling_test_loss = RollingMean(test_rolling_window)
-        test_log = None
         status = JaxPlannerStatus.NORMAL
         progress_percent = 0
         
@@ -2296,6 +2295,11 @@ r"""
         else:
             progress_bar = None
         position_str = '' if tqdm_position is None else f'[{tqdm_position}]'
+
+        # error handlers (to avoid spam messaging)
+        policy_constraint_msg_shown = False
+        jax_train_msg_shown = False
+        jax_test_msg_shown = False
         
         # ======================================================================
         # MAIN TRAINING LOOP BEGINS
@@ -2358,11 +2362,12 @@ r"""
             
             # constraint satisfaction problem
             if not np.all(converged):                
-                if progress_bar is not None:
+                if progress_bar is not None and not policy_constraint_msg_shown:
                     message = termcolor.colored(
                         '[FAIL] Policy update failed to satisfy action constraints.',
                         'red')
                     progress_bar.write(message)
+                    policy_constraint_msg_shown = True
                 status = JaxPlannerStatus.PRECONDITION_POSSIBLY_UNSATISFIED
             
             # numerical error
@@ -2378,6 +2383,35 @@ r"""
                     progress_bar.write(message)
                 status = JaxPlannerStatus.INVALID_GRADIENT
               
+            # problem in the model compilation
+            if progress_bar is not None:
+
+                # train model
+                if not jax_train_msg_shown:
+                    messages = set()
+                    for error_code in np.unique(train_log['error']):
+                        messages.update(JaxRDDLCompiler.get_error_messages(error_code))
+                    if messages:
+                        messages = '\n    '.join(messages)
+                        message = termcolor.colored(
+                            f'[FAIL] Compiler encountered the following '
+                            f'error(s) in the training model:\n    {messages}', 'red')
+                    progress_bar.write(message)  
+                    jax_train_msg_shown = True
+
+                # test model
+                if not jax_test_msg_shown:
+                    messages = set()
+                    for error_code in np.unique(test_log['error']):
+                        messages.update(JaxRDDLCompiler.get_error_messages(error_code))
+                    if messages:
+                        messages = '\n    '.join(messages)
+                        message = termcolor.colored(
+                            f'[FAIL] Compiler encountered the following '
+                            f'error(s) in the testing model:\n    {messages}', 'red')
+                        progress_bar.write(message)    
+                        jax_test_msg_shown = True      
+        
             # reached computation budget
             elapsed = time.time() - start_time - elapsed_outside_loop
             if elapsed >= train_seconds:
@@ -2447,18 +2481,6 @@ r"""
         # POST-PROCESSING AND CLEANUP
         # ====================================================================== 
 
-        # validate the test return
-        if test_log is not None and progress_bar is not None:
-            messages = set()
-            for error_code in np.unique(test_log['error']):
-                messages.update(JaxRDDLCompiler.get_error_messages(error_code))
-            if messages:
-                messages = '\n'.join(messages)
-                message = termcolor.colored(
-                    f'[FAIL] Compiler encountered the following '
-                    f'error(s) during test evaluation:\n{messages}', 'red')
-                progress_bar.write(message)            
-        
         # release resources
         if print_progress:
             progress_bar.close()
