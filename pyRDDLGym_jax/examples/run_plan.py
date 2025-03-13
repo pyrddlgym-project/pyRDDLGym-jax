@@ -36,8 +36,8 @@ def main(domain, instance, method, episodes=1):
         abs_path = os.path.dirname(os.path.abspath(__file__))
         config_path = os.path.join(abs_path, 'configs', f'{domain}_{method}.cfg') 
         if not os.path.isfile(config_path):
-            raise_warning(f'Config file {config_path} was not found, '
-                          f'using default_{method}.cfg.', 'red')
+            raise_warning(f'[WARNING] Config file {config_path} was not found, '
+                          f'using default_{method}.cfg.', 'yellow')
             config_path = os.path.join(abs_path, 'configs', f'default_{method}.cfg') 
     elif os.path.isfile(method):
         config_path = method
