@@ -31,7 +31,7 @@ def main(domain, instance, method, episodes=1):
     abs_path = os.path.dirname(os.path.abspath(__file__))
     config_path = os.path.join(abs_path, 'configs', f'{domain}_slp.cfg') 
     if not os.path.isfile(config_path):
-        raise_warning(f'[WARNING] Config file {config_path} was not found, '
+        raise_warning(f'[WARN] Config file {config_path} was not found, '
                       f'using default_slp.cfg.', 'yellow')
         config_path = os.path.join(abs_path, 'configs', 'default_slp.cfg') 
     planner_args, _, train_args = load_config(config_path)

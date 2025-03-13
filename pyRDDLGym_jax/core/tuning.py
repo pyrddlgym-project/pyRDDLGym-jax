@@ -18,6 +18,7 @@ import datetime
 import threading
 import multiprocessing
 import os
+import termcolor
 import time
 import traceback
 from typing import Any, Callable, Dict, Iterable, Optional, Tuple
@@ -45,8 +46,7 @@ try:
     from pyRDDLGym_jax.core.visualization import JaxPlannerDashboard
 except Exception:
     raise_warning('Failed to load the dashboard visualization tool: '
-                  'please make sure you have installed the required packages.', 
-                  'red')
+                  'please make sure you have installed the required packages.', 'red')
     traceback.print_exc()
     JaxPlannerDashboard = None
 
@@ -368,7 +368,7 @@ class JaxParameterTuning:
     
     def tune_optimizer(self, optimizer: BayesianOptimization) -> None:
         '''Tunes the Bayesian optimization algorithm hyper-parameters.'''
-        print('\n' + f'The current kernel is {repr(optimizer._gp.kernel_)}.')
+        print(f'Kernel: {repr(optimizer._gp.kernel_)}.')
         
     def tune(self, key: int, log_file: str, show_dashboard: bool=False) -> ParameterValues:
         '''Tunes the hyper-parameters for Jax planner, returns the best found.'''
@@ -445,13 +445,15 @@ class JaxParameterTuning:
                 # check if there is enough time left for another iteration
                 elapsed = time.time() - start_time
                 if elapsed >= self.timeout_tuning:
-                    print(f'global time limit reached at iteration {it}, aborting')
+                    message = termcolor.colored(
+                        f'[INFO] Global time limit reached at iteration {it}.', 'green')
+                    print(message)
                     break
                 
                 # continue with next iteration
                 print('\n' + '*' * 80 + 
                       f'\n[{datetime.timedelta(seconds=elapsed)}] ' + 
-                      f'starting iteration {it + 1}' + 
+                      f'Starting iteration {it + 1}' + 
                       '\n' + '*' * 80)
                 key, *subkeys = jax.random.split(key, num=num_workers + 1)
                 rows = [None] * num_workers
@@ -507,7 +509,10 @@ class JaxParameterTuning:
                 
                 # print best parameter if found
                 if best_target > old_best_target:
-                    print(f'* found new best average reward {best_target:.6f}')
+                    message = termcolor.colored(
+                        f'[INFO] Found new best average reward {best_target:.6f}.', 
+                        'green')
+                    print(message)
                 
                 # tune the optimizer here
                 self.tune_optimizer(optimizer)
@@ -528,7 +533,7 @@ class JaxParameterTuning:
         
         # print summary of results
         elapsed = time.time() - start_time
-        print(f'summary of hyper-parameter optimization:\n'
+        print(f'Summary of hyper-parameter optimization:\n'
               f'    time_elapsed         ={datetime.timedelta(seconds=elapsed)}\n'
               f'    iterations           ={it + 1}\n'
               f'    best_hyper_parameters={best_params}\n'
