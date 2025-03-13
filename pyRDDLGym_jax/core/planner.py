@@ -345,8 +345,8 @@ class JaxPlan:
         self._projection = None
         self.bounds = None
         
-    def summarize_hyperparameters(self) -> None:
-        print(self.__str__())
+    def summarize_hyperparameters(self) -> str:
+        return self.__str__()
         
     def compile(self, compiled: JaxRDDLCompilerWithGrad,
                 _bounds: Bounds,
@@ -1790,8 +1790,8 @@ r"""
                            f'        init_values={values_by_rddl_op[rddl_op]}\n')
         return result
         
-    def summarize_hyperparameters(self) -> None:
-        print(self.__str__())
+    def summarize_hyperparameters(self) -> str:
+        return self.__str__()
         
     # ===========================================================================
     # COMPILATION SUBROUTINES
@@ -2084,9 +2084,9 @@ r"""
         their values: if None initializes all variables from the RDDL instance
         :param guess: initial policy parameters: if None will use the initializer
         specified in this instance
-        :param print_summary: whether to print planner header, parameter 
-        summary, and diagnosis
+        :param print_summary: whether to print planner header and diagnosis
         :param print_progress: whether to print the progress bar during training
+        :param print_hyperparams: whether to print list of hyper-parameter settings
         :param stopping_rule: stopping criterion
         :param test_rolling_window: the test return is averaged on a rolling 
         window of the past test_rolling_window returns when updating the best
@@ -2120,6 +2120,7 @@ r"""
                            guess: Optional[Pytree]=None,
                            print_summary: bool=True,
                            print_progress: bool=True,
+                           print_hyperparams: bool=False,
                            stopping_rule: Optional[JaxPlannerStoppingRule]=None,
                            test_rolling_window: int=10,
                            tqdm_position: Optional[int]=None) -> Generator[Dict[str, Any], None, None]:
@@ -2139,9 +2140,9 @@ r"""
         their values: if None initializes all variables from the RDDL instance
         :param guess: initial policy parameters: if None will use the initializer
         specified in this instance        
-        :param print_summary: whether to print planner header, parameter 
-        summary, and diagnosis
+        :param print_summary: whether to print planner header and diagnosis
         :param print_progress: whether to print the progress bar during training
+        :param print_hyperparams: whether to print list of hyper-parameter settings
         :param stopping_rule: stopping criterion
         :param test_rolling_window: the test return is averaged on a rolling 
         window of the past test_rolling_window returns when updating the best
@@ -2186,7 +2187,8 @@ r"""
         # print summary of parameters:
         if print_summary:
             print(self.summarize_system())
-            self.summarize_hyperparameters()
+        if print_hyperparams:
+            print(self.summarize_hyperparameters())
             print(f'optimize() call hyper-parameters:\n'
                   f'    PRNG key           ={key}\n'
                   f'    max_iterations     ={epochs}\n'
