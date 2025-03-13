@@ -2415,7 +2415,7 @@ r"""
             if stopping_rule is not None and stopping_rule.monitor(callback):
                 if progress_bar is not None:
                     message = termcolor.colored(
-                        '[SUCCESS] Stopping rule has been reached.', 'green')
+                        '[SUCC] Stopping rule has been reached.', 'green')
                     progress_bar.write(message)
                 callback['status'] = status = JaxPlannerStatus.STOPPING_RULE_REACHED  
             
@@ -2528,7 +2528,7 @@ r"""
         
         # likely successful
         return termcolor.colored(
-            '[SUCCESS] Planner converged successfully '
+            '[SUCC] Planner converged successfully '
             '(note: not all problems can be ruled out).', 'green')
         
     def get_action(self, key: random.PRNGKey,
