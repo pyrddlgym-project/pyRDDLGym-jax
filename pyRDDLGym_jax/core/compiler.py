@@ -471,8 +471,7 @@ class JaxRDDLCompiler:
         return printed
     
     def model_parameter_info(self) -> Dict[str, Dict[str, Any]]:
-        '''Returns a dictionary of additional information about model
-        parameters.'''
+        '''Returns a dictionary of additional information about model parameters.'''
         result = {}
         for (id, value) in self.model_params.items():
             expr_id = int(str(id).split('_')[0])

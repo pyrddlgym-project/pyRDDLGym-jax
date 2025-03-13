@@ -37,7 +37,8 @@ import os
 import sys
 import time
 import traceback
-from typing import Any, Callable, Dict, Generator, Optional, Set, Sequence, Type, Tuple, Union
+from typing import Any, Callable, Dict, Generator, Optional, Set, Sequence, Type, Tuple, \
+    Union
 
 import haiku as hk
 import jax
@@ -168,8 +169,7 @@ def _load_config(config, args):
     # policy activation
     plan_activation = plan_kwargs.get('activation', None)
     if plan_activation is not None:
-        activation = _getattr_any(
-            packages=[jax.nn, jax.numpy], item=plan_activation)
+        activation = _getattr_any(packages=[jax.nn, jax.numpy], item=plan_activation)
         if activation is None:
             raise ValueError(f'Invalid activation <{plan_activation}>.')
         else:
@@ -254,8 +254,7 @@ class JaxRDDLCompilerWithGrad(JaxRDDLCompiler):
                  cpfs_without_grad: Optional[Set[str]]=None,
                  **kwargs) -> None:
         '''Creates a new RDDL to Jax compiler, where operations that are not
-        differentiable are converted to approximate forms that have defined 
-        gradients.
+        differentiable are converted to approximate forms that have defined gradients.
         
         :param *args: arguments to pass to base compiler
         :param logic: Fuzzy logic object that specifies how exact operations
@@ -768,7 +767,8 @@ class JaxStraightLinePlan(JaxPlan):
                 for (var, action) in actions.items():
                     if ranges[var] == 'bool':
                         action = jnp.clip(action, min_action, max_action)
-                        new_params[var] = _jax_bool_action_to_param(var, action, hyperparams)
+                        param = _jax_bool_action_to_param(var, action, hyperparams)
+                        new_params[var] = param
                     else:
                         new_params[var] = action                        
                 return new_params, converged
@@ -2425,10 +2425,9 @@ r"""
                     f'{position_str} {it:6} it / {-train_loss:14.5f} train / '
                     f'{-test_loss_smooth:14.5f} test / {-best_loss:14.5f} best / '
                     f'{status.value} status / {total_pgpe_it:6} pgpe',
-                    refresh=False
-                )
+                    refresh=False)
                 progress_bar.set_postfix_str(
-                    f"{(it + 1) / (elapsed + 1e-6):.2f}it/s", refresh=False)
+                    f'{(it + 1) / (elapsed + 1e-6):.2f}it/s', refresh=False)
                 progress_bar.update(progress_percent - progress_bar.n)
             
             # dash-board
@@ -2536,8 +2535,7 @@ r"""
                    step: int,
                    subs: Dict[str, Any],
                    policy_hyperparams: Optional[Dict[str, Any]]=None) -> Dict[str, Any]:
-        '''Returns an action dictionary from the policy or plan with the given
-        parameters.
+        '''Returns an action dictionary from the policy or plan with the given parameters.
         
         :param key: the JAX PRNG key
         :param params: the trainable parameter PyTree of the policy
@@ -2641,8 +2639,7 @@ class JaxOfflineController(BaseAgent):
 
 
 class JaxOnlineController(BaseAgent):
-    '''A container class for a Jax controller continuously updated using state 
-    feedback.'''
+    '''A container class for a Jax controller continuously updated using state feedback.'''
     
     use_tensor_obs = True
     
@@ -2655,8 +2652,7 @@ class JaxOnlineController(BaseAgent):
         loop fashion.
         
         :param planner: underlying planning algorithm for optimizing actions
-        :param key: the RNG key to seed randomness (derives from clock if not
-        provided)
+        :param key: the RNG key to seed randomness (derives from clock if not provided)
         :param eval_hyperparams: policy hyperparameters to apply for evaluation
         or whenever sample_action is called
         :param warm_start: whether to use the previous decision epoch final
