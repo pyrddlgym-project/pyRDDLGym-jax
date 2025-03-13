@@ -157,16 +157,13 @@ def _load_config(config, args):
         initializer = _getattr_any(
             packages=[initializers, hk.initializers], item=plan_initializer)
         if initializer is None:
-            raise_warning(f'Ignoring invalid initializer <{plan_initializer}>.', 'red')
-            del plan_kwargs['initializer']
+            raise ValueError(f'Invalid initializer <{plan_initializer}>.')
         else:
             init_kwargs = plan_kwargs.pop('initializer_kwargs', {})
             try: 
                 plan_kwargs['initializer'] = initializer(**init_kwargs)
             except Exception as _:
-                raise_warning(
-                    f'Ignoring invalid initializer_kwargs <{init_kwargs}>.', 'red')
-                plan_kwargs['initializer'] = initializer
+                raise ValueError(f'Invalid initializer kwargs <{init_kwargs}>.')
     
     # policy activation
     plan_activation = plan_kwargs.get('activation', None)
@@ -174,8 +171,7 @@ def _load_config(config, args):
         activation = _getattr_any(
             packages=[jax.nn, jax.numpy], item=plan_activation)
         if activation is None:
-            raise_warning(f'Ignoring invalid activation <{plan_activation}>.', 'red')
-            del plan_kwargs['activation']
+            raise ValueError(f'Invalid activation <{plan_activation}>.')
         else:
             plan_kwargs['activation'] = activation
     
@@ -188,8 +184,7 @@ def _load_config(config, args):
     if planner_optimizer is not None:
         optimizer = _getattr_any(packages=[optax], item=planner_optimizer)
         if optimizer is None:
-            raise_warning(f'Ignoring invalid optimizer <{planner_optimizer}>.', 'red')
-            del planner_args['optimizer']
+            raise ValueError(f'Invalid optimizer <{planner_optimizer}>.')
         else:
             planner_args['optimizer'] = optimizer
 
@@ -200,8 +195,7 @@ def _load_config(config, args):
         if 'optimizer' in pgpe_kwargs:
             pgpe_optimizer = _getattr_any(packages=[optax], item=pgpe_kwargs['optimizer'])
             if pgpe_optimizer is None:
-                raise_warning(f'Ignoring invalid optimizer <{pgpe_optimizer}>.', 'red')
-                del pgpe_kwargs['optimizer']
+                raise ValueError(f'Invalid optimizer <{pgpe_optimizer}>.')
             else:
                 pgpe_kwargs['optimizer'] = pgpe_optimizer
         planner_args['pgpe'] = getattr(sys.modules[__name__], pgpe_method)(**pgpe_kwargs)
@@ -286,8 +280,10 @@ class JaxRDDLCompilerWithGrad(JaxRDDLCompiler):
             if not np.issubdtype(np.result_type(values), np.floating):
                 pvars_cast.add(var)
         if pvars_cast:
-            raise_warning(f'JAX gradient compiler requires that initial values '
-                          f'of p-variables {pvars_cast} be cast to float.')   
+            message = termcolor.colored(
+                f'[INFO] JAX gradient compiler will cast p-vars {pvars_cast} to float.', 
+                'green')
+            print(message)
         
         # overwrite basic operations with fuzzy ones
         self.OPS = logic.get_operator_dicts()
@@ -312,11 +308,15 @@ class JaxRDDLCompilerWithGrad(JaxRDDLCompiler):
                     jax_cpfs[cpf] = self._jax_stop_grad(jax_cpfs[cpf])
                     
         if cpfs_cast:
-            raise_warning(f'JAX gradient compiler requires that outputs of CPFs '
-                          f'{cpfs_cast} be cast to float.') 
+            message = termcolor.colored(
+                f'[INFO] JAX gradient compiler will cast CPFs {cpfs_cast} to float.', 
+                'green') 
+            print(message)
         if self.cpfs_without_grad:
-            raise_warning(f'User requested that gradients not flow '
-                          f'through CPFs {self.cpfs_without_grad}.')    
+            message = termcolor.colored(
+                f'[INFO] Gradients will not flow through CPFs {self.cpfs_without_grad}.', 
+                'green')    
+            print(message)
  
         return jax_cpfs
     
@@ -421,7 +421,10 @@ class JaxPlan:
                                     ~lower_finite & upper_finite,
                                     ~lower_finite & ~upper_finite]
             bounds[name] = (lower, upper)
-            raise_warning(f'Bounds of action-fluent <{name}> set to {bounds[name]}.')
+            message = termcolor.colored(
+                f'[INFO] Bounds of action-fluent <{name}> set to {bounds[name]}.', 
+                'green')
+            print(message)
         return shapes, bounds, bounds_safe, cond_lists
     
     def _count_bool_actions(self, rddl: RDDLLiftedModel):
@@ -502,10 +505,12 @@ class JaxStraightLinePlan(JaxPlan):
         bool_action_count, allowed_actions = self._count_bool_actions(rddl)
         use_constraint_satisfaction = allowed_actions < bool_action_count        
         if use_constraint_satisfaction: 
-            raise_warning(f'Using projected gradient trick to satisfy '
-                          f'max_nondef_actions: total boolean actions '
-                          f'{bool_action_count} > max_nondef_actions '
-                          f'{allowed_actions}.')
+            message = termcolor.colored(
+                f'[INFO] SLP will use projected gradient to satisfy '
+                f'max_nondef_actions since total boolean actions '
+                f'{bool_action_count} > max_nondef_actions '
+                f'{allowed_actions}.', 'green')
+            print(message)
             
         noop = {var: (values[0] if isinstance(values, list) else values)
                 for (var, values) in rddl.action_fluents.items()}
@@ -642,7 +647,7 @@ class JaxStraightLinePlan(JaxPlan):
             # only allow one action non-noop for now
             if 1 < allowed_actions < bool_action_count:
                 raise RDDLNotImplementedError(
-                    f'Straight-line plans with wrap_softmax currently '
+                    f'SLPs with wrap_softmax currently '
                     f'do not support max-nondef-actions {allowed_actions} > 1.')
                 
             # potentially apply projection but to non-bool actions only
@@ -890,7 +895,7 @@ class JaxDeepReactivePolicy(JaxPlan):
         bool_action_count, allowed_actions = self._count_bool_actions(rddl)
         if 1 < allowed_actions < bool_action_count:
             raise RDDLNotImplementedError(
-                f'Deep reactive policies currently do not support '
+                f'DRPs currently do not support '
                 f'max-nondef-actions {allowed_actions} > 1.')
         use_constraint_satisfaction = allowed_actions < bool_action_count
             
@@ -927,15 +932,17 @@ class JaxDeepReactivePolicy(JaxPlan):
                 if ranges[var] != 'bool':
                     value_size = np.size(values)
                     if normalize_per_layer and value_size == 1:
-                        raise_warning(
-                            f'Cannot apply layer norm to state-fluent <{var}> '
-                            f'of size 1: setting normalize_per_layer = False.', 'red')
+                        message = termcolor.colored(
+                            f'[WARNING] Cannot apply layer norm to state-fluent <{var}> '
+                            f'of size 1: setting normalize_per_layer = False.', 'yellow')
+                        print(message)
                         normalize_per_layer = False
                     non_bool_dims += value_size
             if not normalize_per_layer and non_bool_dims == 1:
-                raise_warning(
-                    'Cannot apply layer norm to state-fluents of total size 1: '
-                    'setting normalize = False.', 'red')
+                message = termcolor.colored(
+                    '[WARNING] Cannot apply layer norm to state-fluents of total size 1: '
+                    'setting normalize = False.', 'yellow')
+                print(message)
                 normalize = False
         
         # convert subs dictionary into a state vector to feed to the MLP
@@ -1268,10 +1275,11 @@ class GaussianPGPE(PGPE):
             mu_optimizer = optax.inject_hyperparams(optimizer)(**optimizer_kwargs_mu)
             sigma_optimizer = optax.inject_hyperparams(optimizer)(**optimizer_kwargs_sigma)
         except Exception as _:
-            raise_warning(
-                f'Failed to inject hyperparameters into optax optimizer for PGPE, '
-                'rolling back to safer method: please note that kl-divergence '
-                'constraints will be disabled.', 'red')
+            message = termcolor.colored(
+                '[FAILURE] Failed to inject hyperparameters into PGPE optimizer, '
+                'rolling back to safer method: '
+                'kl-divergence constraint will be disabled.', 'red')
+            print(message)
             mu_optimizer = optimizer(**optimizer_kwargs_mu)   
             sigma_optimizer = optimizer(**optimizer_kwargs_sigma) 
             max_kl_update = None
@@ -1677,10 +1685,11 @@ class JaxBackpropPlanner:
         try:
             optimizer = optax.inject_hyperparams(optimizer)(**optimizer_kwargs)
         except Exception as _:
-            raise_warning(
-                f'Failed to inject hyperparameters into optax optimizer {optimizer}, '
-                'rolling back to safer method: please note that modification of '
-                'optimizer hyperparameters will not work.', 'red')
+            message = termcolor.colored(
+                '[FAILURE] Failed to inject hyperparameters into JaxPlan optimizer, '
+                'rolling back to safer method: please note that runtime modification of '
+                'hyperparameters will be disabled.', 'red')
+            print(message)
             optimizer = optimizer(**optimizer_kwargs)   
         
         # apply optimizer chain of transformations
@@ -1700,7 +1709,7 @@ class JaxBackpropPlanner:
             utility_fn = UTILITY_LOOKUP.get(utility, None)
             if utility_fn is None:
                 raise RDDLNotImplementedError(
-                    f'Utility <{utility}> is not supported, '
+                    f'Utility function <{utility}> is not supported, '
                     f'must be one of {list(UTILITY_LOOKUP.keys())}.')
         else:
             utility_fn = utility
@@ -1751,7 +1760,23 @@ r"""
                 f'numpy {np.__version__}\n'
                 f'devices: {devices_short}\n')
     
-    def __str__(self) -> str:
+    def summarize_relaxations(self) -> str:
+        result = ''
+        if self.compiled.model_params:
+            result += ('Some RDDL operations are non-differentiable '
+                       'and will be approximated as follows:' + '\n')
+            exprs_by_rddl_op, values_by_rddl_op = {}, {}
+            for info in self.compiled.model_parameter_info().values():
+                rddl_op = info['rddl_op']
+                exprs_by_rddl_op.setdefault(rddl_op, []).append(info['id'])
+                values_by_rddl_op.setdefault(rddl_op, []).append(info['init_value'])
+            for rddl_op in sorted(exprs_by_rddl_op.keys()):
+                result += (f'    {rddl_op}:\n'
+                           f'        addresses  ={exprs_by_rddl_op[rddl_op]}\n'
+                           f'        init_values={values_by_rddl_op[rddl_op]}\n')
+        return result
+        
+    def summarize_hyperparameters(self) -> str:
         result = (f'objective hyper-parameters:\n'
                   f'    utility_fn        ={self.utility.__name__}\n'
                   f'    utility args      ={self.utility_kwargs}\n'
@@ -1774,24 +1799,7 @@ r"""
         if self.use_pgpe:
             result += str(self.pgpe)
         result += str(self.logic)
-        
-        # print model relaxation information
-        if self.compiled.model_params:
-            result += ('Some RDDL operations are non-differentiable '
-                       'and will be approximated as follows:' + '\n')
-            exprs_by_rddl_op, values_by_rddl_op = {}, {}
-            for info in self.compiled.model_parameter_info().values():
-                rddl_op = info['rddl_op']
-                exprs_by_rddl_op.setdefault(rddl_op, []).append(info['id'])
-                values_by_rddl_op.setdefault(rddl_op, []).append(info['init_value'])
-            for rddl_op in sorted(exprs_by_rddl_op.keys()):
-                result += (f'    {rddl_op}:\n'
-                           f'        addresses  ={exprs_by_rddl_op[rddl_op]}\n'
-                           f'        init_values={values_by_rddl_op[rddl_op]}\n')
         return result
-        
-    def summarize_hyperparameters(self) -> str:
-        return self.__str__()
         
     # ===========================================================================
     # COMPILATION SUBROUTINES
@@ -2012,8 +2020,10 @@ r"""
         train_subs, _ = self._batched_init_subs(subs)
         model_params = self.compiled.model_params
         if policy_hyperparams is None:
-            raise_warning('policy_hyperparams is not set, setting 1.0 for '
-                          'all action-fluents which could be suboptimal.')
+            message = termcolor.colored(
+                '[WARNING] policy_hyperparams is not set, setting 1.0 for '
+                'all action-fluents which could be suboptimal.', 'yellow')
+            print(message)
             policy_hyperparams = {action: 1.0 
                                   for action in self.rddl.action_fluents}
                 
@@ -2163,15 +2173,19 @@ r"""
             
         # if policy_hyperparams is not provided
         if policy_hyperparams is None:
-            raise_warning('policy_hyperparams is not set, setting 1.0 for '
-                          'all action-fluents which could be suboptimal.')
+            message = termcolor.colored(
+                '[WARNING] policy_hyperparams is not set, setting 1.0 for '
+                'all action-fluents which could be suboptimal.', 'yellow')
+            print(message)
             policy_hyperparams = {action: 1.0 
                                   for action in self.rddl.action_fluents}
         
         # if policy_hyperparams is a scalar
         elif isinstance(policy_hyperparams, (int, float, np.number)):
-            raise_warning(f'policy_hyperparams is {policy_hyperparams}, '
-                          'setting this value for all action-fluents.')
+            message = termcolor.colored(
+                f'[INFO] policy_hyperparams is {policy_hyperparams}, '
+                'setting this value for all action-fluents.', 'green')
+            print(message)
             hyperparam_value = float(policy_hyperparams)
             policy_hyperparams = {action: hyperparam_value
                                   for action in self.rddl.action_fluents}
@@ -2180,13 +2194,17 @@ r"""
         elif isinstance(policy_hyperparams, dict):
             for action in self.rddl.action_fluents:
                 if action not in policy_hyperparams:
-                    raise_warning(f'policy_hyperparams[{action}] is not set, '
-                                  'setting 1.0 which could be suboptimal.')
+                    message = termcolor.colored(
+                        f'[WARNING] policy_hyperparams[{action}] is not set, '
+                        'setting 1.0 for missing action-fluents '
+                        'which could be suboptimal.', 'yellow')
+                    print(message)
                     policy_hyperparams[action] = 1.0
             
         # print summary of parameters:
         if print_summary:
             print(self.summarize_system())
+            print(self.summarize_relaxations())
         if print_hyperparams:
             print(self.summarize_hyperparameters())
             print(f'optimize() call hyper-parameters:\n'
@@ -2220,9 +2238,11 @@ r"""
                     subs[var] = value
                     added_pvars_to_subs.append(var)
             if added_pvars_to_subs:
-                raise_warning(f'p-variables {added_pvars_to_subs} not in '
-                              'provided subs, using their initial values '
-                              'from the RDDL files.')
+                message = termcolor.colored(
+                    f'[INFO] p-variables {added_pvars_to_subs} is not in '
+                    'provided subs, using their initial values '
+                    'from the RDDL files.', 'green')
+                print(message)
         train_subs, test_subs = self._batched_init_subs(subs)
         
         # initialize model parameters
@@ -2258,7 +2278,7 @@ r"""
         best_params, best_loss, best_grad = policy_params, jnp.inf, None
         last_iter_improve = 0
         rolling_test_loss = RollingMean(test_rolling_window)
-        log = {}
+        test_log = None
         status = JaxPlannerStatus.NORMAL
         progress_percent = 0
         
@@ -2338,13 +2358,14 @@ r"""
             # no progress
             if (not pgpe_improve) and zero_grads:
                 status = JaxPlannerStatus.NO_PROGRESS
-             
+            
             # constraint satisfaction problem
-            if not np.all(converged):
-                raise_warning(
-                    'Projected gradient method for satisfying action concurrency '
-                    'constraints reached the iteration limit: plan is possibly '
-                    'invalid for the current instance.', 'red')
+            if not np.all(converged):                
+                if progress_bar is not None:
+                    message = termcolor.colored(
+                        '[FAILURE] Policy update failed to satisfy action '
+                        'constraints.', 'red')
+                    progress_bar.write(message)
                 status = JaxPlannerStatus.PRECONDITION_POSSIBLY_UNSATISFIED
             
             # numerical error
@@ -2353,7 +2374,11 @@ r"""
             else:
                 invalid_loss = not np.isfinite(train_loss)
             if invalid_loss:
-                raise_warning(f'Planner aborted due to invalid loss {train_loss}.', 'red')
+                if progress_bar is not None:
+                    message = termcolor.colored(
+                        f'[FAILURE] Planner aborted due to '
+                        f'invalid train loss {train_loss}.', 'red')
+                    progress_bar.write(message)
                 status = JaxPlannerStatus.INVALID_GRADIENT
               
             # reached computation budget
@@ -2391,6 +2416,10 @@ r"""
 
             # stopping condition reached
             if stopping_rule is not None and stopping_rule.monitor(callback):
+                if progress_bar is not None:
+                    message = termcolor.colored(
+                        f'[SUCCESS] Stopping rule has been reached.', 'green')
+                    progress_bar.write(message)
                 callback['status'] = status = JaxPlannerStatus.STOPPING_RULE_REACHED  
             
             # if the progress bar is used
@@ -2422,27 +2451,29 @@ r"""
         # POST-PROCESSING AND CLEANUP
         # ====================================================================== 
 
-        # release resources
-        if print_progress:
-            progress_bar.close()
-        
         # validate the test return
-        if log:
+        if test_log is not None and progress_bar is not None:
             messages = set()
-            for error_code in np.unique(log['error']):
+            for error_code in np.unique(test_log['error']):
                 messages.update(JaxRDDLCompiler.get_error_messages(error_code))
             if messages:
                 messages = '\n'.join(messages)
-                raise_warning('JAX compiler encountered the following '
-                              'error(s) in the original RDDL formulation '
-                              f'during test evaluation:\n{messages}', 'red')                               
+                message = termcolor.colored(
+                    f'[FAILURE] Compiler encountered the following '
+                    f'error(s) during test evaluation:\n{messages}', 'red')
+                progress_bar.write(message)            
+        
+        # release resources
+        if print_progress:
+            progress_bar.close()
+            print()
         
         # summarize and test for convergence
         if print_summary:
             grad_norm = jax.tree_map(lambda x: np.linalg.norm(x).item(), best_grad)
             diagnosis = self._perform_diagnosis(
                 last_iter_improve, -train_loss, -test_loss_smooth, -best_loss, grad_norm)
-            print(f'summary of optimization:\n'
+            print(f'Summary of optimization:\n'
                   f'    status        ={status}\n'
                   f'    time          ={elapsed:.3f} sec.\n'
                   f'    iterations    ={it}\n'
@@ -2460,7 +2491,7 @@ r"""
         
         # divergence if the solution is not finite
         if not np.isfinite(train_return):
-            return termcolor.colored('[FAILURE] training loss diverged.', 'red')
+            return termcolor.colored('[FAILURE] Training loss diverged.', 'red')
             
         # hit a plateau is likely IF:
         # 1. planner does not improve at all
@@ -2468,21 +2499,21 @@ r"""
         if last_iter_improve <= 1:
             if grad_is_zero:
                 return termcolor.colored(
-                    '[FAILURE] no progress was made '
+                    '[FAILURE] No progress was made '
                     f'and max grad norm {max_grad_norm:.6f} was zero: '
                     'solver likely stuck in a plateau.', 'red')
             else:
                 return termcolor.colored(
-                    '[FAILURE] no progress was made '
+                    '[FAILURE] No progress was made '
                     f'but max grad norm {max_grad_norm:.6f} was non-zero: '
-                    'learning rate or other hyper-parameters likely suboptimal.', 
+                    'learning rate or other hyper-parameters could be suboptimal.', 
                     'red')
         
         # model is likely poor IF:
         # 1. the train and test return disagree
         if not (validation_error < 20):
             return termcolor.colored(
-                '[WARNING] progress was made '
+                '[WARNING] Progress was made '
                 f'but relative train-test error {validation_error:.6f} was high: '
                 'poor model relaxation around solution or batch size too small.', 
                 'yellow')
@@ -2493,16 +2524,16 @@ r"""
             return_to_grad_norm = abs(best_return) / max_grad_norm
             if not (return_to_grad_norm > 1):
                 return termcolor.colored(
-                    '[WARNING] progress was made '
+                    '[WARNING] Progress was made '
                     f'but max grad norm {max_grad_norm:.6f} was high: '
-                    'solution locally suboptimal '
-                    'or relaxed model not smooth around solution '
+                    'solution locally suboptimal, '
+                    'relaxed model nonsmooth around solution, '
                     'or batch size too small.', 'yellow')
         
         # likely successful
         return termcolor.colored(
-            '[SUCCESS] solver converged successfully '
-            '(note: not all potential problems can be ruled out).', 'green')
+            '[SUCCESS] Planner converged successfully '
+            '(note: not all problems can be ruled out).', 'green')
         
     def get_action(self, key: random.PRNGKey,
                    params: Pytree,
