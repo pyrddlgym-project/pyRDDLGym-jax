@@ -657,9 +657,9 @@ class Logic:
     def __init__(self, use64bit: bool=False) -> None:
         self.set_use64bit(use64bit)
     
-    def summarize_hyperparameters(self) -> None:
-        print(f'model relaxation:\n'
-              f'    use_64_bit    ={self.use64bit}')
+    def summarize_hyperparameters(self) -> str:
+        return (f'model relaxation:\n'
+                f'    use_64_bit    ={self.use64bit}')
     
     def set_use64bit(self, use64bit: bool) -> None:
         '''Toggles whether or not the JAX system will use 64 bit precision.'''
@@ -1109,8 +1109,8 @@ class FuzzyLogic(Logic):
                 f'    underflow_tol={self.eps}\n'
                 f'    use_64_bit   ={self.use64bit}\n')
 
-    def summarize_hyperparameters(self) -> None:
-        print(self.__str__())
+    def summarize_hyperparameters(self) -> str:
+        return self.__str__()
         
     # ===========================================================================
     # logical operators

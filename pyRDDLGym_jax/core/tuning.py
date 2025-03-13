@@ -159,24 +159,24 @@ class JaxParameterTuning:
         kernel3 = Matern(length_scale=5.0, length_scale_bounds=(1.0, 5.0), nu=2.5)
         return weight1 * kernel1 + weight2 * kernel2 + weight3 * kernel3
         
-    def summarize_hyperparameters(self) -> None:
+    def summarize_hyperparameters(self) -> str:
         hyper_params_table = []
         for (_, param) in self.hyperparams_dict.items():
             hyper_params_table.append(f'        {str(param)}')
         hyper_params_table = '\n'.join(hyper_params_table)
-        print(f'hyperparameter optimizer parameters:\n'
-              f'    tuned_hyper_parameters    =\n{hyper_params_table}\n'
-              f'    initialization_args       ={self.gp_init_kwargs}\n'
-              f'    gp_params                 ={self.gp_params}\n'
-              f'    tuning_iterations         ={self.gp_iters}\n'
-              f'    tuning_timeout            ={self.timeout_tuning}\n'
-              f'    tuning_batch_size         ={self.num_workers}\n'
-              f'    mp_pool_context_type      ={self.pool_context}\n'
-              f'    mp_pool_poll_frequency    ={self.poll_frequency}\n'
-              f'meta-objective parameters:\n'
-              f'    planning_trials_per_iter  ={self.eval_trials}\n'
-              f'    rollouts_per_trial        ={self.rollouts_per_trial}\n'
-              f'    acquisition_fn            ={self.acquisition}')
+        return (f'hyperparameter optimizer parameters:\n'
+                f'    tuned_hyper_parameters    =\n{hyper_params_table}\n'
+                f'    initialization_args       ={self.gp_init_kwargs}\n'
+                f'    gp_params                 ={self.gp_params}\n'
+                f'    tuning_iterations         ={self.gp_iters}\n'
+                f'    tuning_timeout            ={self.timeout_tuning}\n'
+                f'    tuning_batch_size         ={self.num_workers}\n'
+                f'    mp_pool_context_type      ={self.pool_context}\n'
+                f'    mp_pool_poll_frequency    ={self.poll_frequency}\n'
+                f'meta-objective parameters:\n'
+                f'    planning_trials_per_iter  ={self.eval_trials}\n'
+                f'    rollouts_per_trial        ={self.rollouts_per_trial}\n'
+                f'    acquisition_fn            ={self.acquisition}')
         
     @staticmethod
     def annealing_acquisition(n_samples: int, n_delay_samples: int=0,
@@ -373,7 +373,7 @@ class JaxParameterTuning:
     def tune(self, key: int, log_file: str, show_dashboard: bool=False) -> ParameterValues:
         '''Tunes the hyper-parameters for Jax planner, returns the best found.'''
         
-        self.summarize_hyperparameters()
+        print(self.summarize_hyperparameters())
         
         # clear and prepare output file
         with open(log_file, 'w', newline='') as file:
