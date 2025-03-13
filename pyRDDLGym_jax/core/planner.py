@@ -27,7 +27,7 @@
 #
 # ***********************************************************************
 
-
+from abc import ABCMeta, abstractmethod
 from ast import literal_eval
 from collections import deque
 import configparser
@@ -334,7 +334,7 @@ class JaxRDDLCompilerWithGrad(JaxRDDLCompiler):
 # ***********************************************************************
 
 
-class JaxPlan:
+class JaxPlan(metaclass=ABCMeta):
     '''Base class for all JAX policy representations.'''
     
     def __init__(self) -> None:
@@ -346,14 +346,16 @@ class JaxPlan:
         
     def summarize_hyperparameters(self) -> str:
         return self.__str__()
-        
+    
+    @abstractmethod
     def compile(self, compiled: JaxRDDLCompilerWithGrad,
                 _bounds: Bounds,
                 horizon: int) -> None:
-        raise NotImplementedError
+        pass
     
+    @abstractmethod
     def guess_next_epoch(self, params: Pytree) -> Pytree:
-        raise NotImplementedError
+        pass
     
     @property
     def initializer(self):
@@ -1152,14 +1154,16 @@ class JaxPlannerStatus(Enum):
         return self.value == 1 or self.value >= 4
 
 
-class JaxPlannerStoppingRule:
+class JaxPlannerStoppingRule(metaclass=ABCMeta):
     '''The base class of all planner stopping rules.'''
     
+    @abstractmethod
     def reset(self) -> None:
-        raise NotImplementedError
-        
+        pass
+    
+    @abstractmethod
     def monitor(self, callback: Dict[str, Any]) -> bool:
-        raise NotImplementedError
+        pass
     
 
 class NoImprovementStoppingRule(JaxPlannerStoppingRule):
@@ -1193,7 +1197,7 @@ class NoImprovementStoppingRule(JaxPlannerStoppingRule):
 # ***********************************************************************
 
 
-class PGPE:
+class PGPE(metaclass=ABCMeta):
     """Base class for all PGPE strategies."""
 
     def __init__(self) -> None:
@@ -1208,8 +1212,9 @@ class PGPE:
     def update(self):
         return self._update
 
+    @abstractmethod
     def compile(self, loss_fn: Callable, projection: Callable, real_dtype: Type) -> None:
-        raise NotImplementedError
+        pass
 
 
 class GaussianPGPE(PGPE):
