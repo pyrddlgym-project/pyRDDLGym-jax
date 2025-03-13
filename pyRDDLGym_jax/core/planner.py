@@ -508,8 +508,7 @@ class JaxStraightLinePlan(JaxPlan):
             message = termcolor.colored(
                 f'[INFO] SLP will use projected gradient to satisfy '
                 f'max_nondef_actions since total boolean actions '
-                f'{bool_action_count} > max_nondef_actions '
-                f'{allowed_actions}.', 'green')
+                f'{bool_action_count} > max_nondef_actions {allowed_actions}.', 'green')
             print(message)
             
         noop = {var: (values[0] if isinstance(values, list) else values)
@@ -895,8 +894,7 @@ class JaxDeepReactivePolicy(JaxPlan):
         bool_action_count, allowed_actions = self._count_bool_actions(rddl)
         if 1 < allowed_actions < bool_action_count:
             raise RDDLNotImplementedError(
-                f'DRPs currently do not support '
-                f'max-nondef-actions {allowed_actions} > 1.')
+                f'DRPs currently do not support max-nondef-actions {allowed_actions} > 1.')
         use_constraint_satisfaction = allowed_actions < bool_action_count
             
         noop = {var: (values[0] if isinstance(values, list) else values)
@@ -933,14 +931,14 @@ class JaxDeepReactivePolicy(JaxPlan):
                     value_size = np.size(values)
                     if normalize_per_layer and value_size == 1:
                         message = termcolor.colored(
-                            f'[WARNING] Cannot apply layer norm to state-fluent <{var}> '
+                            f'[WARN] Cannot apply layer norm to state-fluent <{var}> '
                             f'of size 1: setting normalize_per_layer = False.', 'yellow')
                         print(message)
                         normalize_per_layer = False
                     non_bool_dims += value_size
             if not normalize_per_layer and non_bool_dims == 1:
                 message = termcolor.colored(
-                    '[WARNING] Cannot apply layer norm to state-fluents of total size 1: '
+                    '[WARN] Cannot apply layer norm to state-fluents of total size 1: '
                     'setting normalize = False.', 'yellow')
                 print(message)
                 normalize = False
@@ -1276,7 +1274,7 @@ class GaussianPGPE(PGPE):
             sigma_optimizer = optax.inject_hyperparams(optimizer)(**optimizer_kwargs_sigma)
         except Exception as _:
             message = termcolor.colored(
-                '[FAILURE] Failed to inject hyperparameters into PGPE optimizer, '
+                '[FAIL] Failed to inject hyperparameters into PGPE optimizer, '
                 'rolling back to safer method: '
                 'kl-divergence constraint will be disabled.', 'red')
             print(message)
@@ -1686,7 +1684,7 @@ class JaxBackpropPlanner:
             optimizer = optax.inject_hyperparams(optimizer)(**optimizer_kwargs)
         except Exception as _:
             message = termcolor.colored(
-                '[FAILURE] Failed to inject hyperparameters into JaxPlan optimizer, '
+                '[FAIL] Failed to inject hyperparameters into JaxPlan optimizer, '
                 'rolling back to safer method: please note that runtime modification of '
                 'hyperparameters will be disabled.', 'red')
             print(message)
@@ -1751,7 +1749,7 @@ r"""
 \/_____/ \/_/\/_/ \/_/\/_/ \/_/    \/_____/ \/_/\/_/ \/_/ \/_/ 
 """
                    
-        return ('\n'
+        return (f'\n'
                 f'{LOGO}\n'
                 f'Version {__version__}\n' 
                 f'Python {sys.version}\n'
@@ -2021,7 +2019,7 @@ r"""
         model_params = self.compiled.model_params
         if policy_hyperparams is None:
             message = termcolor.colored(
-                '[WARNING] policy_hyperparams is not set, setting 1.0 for '
+                '[WARN] policy_hyperparams is not set, setting 1.0 for '
                 'all action-fluents which could be suboptimal.', 'yellow')
             print(message)
             policy_hyperparams = {action: 1.0 
@@ -2174,7 +2172,7 @@ r"""
         # if policy_hyperparams is not provided
         if policy_hyperparams is None:
             message = termcolor.colored(
-                '[WARNING] policy_hyperparams is not set, setting 1.0 for '
+                '[WARN] policy_hyperparams is not set, setting 1.0 for '
                 'all action-fluents which could be suboptimal.', 'yellow')
             print(message)
             policy_hyperparams = {action: 1.0 
@@ -2184,7 +2182,7 @@ r"""
         elif isinstance(policy_hyperparams, (int, float, np.number)):
             message = termcolor.colored(
                 f'[INFO] policy_hyperparams is {policy_hyperparams}, '
-                'setting this value for all action-fluents.', 'green')
+                f'setting this value for all action-fluents.', 'green')
             print(message)
             hyperparam_value = float(policy_hyperparams)
             policy_hyperparams = {action: hyperparam_value
@@ -2195,9 +2193,9 @@ r"""
             for action in self.rddl.action_fluents:
                 if action not in policy_hyperparams:
                     message = termcolor.colored(
-                        f'[WARNING] policy_hyperparams[{action}] is not set, '
-                        'setting 1.0 for missing action-fluents '
-                        'which could be suboptimal.', 'yellow')
+                        f'[WARN] policy_hyperparams[{action}] is not set, '
+                        f'setting 1.0 for missing action-fluents '
+                        f'which could be suboptimal.', 'yellow')
                     print(message)
                     policy_hyperparams[action] = 1.0
             
@@ -2240,8 +2238,7 @@ r"""
             if added_pvars_to_subs:
                 message = termcolor.colored(
                     f'[INFO] p-variables {added_pvars_to_subs} is not in '
-                    'provided subs, using their initial values '
-                    'from the RDDL files.', 'green')
+                    f'provided subs, using their initial values.', 'green')
                 print(message)
         train_subs, test_subs = self._batched_init_subs(subs)
         
@@ -2363,8 +2360,8 @@ r"""
             if not np.all(converged):                
                 if progress_bar is not None:
                     message = termcolor.colored(
-                        '[FAILURE] Policy update failed to satisfy action '
-                        'constraints.', 'red')
+                        '[FAIL] Policy update failed to satisfy action constraints.',
+                        'red')
                     progress_bar.write(message)
                 status = JaxPlannerStatus.PRECONDITION_POSSIBLY_UNSATISFIED
             
@@ -2376,8 +2373,8 @@ r"""
             if invalid_loss:
                 if progress_bar is not None:
                     message = termcolor.colored(
-                        f'[FAILURE] Planner aborted due to '
-                        f'invalid train loss {train_loss}.', 'red')
+                        f'[FAIL] Planner aborted due to invalid train loss {train_loss}.', 
+                        'red')
                     progress_bar.write(message)
                 status = JaxPlannerStatus.INVALID_GRADIENT
               
@@ -2418,7 +2415,7 @@ r"""
             if stopping_rule is not None and stopping_rule.monitor(callback):
                 if progress_bar is not None:
                     message = termcolor.colored(
-                        f'[SUCCESS] Stopping rule has been reached.', 'green')
+                        '[SUCCESS] Stopping rule has been reached.', 'green')
                     progress_bar.write(message)
                 callback['status'] = status = JaxPlannerStatus.STOPPING_RULE_REACHED  
             
@@ -2459,7 +2456,7 @@ r"""
             if messages:
                 messages = '\n'.join(messages)
                 message = termcolor.colored(
-                    f'[FAILURE] Compiler encountered the following '
+                    f'[FAIL] Compiler encountered the following '
                     f'error(s) during test evaluation:\n{messages}', 'red')
                 progress_bar.write(message)            
         
@@ -2491,7 +2488,7 @@ r"""
         
         # divergence if the solution is not finite
         if not np.isfinite(train_return):
-            return termcolor.colored('[FAILURE] Training loss diverged.', 'red')
+            return termcolor.colored('[FAIL] Training loss diverged.', 'red')
             
         # hit a plateau is likely IF:
         # 1. planner does not improve at all
@@ -2499,23 +2496,23 @@ r"""
         if last_iter_improve <= 1:
             if grad_is_zero:
                 return termcolor.colored(
-                    '[FAILURE] No progress was made '
+                    f'[FAIL] No progress was made '
                     f'and max grad norm {max_grad_norm:.6f} was zero: '
-                    'solver likely stuck in a plateau.', 'red')
+                    f'solver likely stuck in a plateau.', 'red')
             else:
                 return termcolor.colored(
-                    '[FAILURE] No progress was made '
+                    f'[FAIL] No progress was made '
                     f'but max grad norm {max_grad_norm:.6f} was non-zero: '
-                    'learning rate or other hyper-parameters could be suboptimal.', 
+                    f'learning rate or other hyper-parameters could be suboptimal.', 
                     'red')
         
         # model is likely poor IF:
         # 1. the train and test return disagree
         if not (validation_error < 20):
             return termcolor.colored(
-                '[WARNING] Progress was made '
+                f'[WARN] Progress was made '
                 f'but relative train-test error {validation_error:.6f} was high: '
-                'poor model relaxation around solution or batch size too small.', 
+                f'poor model relaxation around solution or batch size too small.', 
                 'yellow')
         
         # model likely did not converge IF:
@@ -2524,11 +2521,10 @@ r"""
             return_to_grad_norm = abs(best_return) / max_grad_norm
             if not (return_to_grad_norm > 1):
                 return termcolor.colored(
-                    '[WARNING] Progress was made '
+                    f'[WARN] Progress was made '
                     f'but max grad norm {max_grad_norm:.6f} was high: '
-                    'solution locally suboptimal, '
-                    'relaxed model nonsmooth around solution, '
-                    'or batch size too small.', 'yellow')
+                    f'solution locally suboptimal, relaxed model nonsmooth around solution, '
+                    f'or batch size too small.', 'yellow')
         
         # likely successful
         return termcolor.colored(
