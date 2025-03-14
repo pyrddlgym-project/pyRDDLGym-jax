@@ -3,7 +3,7 @@
 # 
 # Author: Michael Gimelfarb
 #
-# RELEVANT SOURCES:
+# REFERENCES:
 #
 # [1] Gimelfarb, Michael, Ayal Taitler, and Scott Sanner. "JaxPlan and GurobiPlan: 
 # Optimization Baselines for Replanning in Discrete and Mixed Discrete-Continuous 
@@ -18,14 +18,19 @@
 # reactive policies for planning in stochastic nonlinear domains." In Proceedings of the 
 # AAAI Conference on Artificial Intelligence, vol. 33, no. 01, pp. 7530-7537. 2019.
 #
-# [4] Wu, Ga, Buser Say, and Scott Sanner. "Scalable planning with tensorflow for hybrid 
+# [4] Cui, Hao, Thomas Keller, and Roni Khardon. "Stochastic planning with lifted symbolic 
+# trajectory optimization." In Proceedings of the International Conference on Automated 
+# Planning and Scheduling, vol. 29, pp. 119-127. 2019.
+#
+# [5] Wu, Ga, Buser Say, and Scott Sanner. "Scalable planning with tensorflow for hybrid 
 # nonlinear domains." Advances in Neural Information Processing Systems 30 (2017).
 #
-# [5] Sehnke, Frank, and Tingting Zhao. "Baseline-free sampling in parameter exploring 
+# [6] Sehnke, Frank, and Tingting Zhao. "Baseline-free sampling in parameter exploring 
 # policy gradients: Super symmetric pgpe." Artificial Neural Networks: Methods and 
 # Applications in Bio-/Neuroinformatics. Springer International Publishing, 2015.
 #
 # ***********************************************************************
+
 
 from abc import ABCMeta, abstractmethod
 from ast import literal_eval
