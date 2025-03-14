@@ -2112,6 +2112,8 @@ r"""
         :param print_progress: whether to print the progress bar during training
         :param print_hyperparams: whether to print list of hyper-parameter settings
         :param stopping_rule: stopping criterion
+        :param restart_epochs: restart the optimizer from a random policy configuration
+        if there is no progress for this many consecutive iterations
         :param test_rolling_window: the test return is averaged on a rolling 
         window of the past test_rolling_window returns when updating the best
         parameters found so far
@@ -2146,6 +2148,7 @@ r"""
                            print_progress: bool=True,
                            print_hyperparams: bool=False,
                            stopping_rule: Optional[JaxPlannerStoppingRule]=None,
+                           restart_epochs: int=999999,
                            test_rolling_window: int=10,
                            tqdm_position: Optional[int]=None) -> Generator[Dict[str, Any], None, None]:
         '''Returns a generator for computing an optimal policy or plan. 
@@ -2168,6 +2171,8 @@ r"""
         :param print_progress: whether to print the progress bar during training
         :param print_hyperparams: whether to print list of hyper-parameter settings
         :param stopping_rule: stopping criterion
+        :param restart_epochs: restart the optimizer from a random policy configuration
+        if there is no progress for this many consecutive iterations
         :param test_rolling_window: the test return is averaged on a rolling 
         window of the past test_rolling_window returns when updating the best
         parameters found so far
@@ -2234,7 +2239,8 @@ r"""
                   f'    dashboard_id       ={dashboard_id}\n'
                   f'    print_summary      ={print_summary}\n'
                   f'    print_progress     ={print_progress}\n'
-                  f'    stopping_rule      ={stopping_rule}\n')
+                  f'    stopping_rule      ={stopping_rule}\n'
+                  f'    restart_epochs     ={restart_epochs}\n')
         
         # ======================================================================
         # INITIALIZATION OF STATE AND POLICY
@@ -2290,6 +2296,7 @@ r"""
         # initialize running statistics
         best_params, best_loss, best_grad = policy_params, jnp.inf, None
         last_iter_improve = 0
+        no_progress_count = 0
         rolling_test_loss = RollingMean(test_rolling_window)
         status = JaxPlannerStatus.NORMAL
         progress_percent = 0
@@ -2460,6 +2467,22 @@ r"""
                 'train_log': train_log,
                 **test_log
             }
+
+            # hard restart
+            if guess is None and (not pgpe_improve) and zero_grads:
+                no_progress_count += 1
+                if no_progress_count > restart_epochs:
+                    key, subkey = random.split(key)
+                    policy_params, opt_state, opt_aux = self.initialize(
+                        subkey, policy_hyperparams, train_subs)
+                    no_progress_count = 0
+                    if progress_bar is not None:
+                        message = termcolor.colored(
+                            f'[INFO] Optimizer restarted at iteration {it} '
+                            f'due to lack of progress.', 'green')
+                        progress_bar.write(message)
+            else:
+                no_progress_count = 0
 
             # stopping condition reached
             if stopping_rule is not None and stopping_rule.monitor(callback):
