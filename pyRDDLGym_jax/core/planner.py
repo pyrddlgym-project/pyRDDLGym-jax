@@ -398,10 +398,11 @@ class JaxPlan(metaclass=ABCMeta):
                 continue
             
             # check invalid type
-            if prange not in compiled.JAX_TYPES:
+            if prange not in compiled.JAX_TYPES and prange not in compiled.rddl.enum_types:
+                keys = list(compiled.JAX_TYPES.keys()) + list(compiled.rddl.enum_types)
                 raise RDDLTypeError(
                     f'Invalid range <{prange}> of action-fluent <{name}>, '
-                    f'must be one of {set(compiled.JAX_TYPES.keys())}.')
+                    f'must be one of {keys}.')
                 
             # clip boolean to (0, 1), otherwise use the RDDL action bounds
             # or the user defined action bounds if provided
@@ -409,7 +410,12 @@ class JaxPlan(metaclass=ABCMeta):
             if prange == 'bool':
                 lower, upper = None, None
             else:
-                lower, upper = compiled.constraints.bounds[name]
+                if prange in compiled.rddl.enum_types:
+                    lower = np.zeros(shape=shapes[name][1:])
+                    upper = len(compiled.rddl.type_to_objects[prange]) - 1
+                    upper = np.ones(shape=shapes[name][1:]) * upper
+                else:
+                    lower, upper = compiled.constraints.bounds[name]
                 lower, upper = user_bounds.get(name, (lower, upper))
                 lower = np.asarray(lower, dtype=compiled.REAL)
                 upper = np.asarray(upper, dtype=compiled.REAL)
@@ -628,7 +634,7 @@ class JaxStraightLinePlan(JaxPlan):
                 else:
                     action = _jax_non_bool_param_to_action(var, action, hyperparams)
                     action = jnp.clip(action, *bounds[var])
-                    if ranges[var] == 'int':
+                    if ranges[var] == 'int' or ranges[var] in rddl.enum_types:
                         action = jnp.asarray(jnp.round(action), dtype=compiled.INT)
                     actions[var] = action
             return actions
@@ -1068,7 +1074,7 @@ class JaxDeepReactivePolicy(JaxPlan):
                 prange = ranges[var]
                 if prange == 'bool':
                     new_action = action > 0.5
-                elif prange == 'int':
+                elif prange == 'int' or prange in rddl.enum_types:
                     action = jnp.clip(action, *bounds[var])
                     new_action = jnp.asarray(jnp.round(action), dtype=compiled.INT)
                 else:
