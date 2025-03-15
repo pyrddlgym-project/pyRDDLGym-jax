@@ -94,7 +94,7 @@ class SigmoidComparison(Comparison):
     '''Comparison operations approximated using sigmoid functions.'''
     
     def __init__(self, weight: float=10.0) -> None:
-        self.weight = weight
+        self.weight = float(weight)
         
     # https://arxiv.org/abs/2110.05651
     def greater_equal(self, id, init_params):
@@ -162,7 +162,7 @@ class SoftRounding(Rounding):
     '''Rounding operations approximated using soft operations.'''
     
     def __init__(self, weight: float=10.0) -> None:
-        self.weight = weight
+        self.weight = float(weight)
         
     # https://www.tensorflow.org/probability/api_docs/python/tfp/substrates/jax/bijectors/Softfloor
     def floor(self, id, init_params):
@@ -637,7 +637,7 @@ class SoftControlFlow(ControlFlow):
     '''Soft control flow using a probabilistic interpretation.'''
     
     def __init__(self, weight: float=10.0) -> None:
-        self.weight = weight
+        self.weight = float(weight)
         
     @staticmethod
     def _jax_wrapped_calc_if_then_else_soft(c, a, b, params):
