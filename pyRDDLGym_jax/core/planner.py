@@ -1321,13 +1321,13 @@ class GaussianPGPE(PGPE):
     def compile(self, loss_fn: Callable, projection: Callable, real_dtype: Type,
                 parallel_updates: Optional[int]=None) -> None:
         sigma0 = self.init_sigma
-        sigma_range = self.sigma_range
+        sigma_lo, sigma_hi = self.sigma_range
         scale_reward = self.scale_reward
         min_reward_scale = self.min_reward_scale
         super_symmetric = self.super_symmetric
         super_symmetric_accurate = self.super_symmetric_accurate
         batch_size = self.batch_size
-        optimizers = (mu_optimizer, sigma_optimizer) = self.optimizers
+        mu_optimizer, sigma_optimizer = self.optimizers
         max_kl = self.max_kl
         
         # entropy regularization penalty is decayed exponentially by elapsed budget
@@ -1344,10 +1344,9 @@ class GaussianPGPE(PGPE):
         
         def _jax_wrapped_pgpe_init(key, policy_params):
             mu = policy_params
-            sigma = jax.tree_map(lambda x: sigma0 * jnp.ones_like(x), mu)
+            sigma = jax.tree_map(partial(jnp.full_like, fill_value=sigma0), mu)
             pgpe_params = (mu, sigma)
-            pgpe_opt_state = tuple(opt.init(param) 
-                                   for (opt, param) in zip(optimizers, pgpe_params))
+            pgpe_opt_state = (mu_optimizer.init(mu), sigma_optimizer.init(sigma))
             r_max = -jnp.inf
             return pgpe_params, pgpe_opt_state, r_max
         
@@ -1358,8 +1357,7 @@ class GaussianPGPE(PGPE):
             # for parallel policy update
             def _jax_wrapped_pgpe_inits(key, policy_params):
                 keys = jnp.asarray(random.split(key, num=parallel_updates))
-                return jax.vmap(
-                    _jax_wrapped_pgpe_init, in_axes=(0, 0))(keys, policy_params)
+                return jax.vmap(_jax_wrapped_pgpe_init, in_axes=0)(keys, policy_params)
             
             self._initializer = jax.jit(_jax_wrapped_pgpe_inits)
 
@@ -1500,6 +1498,17 @@ class GaussianPGPE(PGPE):
                                  jnp.square(old_sigma / sigma) + 
                                  jnp.square((mu - old_mu) / sigma) - 1)
         
+        def _jax_wrapped_pgpe_update_helper(mu, sigma, mu_grad, sigma_grad, 
+                                            mu_state, sigma_state):
+            mu_updates, new_mu_state = mu_optimizer.update(mu_grad, mu_state, params=mu) 
+            sigma_updates, new_sigma_state = sigma_optimizer.update(
+                sigma_grad, sigma_state, params=sigma) 
+            new_mu = optax.apply_updates(mu, mu_updates)
+            new_sigma = optax.apply_updates(sigma, sigma_updates)
+            new_sigma = jax.tree_map(
+                partial(jnp.clip, min=sigma_lo, max=sigma_hi), new_sigma)
+            return new_mu, new_sigma, new_mu_state, new_sigma_state
+
         def _jax_wrapped_pgpe_update(key, pgpe_params, r_max, progress,
                                      policy_hyperparams, subs, model_params, 
                                      pgpe_opt_state):
@@ -1509,12 +1518,9 @@ class GaussianPGPE(PGPE):
             ent = start_entropy_coeff * jnp.power(entropy_coeff_decay, progress)
             mu_grad, sigma_grad, new_r_max = _jax_wrapped_pgpe_grad_batched(
                 key, pgpe_params, r_max, ent, policy_hyperparams, subs, model_params)
-            mu_updates, new_mu_state = mu_optimizer.update(mu_grad, mu_state, params=mu) 
-            sigma_updates, new_sigma_state = sigma_optimizer.update(
-                sigma_grad, sigma_state, params=sigma) 
-            new_mu = optax.apply_updates(mu, mu_updates)
-            new_sigma = optax.apply_updates(sigma, sigma_updates)
-            new_sigma = jax.tree_map(lambda x: jnp.clip(x, *sigma_range), new_sigma)
+            new_mu, new_sigma, new_mu_state, new_sigma_state = \
+                _jax_wrapped_pgpe_update_helper(mu, sigma, mu_grad, sigma_grad, 
+                                                mu_state, sigma_state)
             
             # respect KL divergence contraint with old parameters
             if max_kl is not None:
@@ -1526,12 +1532,9 @@ class GaussianPGPE(PGPE):
                 kl_reduction = jnp.minimum(1.0, jnp.sqrt(max_kl / total_kl))
                 mu_state.hyperparams['learning_rate'] = old_mu_lr * kl_reduction
                 sigma_state.hyperparams['learning_rate'] = old_sigma_lr * kl_reduction
-                mu_updates, new_mu_state = mu_optimizer.update(mu_grad, mu_state, params=mu) 
-                sigma_updates, new_sigma_state = sigma_optimizer.update(
-                    sigma_grad, sigma_state, params=sigma) 
-                new_mu = optax.apply_updates(mu, mu_updates)
-                new_sigma = optax.apply_updates(sigma, sigma_updates)
-                new_sigma = jax.tree_map(lambda x: jnp.clip(x, *sigma_range), new_sigma)
+                new_mu, new_sigma, new_mu_state, new_sigma_state = \
+                _jax_wrapped_pgpe_update_helper(mu, sigma, mu_grad, sigma_grad, 
+                                                mu_state, sigma_state)
                 new_mu_state.hyperparams['learning_rate'] = old_mu_lr
                 new_sigma_state.hyperparams['learning_rate'] = old_sigma_lr
 
@@ -1907,8 +1910,7 @@ r"""
         
         # optimization
         self.update = self._jax_update(train_loss)
-        self.pytree_index = jax.jit(
-            lambda pytree, index: jax.tree_map(lambda x: x[index, ...], pytree))
+        self.pytree_at = jax.jit(lambda tree, i: jax.tree_map(lambda x: x[i], tree))
 
         # pgpe option
         if self.use_pgpe:
@@ -1996,7 +1998,7 @@ r"""
         # check if the gradients are all zeros
         def _jax_wrapped_zero_gradients(grad):
             leaves, _ = jax.tree_util.tree_flatten(
-                jax.tree_map(lambda g: jnp.allclose(g, 0), grad))
+                jax.tree_map(partial(jnp.allclose, b=0), grad))
             return jnp.all(jnp.asarray(leaves))
         
         # calculate the plan gradient w.r.t. return loss and update optimizer
@@ -2412,7 +2414,7 @@ r"""
         if self.parallel_updates is None:
             best_params = policy_params
         else:
-            best_params = self.pytree_index(policy_params, 0)
+            best_params = self.pytree_at(policy_params, 0)
         best_loss, pbest_loss, best_grad = np.inf, np.inf, None
         last_iter_improve = 0
         no_progress_count = 0
@@ -2517,8 +2519,8 @@ r"""
             else:
                 best_index = np.argmin(test_loss_smooth)
                 if test_loss_smooth[best_index] < best_loss:
-                    best_params = self.pytree_index(policy_params, best_index)
-                    best_grad = self.pytree_index(train_log['grad'], best_index)
+                    best_params = self.pytree_at(policy_params, best_index)
+                    best_grad = self.pytree_at(train_log['grad'], best_index)
                     best_loss = test_loss_smooth[best_index]
                 pbest_loss = np.minimum(pbest_loss, test_loss_smooth)
             
