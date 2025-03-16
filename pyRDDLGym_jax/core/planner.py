@@ -1130,19 +1130,18 @@ class JaxDeepReactivePolicy(JaxPlan):
 
 
 class RollingMean:
-    '''Maintains an estimate of the rolling mean of a stream of real-valued 
-    observations.'''
+    '''Maintains the rolling mean of a stream of real-valued observations.'''
     
     def __init__(self, window_size: int) -> None:
         self._window_size = window_size
         self._memory = deque(maxlen=window_size)
         self._total = 0
     
-    def update(self, x: float) -> float:
+    def update(self, x: Union[float, np.ndarray]) -> Union[float, np.ndarray]:
         memory = self._memory
-        self._total += x
+        self._total = self._total + x
         if len(memory) == self._window_size:
-            self._total -= memory.popleft()
+            self._total = self._total - memory.popleft()
         memory.append(x)
         return self._total / len(memory)
 
@@ -1188,8 +1187,7 @@ class NoImprovementStoppingRule(JaxPlannerStoppingRule):
         self.iters_since_last_update = 0
         
     def monitor(self, callback: Dict[str, Any]) -> bool:
-        if self.callback is None \
-        or callback['best_return'] > self.callback['best_return']:
+        if self.callback is None or callback['best_return'] > self.callback['best_return']:
             self.callback = callback
             self.iters_since_last_update = 0
         else:
@@ -1224,7 +1222,8 @@ class PGPE(metaclass=ABCMeta):
         return self._update
 
     @abstractmethod
-    def compile(self, loss_fn: Callable, projection: Callable, real_dtype: Type) -> None:
+    def compile(self, loss_fn: Callable, projection: Callable, real_dtype: Type,
+                parallel_updates: Optional[int]=None) -> None:
         pass
 
 
@@ -1319,7 +1318,8 @@ class GaussianPGPE(PGPE):
                 f'    max_kl_update      ={self.max_kl}\n'
         )
 
-    def compile(self, loss_fn: Callable, projection: Callable, real_dtype: Type) -> None:
+    def compile(self, loss_fn: Callable, projection: Callable, real_dtype: Type,
+                parallel_updates: Optional[int]=None) -> None:
         sigma0 = self.init_sigma
         sigma_range = self.sigma_range
         scale_reward = self.scale_reward
@@ -1348,9 +1348,20 @@ class GaussianPGPE(PGPE):
             pgpe_params = (mu, sigma)
             pgpe_opt_state = tuple(opt.init(param) 
                                    for (opt, param) in zip(optimizers, pgpe_params))
-            return pgpe_params, pgpe_opt_state
+            r_max = -jnp.inf
+            return pgpe_params, pgpe_opt_state, r_max
         
-        self._initializer = jax.jit(_jax_wrapped_pgpe_init)
+        if parallel_updates is None:
+            self._initializer = jax.jit(_jax_wrapped_pgpe_init)
+        else:
+
+            # for parallel policy update
+            def _jax_wrapped_pgpe_inits(key, policy_params):
+                keys = jnp.asarray(random.split(key, num=parallel_updates))
+                return jax.vmap(
+                    _jax_wrapped_pgpe_init, in_axes=(0, 0))(keys, policy_params)
+            
+            self._initializer = jax.jit(_jax_wrapped_pgpe_inits)
 
         # ***********************************************************************
         # PARAMETER SAMPLING FUNCTIONS
@@ -1531,7 +1542,21 @@ class GaussianPGPE(PGPE):
             policy_params = new_mu
             return new_pgpe_params, new_r_max, new_pgpe_opt_state, policy_params, converged
 
-        self._update = jax.jit(_jax_wrapped_pgpe_update)
+        if parallel_updates is None:
+            self._update = jax.jit(_jax_wrapped_pgpe_update)
+        else:
+
+            # for parallel policy update
+            def _jax_wrapped_pgpe_updates(key, pgpe_params, r_max, progress,
+                                          policy_hyperparams, subs, model_params, 
+                                          pgpe_opt_state):
+                keys = jnp.asarray(random.split(key, num=parallel_updates))
+                return jax.vmap(
+                    _jax_wrapped_pgpe_update, in_axes=(0, 0, 0, None, None, None, 0, 0)
+                )(keys, pgpe_params, r_max, progress, policy_hyperparams, subs, 
+                  model_params, pgpe_opt_state)
+            
+            self._update = jax.jit(_jax_wrapped_pgpe_updates)
 
 
 # ***********************************************************************
@@ -1631,7 +1656,8 @@ class JaxBackpropPlanner:
                  cpfs_without_grad: Optional[Set[str]]=None,
                  compile_non_fluent_exact: bool=True,
                  logger: Optional[Logger]=None,
-                 dashboard_viz: Optional[Any]=None) -> None:
+                 dashboard_viz: Optional[Any]=None,
+                 parallel_updates: Optional[int]=None) -> None:
         '''Creates a new gradient-based algorithm for optimizing action sequences
         (plan) in the given RDDL. Some operations will be converted to their
         differentiable counterparts; the specific operations can be customized
@@ -1671,6 +1697,7 @@ class JaxBackpropPlanner:
         :param logger: to log information about compilation to file
         :param dashboard_viz: optional visualizer object from the environment
         to pass to the dashboard to visualize the policy
+        :param parallel_updates: how many optimizers to run independently in parallel
         '''
         self.rddl = rddl
         self.plan = plan
@@ -1678,6 +1705,7 @@ class JaxBackpropPlanner:
         if batch_size_test is None:
             batch_size_test = batch_size_train
         self.batch_size_test = batch_size_test
+        self.parallel_updates = parallel_updates
         if rollout_horizon is None:
             rollout_horizon = rddl.horizon
         self.horizon = rollout_horizon
@@ -1808,7 +1836,8 @@ r"""
                   f'    line_search_kwargs={self.line_search_kwargs}\n'
                   f'    noise_kwargs      ={self.noise_kwargs}\n'
                   f'    batch_size_train  ={self.batch_size_train}\n'
-                  f'    batch_size_test   ={self.batch_size_test}\n')
+                  f'    batch_size_test   ={self.batch_size_test}\n'
+                  f'    parallel_updates  ={self.parallel_updates}\n')
         result += str(self.plan)
         if self.use_pgpe:
             result += str(self.pgpe)
@@ -1866,23 +1895,32 @@ r"""
         self.test_rollouts = jax.jit(test_rollouts)
         
         # initialization
-        self.initialize = jax.jit(self._jax_init())
+        self.initialize, self.init_optimizer = self._jax_init()
         
         # losses
         train_loss = self._jax_loss(train_rollouts, use_symlog=self.use_symlog_reward)
-        self.test_loss = jax.jit(self._jax_loss(test_rollouts, use_symlog=False))
+        test_loss = self._jax_loss(test_rollouts, use_symlog=False)
+        if self.parallel_updates is None:
+            self.test_loss = jax.jit(test_loss)
+        else:
+            self.test_loss = jax.jit(jax.vmap(test_loss, in_axes=(None, 0, None, None, 0)))
         
         # optimization
         self.update = self._jax_update(train_loss)
+        self.pytree_index = jax.jit(
+            lambda pytree, index: jax.tree_map(lambda x: x[index, ...], pytree))
 
         # pgpe option
         if self.use_pgpe:
-            loss_fn = self._jax_loss(rollouts=test_rollouts)
             self.pgpe.compile(
-                loss_fn=loss_fn, 
+                loss_fn=test_loss, 
                 projection=self.plan.projection, 
-                real_dtype=self.test_compiled.REAL
+                real_dtype=self.test_compiled.REAL,
+                parallel_updates=self.parallel_updates
             )
+            self.merge_pgpe = self._jax_merge_pgpe_jaxplan()
+        else:
+            self.merge_pgpe = None
     
     def _jax_return(self, use_symlog):
         gamma = self.rddl.discount
@@ -1922,19 +1960,38 @@ r"""
     def _jax_init(self):
         init = self.plan.initializer
         optimizer = self.optimizer
+        num_parallel = self.parallel_updates
         
         # initialize both the policy and its optimizer
         def _jax_wrapped_init_policy(key, policy_hyperparams, subs):
             policy_params = init(key, policy_hyperparams, subs)
             opt_state = optimizer.init(policy_params)
-            return policy_params, opt_state, {}
+            return policy_params, opt_state, {}    
         
-        return _jax_wrapped_init_policy
+        # initialize just the optimizer from the policy
+        def _jax_wrapped_init_opt(policy_params):
+            if num_parallel is None:
+                opt_state = optimizer.init(policy_params)
+            else:
+                opt_state = jax.vmap(optimizer.init, in_axes=0)(policy_params)
+            return opt_state, {}
+
+        if num_parallel is None:
+            return jax.jit(_jax_wrapped_init_policy), jax.jit(_jax_wrapped_init_opt)
+        
+        # for parallel policy update
+        def _jax_wrapped_init_policies(key, policy_hyperparams, subs):
+            keys = jnp.asarray(random.split(key, num=num_parallel))
+            return jax.vmap(_jax_wrapped_init_policy, in_axes=(0, None, None))(
+                keys, policy_hyperparams, subs)      
+          
+        return jax.jit(_jax_wrapped_init_policies), jax.jit(_jax_wrapped_init_opt)
         
     def _jax_update(self, loss):
         optimizer = self.optimizer
         projection = self.plan.projection
         use_ls = self.line_search_kwargs is not None
+        num_parallel = self.parallel_updates
         
         # check if the gradients are all zeros
         def _jax_wrapped_zero_gradients(grad):
@@ -1970,8 +2027,41 @@ r"""
             return policy_params, converged, opt_state, opt_aux, \
                 loss_val, log, model_params, zero_grads
         
-        return jax.jit(_jax_wrapped_plan_update)
+        if num_parallel is None:
+            return jax.jit(_jax_wrapped_plan_update)
+
+        # for parallel policy update
+        def _jax_wrapped_plan_updates(key, policy_params, policy_hyperparams,
+                                      subs, model_params, opt_state, opt_aux):
+            keys = jnp.asarray(random.split(key, num=num_parallel))
+            return jax.vmap(
+                _jax_wrapped_plan_update, in_axes=(0, 0, None, None, 0, 0, 0)
+            )(keys, policy_params, policy_hyperparams, subs, model_params, 
+              opt_state, opt_aux)
+        
+        return jax.jit(_jax_wrapped_plan_updates)
             
+    def _jax_merge_pgpe_jaxplan(self):
+        if self.parallel_updates is None:
+            return None
+        
+        # for parallel policy update
+        def _jax_wrapped_pgpe_jaxplan_merge(pgpe_mask, pgpe_param, policy_params, 
+                                            pgpe_loss, test_loss, 
+                                            pgpe_loss_smooth, test_loss_smooth, 
+                                            pgpe_converged, converged):
+            def select_fn(leaf1, leaf2):
+                expanded_mask = pgpe_mask[(...,) + (jnp.newaxis,) * (jnp.ndim(leaf1) - 1)]
+                return jnp.where(expanded_mask, leaf1, leaf2)
+            policy_params = jax.tree_map(select_fn, pgpe_param, policy_params)
+            test_loss = jnp.where(pgpe_mask, pgpe_loss, test_loss)
+            test_loss_smooth = jnp.where(pgpe_mask, pgpe_loss_smooth, test_loss_smooth)
+            expanded_mask = pgpe_mask[(...,) + (jnp.newaxis,) * (jnp.ndim(converged) - 1)]
+            converged = jnp.where(expanded_mask, pgpe_converged, converged)
+            return policy_params, test_loss, test_loss_smooth, converged
+
+        return jax.jit(_jax_wrapped_pgpe_jaxplan_merge)
+
     def _batched_init_subs(self, subs): 
         rddl = self.rddl
         n_train, n_test = self.batch_size_train, self.batch_size_test
@@ -1996,6 +2086,19 @@ r"""
             init_train[next_state] = init_train[state]
             init_test[next_state] = init_test[state]
         return init_train, init_test
+    
+    def _parallelize_pytree(self, pytree):
+        if self.parallel_updates is None:
+            return pytree
+        
+        # for parallel policy update
+        def make_batched(x):
+            x = np.asarray(x)
+            x = np.broadcast_to(
+                x[np.newaxis, ...], shape=(self.parallel_updates,) + np.shape(x))
+            return x
+                
+        return jax.tree_map(make_batched, pytree)
     
     def as_optimization_problem(
             self, key: Optional[random.PRNGKey]=None,
@@ -2024,6 +2127,11 @@ r"""
         :param grad_function_updates_key: if True, the gradient function
         updates the PRNG key internally independently of the loss function.
         '''
+
+        # make sure parallel updates are disabled
+        if self.parallel_updates is not None:
+            raise ValueError('Cannot compile static optimization problem '
+                             'when parallel_updates is not None.')
         
         # if PRNG key is not provided
         if key is None:
@@ -2185,6 +2293,14 @@ r"""
         # INITIALIZATION OF HYPER-PARAMETERS
         # ======================================================================
 
+        # cannot run dashboard with parallel updates
+        if dashboard is not None and self.parallel_updates is not None:
+            message = termcolor.colored(
+                '[WARN] Dashboard is unavailable if parallel_updates is not None: '
+                'setting dashboard to None.', 'yellow')
+            print(message)
+            dashboard = None
+
         # if PRNG key is not provided
         if key is None:
             key = random.PRNGKey(round(time.time() * 1000))
@@ -2267,7 +2383,8 @@ r"""
         # initialize model parameters
         if model_params is None:
             model_params = self.compiled.model_params
-        model_params_test = self.test_compiled.model_params
+        model_params = self._parallelize_pytree(model_params)
+        model_params_test = self._parallelize_pytree(self.test_compiled.model_params)
         
         # initialize policy parameters
         if guess is None:
@@ -2275,26 +2392,28 @@ r"""
             policy_params, opt_state, opt_aux = self.initialize(
                 subkey, policy_hyperparams, train_subs)
         else:
-            policy_params = guess
-            opt_state = self.optimizer.init(policy_params)
-            opt_aux = {}
+            policy_params = self._parallelize_pytree(guess)
+            opt_state, opt_aux = self.init_optimizer(policy_params)
         
         # initialize pgpe parameters
         if self.use_pgpe:
-            pgpe_params, pgpe_opt_state = self.pgpe.initialize(key, policy_params)
+            pgpe_params, pgpe_opt_state, r_max = self.pgpe.initialize(key, policy_params)
             rolling_pgpe_loss = RollingMean(test_rolling_window)
         else:
-            pgpe_params, pgpe_opt_state = None, None
+            pgpe_params, pgpe_opt_state, r_max = None, None, None
             rolling_pgpe_loss = None
         total_pgpe_it = 0
-        r_max = -jnp.inf
 
         # ======================================================================
         # INITIALIZATION OF RUNNING STATISTICS
         # ======================================================================
         
         # initialize running statistics
-        best_params, best_loss, best_grad = policy_params, jnp.inf, None
+        if self.parallel_updates is None:
+            best_params = policy_params
+        else:
+            best_params = self.pytree_index(policy_params, 0)
+        best_loss, pbest_loss, best_grad = np.inf, np.inf, None
         last_iter_improve = 0
         no_progress_count = 0
         rolling_test_loss = RollingMean(test_rolling_window)
@@ -2342,8 +2461,13 @@ r"""
              model_params, zero_grads) = self.update(
                  subkey, policy_params, policy_hyperparams, train_subs, model_params, 
                  opt_state, opt_aux)
+            
+            # evaluate
             test_loss, (test_log, model_params_test) = self.test_loss(
                 subkey, policy_params, policy_hyperparams, test_subs, model_params_test)
+            if self.parallel_updates:
+                train_loss = np.asarray(train_loss)
+                test_loss = np.asarray(test_loss)
             test_loss_smooth = rolling_test_loss.update(test_loss)
 
             # pgpe update of the plan
@@ -2354,33 +2478,57 @@ r"""
                     self.pgpe.update(subkey, pgpe_params, r_max, progress_percent, 
                                      policy_hyperparams, test_subs, model_params_test, 
                                      pgpe_opt_state)
+                
+                # evaluate
                 pgpe_loss, _ = self.test_loss(
                     subkey, pgpe_param, policy_hyperparams, test_subs, model_params_test)
+                if self.parallel_updates:
+                    pgpe_loss = np.asarray(pgpe_loss)
                 pgpe_loss_smooth = rolling_pgpe_loss.update(pgpe_loss)
                 pgpe_return = -pgpe_loss_smooth
 
-                # replace with PGPE if it reaches a new minimum or train loss invalid
-                if pgpe_loss_smooth < best_loss or not np.isfinite(train_loss):
-                    policy_params = pgpe_param
-                    test_loss, test_loss_smooth = pgpe_loss, pgpe_loss_smooth
-                    converged = pgpe_converged
-                    pgpe_improve = True
-                    total_pgpe_it += 1
+                # replace JaxPlan with PGPE if new minimum reached or train loss invalid
+                if self.parallel_updates is None:
+                    if pgpe_loss_smooth < best_loss or not np.isfinite(train_loss):
+                        policy_params = pgpe_param
+                        test_loss, test_loss_smooth = pgpe_loss, pgpe_loss_smooth
+                        converged = pgpe_converged
+                        pgpe_improve = True
+                        total_pgpe_it += 1
+                else:
+                    pgpe_mask = (pgpe_loss_smooth < pbest_loss) | ~np.isfinite(train_loss)
+                    if np.any(pgpe_mask):
+                        policy_params, test_loss, test_loss_smooth, converged = \
+                            self.merge_pgpe(pgpe_mask, pgpe_param, policy_params, 
+                                            pgpe_loss, test_loss, 
+                                            pgpe_loss_smooth, test_loss_smooth, 
+                                            pgpe_converged, converged)
+                        pgpe_improve = True
+                        total_pgpe_it += 1                        
             else:
                 pgpe_loss, pgpe_loss_smooth, pgpe_return = None, None, None
 
-            # evaluate test losses and record best plan so far
-            if test_loss_smooth < best_loss:
-                best_params, best_loss, best_grad = \
-                    policy_params, test_loss_smooth, train_log['grad']
-                last_iter_improve = it
+            # evaluate test losses and record best parameters so far
+            if self.parallel_updates is None:
+                if test_loss_smooth < best_loss:
+                    best_params, best_loss, best_grad = \
+                        policy_params, test_loss_smooth, train_log['grad']
+                    pbest_loss = best_loss
+            else:
+                best_index = np.argmin(test_loss_smooth)
+                if test_loss_smooth[best_index] < best_loss:
+                    best_params = self.pytree_index(policy_params, best_index)
+                    best_grad = self.pytree_index(train_log['grad'], best_index)
+                    best_loss = test_loss_smooth[best_index]
+                pbest_loss = np.minimum(pbest_loss, test_loss_smooth)
             
             # ==================================================================
             # STATUS CHECKS AND LOGGING
             # ==================================================================
             
             # no progress
-            if (not pgpe_improve) and zero_grads:
+            no_progress_flag = (not pgpe_improve) and np.all(zero_grads)
+            if no_progress_flag:
                 status = JaxPlannerStatus.NO_PROGRESS
             
             # constraint satisfaction problem
@@ -2395,9 +2543,10 @@ r"""
             
             # numerical error
             if self.use_pgpe:
-                invalid_loss = not (np.isfinite(train_loss) or np.isfinite(pgpe_loss))
+                invalid_loss = not (np.any(np.isfinite(train_loss)) or 
+                                    np.any(np.isfinite(pgpe_loss)))
             else:
-                invalid_loss = not np.isfinite(train_loss)
+                invalid_loss = not np.any(np.isfinite(train_loss))
             if invalid_loss:
                 if progress_bar is not None:
                     message = termcolor.colored(
@@ -2469,7 +2618,7 @@ r"""
             }
 
             # hard restart
-            if guess is None and (not pgpe_improve) and zero_grads:
+            if guess is None and no_progress_flag:
                 no_progress_count += 1
                 if no_progress_count > restart_epochs:
                     key, subkey = random.split(key)
@@ -2495,8 +2644,8 @@ r"""
             # if the progress bar is used
             if print_progress:
                 progress_bar.set_description(
-                    f'{position_str} {it:6} it / {-train_loss:14.5f} train / '
-                    f'{-test_loss_smooth:14.5f} test / {-best_loss:14.5f} best / '
+                    f'{position_str} {it:6} it / {-np.min(train_loss):14.5f} train / '
+                    f'{-np.min(test_loss_smooth):14.5f} test / {-best_loss:14.5f} best / '
                     f'{status.value} status / {total_pgpe_it:6} pgpe',
                     refresh=False)
                 progress_bar.set_postfix_str(
@@ -2529,7 +2678,8 @@ r"""
         if print_summary:
             grad_norm = jax.tree_map(lambda x: np.linalg.norm(x).item(), best_grad)
             diagnosis = self._perform_diagnosis(
-                last_iter_improve, -train_loss, -test_loss_smooth, -best_loss, grad_norm)
+                last_iter_improve, -np.min(train_loss), -np.min(test_loss_smooth), 
+                -best_loss, grad_norm)
             print(f'Summary of optimization:\n'
                   f'    status        ={status}\n'
                   f'    time          ={elapsed:.3f} sec.\n'
