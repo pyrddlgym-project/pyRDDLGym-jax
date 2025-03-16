@@ -346,6 +346,7 @@ class JaxParameterTuning:
         
         # remove keywords that should not be in the tuner
         train_args.pop('dashboard', None)
+        planner_args.pop('parallel_updates', None)
     
         # initialize env for evaluation (need fresh copy to avoid concurrency)
         env = RDDLEnv(domain, instance, vectorized=True, enforce_action_constraints=False)
