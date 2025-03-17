@@ -258,6 +258,7 @@ class JaxRDDLCompilerWithGrad(JaxRDDLCompiler):
     def __init__(self, *args,
                  logic: Logic=FuzzyLogic(),
                  cpfs_without_grad: Optional[Set[str]]=None,
+                 print_warnings: bool=True,
                  **kwargs) -> None:
         '''Creates a new RDDL to Jax compiler, where operations that are not
         differentiable are converted to approximate forms that have defined gradients.
@@ -268,6 +269,7 @@ class JaxRDDLCompilerWithGrad(JaxRDDLCompiler):
         to customize these operations
         :param cpfs_without_grad: which CPFs do not have gradients (use straight
         through gradient trick)
+        :param print_warnings: whether to print warnings
         :param *kwargs: keyword arguments to pass to base compiler
         '''
         super(JaxRDDLCompilerWithGrad, self).__init__(*args, **kwargs)
@@ -277,6 +279,7 @@ class JaxRDDLCompilerWithGrad(JaxRDDLCompiler):
         if cpfs_without_grad is None:
             cpfs_without_grad = set()
         self.cpfs_without_grad = cpfs_without_grad
+        self.print_warnings = print_warnings
         
         # actions and CPFs must be continuous
         pvars_cast = set()
@@ -284,7 +287,7 @@ class JaxRDDLCompilerWithGrad(JaxRDDLCompiler):
             self.init_values[var] = np.asarray(values, dtype=self.REAL) 
             if not np.issubdtype(np.result_type(values), np.floating):
                 pvars_cast.add(var)
-        if pvars_cast:
+        if self.print_warnings and pvars_cast:
             message = termcolor.colored(
                 f'[INFO] JAX gradient compiler will cast p-vars {pvars_cast} to float.', 
                 'green')
@@ -314,12 +317,12 @@ class JaxRDDLCompilerWithGrad(JaxRDDLCompiler):
                 if cpf in self.cpfs_without_grad:
                     jax_cpfs[cpf] = self._jax_stop_grad(jax_cpfs[cpf])
                     
-        if cpfs_cast:
+        if self.print_warnings and cpfs_cast:
             message = termcolor.colored(
                 f'[INFO] JAX gradient compiler will cast CPFs {cpfs_cast} to float.', 
                 'green') 
             print(message)
-        if self.cpfs_without_grad:
+        if self.print_warnings and self.cpfs_without_grad:
             message = termcolor.colored(
                 f'[INFO] Gradients will not flow through CPFs {self.cpfs_without_grad}.', 
                 'green')    
@@ -436,10 +439,11 @@ class JaxPlan(metaclass=ABCMeta):
                                     ~lower_finite & upper_finite,
                                     ~lower_finite & ~upper_finite]
             bounds[name] = (lower, upper)
-            message = termcolor.colored(
-                f'[INFO] Bounds of action-fluent <{name}> set to {bounds[name]}.', 
-                'green')
-            print(message)
+            if compiled.print_warnings:
+                message = termcolor.colored(
+                    f'[INFO] Bounds of action-fluent <{name}> set to {bounds[name]}.', 
+                    'green')
+                print(message)
         return shapes, bounds, bounds_safe, cond_lists
     
     def _count_bool_actions(self, rddl: RDDLLiftedModel):
@@ -519,7 +523,7 @@ class JaxStraightLinePlan(JaxPlan):
         # action concurrency check
         bool_action_count, allowed_actions = self._count_bool_actions(rddl)
         use_constraint_satisfaction = allowed_actions < bool_action_count        
-        if use_constraint_satisfaction: 
+        if compiled.print_warnings and use_constraint_satisfaction: 
             message = termcolor.colored(
                 f'[INFO] SLP will use projected gradient to satisfy '
                 f'max_nondef_actions since total boolean actions '
@@ -946,17 +950,19 @@ class JaxDeepReactivePolicy(JaxPlan):
                 if ranges[var] != 'bool':
                     value_size = np.size(values)
                     if normalize_per_layer and value_size == 1:
-                        message = termcolor.colored(
-                            f'[WARN] Cannot apply layer norm to state-fluent <{var}> '
-                            f'of size 1: setting normalize_per_layer = False.', 'yellow')
-                        print(message)
+                        if compiled.print_warnings:
+                            message = termcolor.colored(
+                                f'[WARN] Cannot apply layer norm to state-fluent <{var}> '
+                                f'of size 1: setting normalize_per_layer = False.', 'yellow')
+                            print(message)
                         normalize_per_layer = False
                     non_bool_dims += value_size
             if not normalize_per_layer and non_bool_dims == 1:
-                message = termcolor.colored(
-                    '[WARN] Cannot apply layer norm to state-fluents of total size 1: '
-                    'setting normalize = False.', 'yellow')
-                print(message)
+                if compiled.print_warnings:
+                    message = termcolor.colored(
+                        '[WARN] Cannot apply layer norm to state-fluents of total size 1: '
+                        'setting normalize = False.', 'yellow')
+                    print(message)
                 normalize = False
         
         # convert subs dictionary into a state vector to feed to the MLP
@@ -1226,6 +1232,7 @@ class PGPE(metaclass=ABCMeta):
 
     @abstractmethod
     def compile(self, loss_fn: Callable, projection: Callable, real_dtype: Type,
+                print_warnings: bool,
                 parallel_updates: Optional[int]=None) -> None:
         pass
 
@@ -1322,6 +1329,7 @@ class GaussianPGPE(PGPE):
         )
 
     def compile(self, loss_fn: Callable, projection: Callable, real_dtype: Type,
+                print_warnings: bool,
                 parallel_updates: Optional[int]=None) -> None:
         sigma0 = self.init_sigma
         sigma_lo, sigma_hi = self.sigma_range
@@ -1672,6 +1680,7 @@ class JaxBackpropPlanner:
                  compile_non_fluent_exact: bool=True,
                  logger: Optional[Logger]=None,
                  dashboard_viz: Optional[Any]=None,
+                 print_warnings: bool=True,
                  parallel_updates: Optional[int]=None) -> None:
         '''Creates a new gradient-based algorithm for optimizing action sequences
         (plan) in the given RDDL. Some operations will be converted to their
@@ -1712,6 +1721,7 @@ class JaxBackpropPlanner:
         :param logger: to log information about compilation to file
         :param dashboard_viz: optional visualizer object from the environment
         to pass to the dashboard to visualize the policy
+        :param print_warnings: whether to print warnings
         :param parallel_updates: how many optimizers to run independently in parallel
         '''
         self.rddl = rddl
@@ -1737,6 +1747,7 @@ class JaxBackpropPlanner:
         self.noise_kwargs = noise_kwargs
         self.pgpe = pgpe
         self.use_pgpe = pgpe is not None
+        self.print_warnings = print_warnings
         
         # set optimizer
         try:
@@ -1873,7 +1884,8 @@ r"""
             logger=self.logger,
             use64bit=self.use64bit,
             cpfs_without_grad=self.cpfs_without_grad,
-            compile_non_fluent_exact=self.compile_non_fluent_exact
+            compile_non_fluent_exact=self.compile_non_fluent_exact,
+            print_warnings=self.print_warnings
         )
         self.compiled.compile(log_jax_expr=True, heading='RELAXED MODEL')
         
@@ -1930,6 +1942,7 @@ r"""
                 loss_fn=test_loss, 
                 projection=self.plan.projection, 
                 real_dtype=self.test_compiled.REAL,
+                print_warnings=self.print_warnings,
                 parallel_updates=self.parallel_updates
             )
             self.merge_pgpe = self._jax_merge_pgpe_jaxplan()
@@ -2165,10 +2178,11 @@ r"""
         train_subs, _ = self._batched_init_subs(subs)
         model_params = self.compiled.model_params
         if policy_hyperparams is None:
-            message = termcolor.colored(
-                '[WARN] policy_hyperparams is not set, setting 1.0 for '
-                'all action-fluents which could be suboptimal.', 'yellow')
-            print(message)
+            if self.print_warnings:
+                message = termcolor.colored(
+                    '[WARN] policy_hyperparams is not set, setting 1.0 for '
+                    'all action-fluents which could be suboptimal.', 'yellow')
+                print(message)
             policy_hyperparams = {action: 1.0 
                                   for action in self.rddl.action_fluents}
                 
@@ -2318,10 +2332,11 @@ r"""
 
         # cannot run dashboard with parallel updates
         if dashboard is not None and self.parallel_updates is not None:
-            message = termcolor.colored(
-                '[WARN] Dashboard is unavailable if parallel_updates is not None: '
-                'setting dashboard to None.', 'yellow')
-            print(message)
+            if self.print_warnings:
+                message = termcolor.colored(
+                    '[WARN] Dashboard is unavailable if parallel_updates is not None: '
+                    'setting dashboard to None.', 'yellow')
+                print(message)
             dashboard = None
 
         # if PRNG key is not provided
@@ -2331,19 +2346,21 @@ r"""
             
         # if policy_hyperparams is not provided
         if policy_hyperparams is None:
-            message = termcolor.colored(
-                '[WARN] policy_hyperparams is not set, setting 1.0 for '
-                'all action-fluents which could be suboptimal.', 'yellow')
-            print(message)
+            if self.print_warnings:
+                message = termcolor.colored(
+                    '[WARN] policy_hyperparams is not set, setting 1.0 for '
+                    'all action-fluents which could be suboptimal.', 'yellow')
+                print(message)
             policy_hyperparams = {action: 1.0 
                                   for action in self.rddl.action_fluents}
         
         # if policy_hyperparams is a scalar
         elif isinstance(policy_hyperparams, (int, float, np.number)):
-            message = termcolor.colored(
-                f'[INFO] policy_hyperparams is {policy_hyperparams}, '
-                f'setting this value for all action-fluents.', 'green')
-            print(message)
+            if self.print_warnings:
+                message = termcolor.colored(
+                    f'[INFO] policy_hyperparams is {policy_hyperparams}, '
+                    f'setting this value for all action-fluents.', 'green')
+                print(message)
             hyperparam_value = float(policy_hyperparams)
             policy_hyperparams = {action: hyperparam_value
                                   for action in self.rddl.action_fluents}
@@ -2352,11 +2369,12 @@ r"""
         elif isinstance(policy_hyperparams, dict):
             for action in self.rddl.action_fluents:
                 if action not in policy_hyperparams:
-                    message = termcolor.colored(
-                        f'[WARN] policy_hyperparams[{action}] is not set, '
-                        f'setting 1.0 for missing action-fluents '
-                        f'which could be suboptimal.', 'yellow')
-                    print(message)
+                    if self.print_warnings:
+                        message = termcolor.colored(
+                            f'[WARN] policy_hyperparams[{action}] is not set, '
+                            f'setting 1.0 for missing action-fluents '
+                            f'which could be suboptimal.', 'yellow')
+                        print(message)
                     policy_hyperparams[action] = 1.0
             
         # print summary of parameters:
@@ -2396,7 +2414,7 @@ r"""
                 if var not in subs:
                     subs[var] = value
                     added_pvars_to_subs.append(var)
-            if added_pvars_to_subs:
+            if self.print_warnings and added_pvars_to_subs:
                 message = termcolor.colored(
                     f'[INFO] p-variables {added_pvars_to_subs} is not in '
                     f'provided subs, using their initial values.', 'green')
@@ -2648,7 +2666,7 @@ r"""
                     policy_params, opt_state, opt_aux = self.initialize(
                         subkey, policy_hyperparams, train_subs)
                     no_progress_count = 0
-                    if progress_bar is not None:
+                    if self.print_warnings and progress_bar is not None:
                         message = termcolor.colored(
                             f'[INFO] Optimizer restarted at iteration {it} '
                             f'due to lack of progress.', 'green')
@@ -2658,7 +2676,7 @@ r"""
 
             # stopping condition reached
             if stopping_rule is not None and stopping_rule.monitor(callback):
-                if progress_bar is not None:
+                if self.print_warnings and progress_bar is not None:
                     message = termcolor.colored(
                         '[SUCC] Stopping rule has been reached.', 'green')
                     progress_bar.write(message)
@@ -2915,11 +2933,12 @@ class JaxOnlineController(BaseAgent):
         attempts = 0
         while attempts < self.max_attempts and callback['iteration'] <= 1:
             attempts += 1
-            message = termcolor.colored(
-                f'[WARN] JIT compilation dominated the execution time: '
-                f'executing the optimizer again on the traced model [attempt {attempts}].', 
-                'yellow')
-            print(message)
+            if self.planner.print_warnings:
+                message = termcolor.colored(
+                    f'[WARN] JIT compilation dominated the execution time: '
+                    f'executing the optimizer again on the traced model '
+                    f'[attempt {attempts}].', 'yellow')
+                print(message)
             callback = planner.optimize(
                 key=self.key, guess=self.guess, subs=state, **self.train_kwargs)
             
