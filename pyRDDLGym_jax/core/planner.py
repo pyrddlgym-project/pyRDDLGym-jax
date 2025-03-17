@@ -2860,6 +2860,7 @@ class JaxOnlineController(BaseAgent):
                  key: Optional[random.PRNGKey]=None,
                  eval_hyperparams: Optional[Dict[str, Any]]=None,
                  warm_start: bool=True,
+                 max_attempts: int=3,
                  **train_kwargs) -> None:
         '''Creates a new JAX control policy that is trained online in a closed-
         loop fashion.
@@ -2870,6 +2871,8 @@ class JaxOnlineController(BaseAgent):
         or whenever sample_action is called
         :param warm_start: whether to use the previous decision epoch final
         policy parameters to warm the next decision epoch
+        :param max_attempts: maximum attempted restarts of the optimizer when the total
+        iteration count is 1 (i.e. the execution time is dominated by the jit compilation)
         :param **train_kwargs: any keyword arguments to be passed to the planner
         for optimization
         '''
@@ -2880,16 +2883,26 @@ class JaxOnlineController(BaseAgent):
         self.eval_hyperparams = eval_hyperparams
         self.warm_start = warm_start
         self.train_kwargs = train_kwargs
+        self.max_attempts = max_attempts
         self.reset()
      
     def sample_action(self, state: Dict[str, Any]) -> Dict[str, Any]:
         planner = self.planner
         callback = planner.optimize(
-            key=self.key,
-            guess=self.guess,
-            subs=state,
-            **self.train_kwargs
-        )
+            key=self.key, guess=self.guess, subs=state, **self.train_kwargs)
+        
+        # optimize again if jit compilation takes up the entire time budget
+        attempts = 0
+        while attempts < self.max_attempts and callback['iteration'] <= 1:
+            attempts += 1
+            message = termcolor.colored(
+                f'[WARN] JIT compilation dominated the execution time: '
+                f'executing the optimizer again on the traced model [attempt {attempts}].', 
+                'yellow')
+            print(message)
+            callback = planner.optimize(
+                key=self.key, guess=self.guess, subs=state, **self.train_kwargs)
+            
         self.callback = callback
         params = callback['best_params']
         self.key, subkey = random.split(self.key)
