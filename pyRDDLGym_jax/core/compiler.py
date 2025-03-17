@@ -798,7 +798,7 @@ class JaxRDDLCompiler:
         elif n == 2 or (n >= 2 and op in {'*', '+'}):
             jax_exprs = [self._jax(arg, init_params) for arg in args]
             result = jax_exprs[0]
-            for i, jax_rhs in enumerate(jax_exprs[1:]):
+            for (i, jax_rhs) in enumerate(jax_exprs[1:]):
                 jax_op = valid_ops[op](f'{expr.id}_{op}{i}', init_params)
                 result = self._jax_binary(result, jax_rhs, jax_op, at_least_int=True)
             return result
