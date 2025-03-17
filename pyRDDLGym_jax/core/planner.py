@@ -57,6 +57,7 @@ from tqdm import tqdm, TqdmWarning
 import warnings
 warnings.filterwarnings("ignore", category=TqdmWarning)
 
+from pyRDDLGym.core.compiler.initializer import RDDLValueInitializer
 from pyRDDLGym.core.compiler.model import RDDLPlanningModel, RDDLLiftedModel
 from pyRDDLGym.core.debug.logger import Logger
 from pyRDDLGym.core.debug.exception import (
@@ -300,6 +301,8 @@ class JaxRDDLCompilerWithGrad(JaxRDDLCompiler):
         return _jax_wrapped_stop_grad
         
     def _compile_cpfs(self, init_params):
+
+        # cpfs will all be cast to float
         cpfs_cast = set()   
         jax_cpfs = {}
         for (_, cpfs) in self.levels.items():
@@ -1369,6 +1372,8 @@ class GaussianPGPE(PGPE):
         def _jax_wrapped_mu_noise(key, sigma):
             return sigma * random.normal(key, shape=jnp.shape(sigma), dtype=real_dtype)
 
+        # this samples a noise variable epsilon* from epsilon with the N(0, 1) density
+        # according to super-symmetric sampling paper
         def _jax_wrapped_epsilon_star(sigma, epsilon):
             c1, c2, c3 = -0.06655, -0.9706, 0.124
             phi = 0.67449 * sigma
@@ -1385,6 +1390,7 @@ class GaussianPGPE(PGPE):
                 epsilon_star = jnp.sign(epsilon) * phi * jnp.exp(a)
             return epsilon_star
 
+        # implements baseline-free super-symmetric sampling to generate 4 trajectories
         def _jax_wrapped_sample_params(key, mu, sigma):
             treedef = jax.tree_util.tree_structure(sigma)
             keys = random.split(key, num=treedef.num_leaves)
@@ -1405,6 +1411,7 @@ class GaussianPGPE(PGPE):
         #
         # ***********************************************************************
 
+        # gradient with respect to mean
         def _jax_wrapped_mu_grad(epsilon, epsilon_star, r1, r2, r3, r4, m):
             if super_symmetric:
                 if scale_reward:
@@ -1424,6 +1431,7 @@ class GaussianPGPE(PGPE):
                 grad = -r_mu * epsilon
             return grad
         
+        #  gradient with respect to std. deviation
         def _jax_wrapped_sigma_grad(epsilon, epsilon_star, sigma, r1, r2, r3, r4, m, ent):
             if super_symmetric:
                 mask = r1 + r2 >= r3 + r4
@@ -1444,6 +1452,7 @@ class GaussianPGPE(PGPE):
             grad = -(r_sigma * s + ent / sigma)
             return grad
             
+        # calculate the policy gradients
         def _jax_wrapped_pgpe_grad(key, mu, sigma, r_max, ent,
                                    policy_hyperparams, subs, model_params):
             key, subkey = random.split(key)
@@ -1493,11 +1502,13 @@ class GaussianPGPE(PGPE):
         #
         # ***********************************************************************
 
+        # estimate KL divergence between two updates
         def _jax_wrapped_pgpe_kl_term(mu, sigma, old_mu, old_sigma):
             return 0.5 * jnp.sum(2 * jnp.log(sigma / old_sigma) + 
                                  jnp.square(old_sigma / sigma) + 
                                  jnp.square((mu - old_mu) / sigma) - 1)
         
+        # update mean and std. deviation with a gradient step
         def _jax_wrapped_pgpe_update_helper(mu, sigma, mu_grad, sigma_grad, 
                                             mu_state, sigma_state):
             mu_updates, new_mu_state = mu_optimizer.update(mu_grad, mu_state, params=mu) 
@@ -1615,6 +1626,7 @@ def cvar_utility(returns: jnp.ndarray, alpha: float) -> float:
     return jnp.sum(returns * weights)
 
 
+# set of all currently valid built-in utility functions
 UTILITY_LOOKUP = {
     'mean': jnp.mean,
     'mean_var': mean_variance_utility,
@@ -2048,6 +2060,8 @@ r"""
             return None
         
         # for parallel policy update
+        # currently implements a hard replacement where the jaxplan parameter
+        # is replaced by the PGPE parameter if the latter is an improvement
         def _jax_wrapped_pgpe_jaxplan_merge(pgpe_mask, pgpe_param, policy_params, 
                                             pgpe_loss, test_loss, 
                                             pgpe_loss_smooth, test_loss_smooth, 
@@ -2082,6 +2096,13 @@ r"""
             train_value = np.asarray(train_value, dtype=self.compiled.REAL)
             init_train[name] = train_value
             init_test[name] = np.repeat(value, repeats=n_test, axis=0)
+
+            # safely cast test subs variable to required type in case the type is wrong
+            if name in rddl.variable_ranges:
+                required_type = RDDLValueInitializer.NUMPY_TYPES.get(
+                    rddl.variable_ranges[name], RDDLValueInitializer.INT)
+                if np.result_type(init_test[name]) != required_type:
+                    init_test[name] = np.asarray(init_test[name], dtype=required_type)
         
         # make sure next-state fluents are also set
         for (state, next_state) in rddl.next_state.items():
@@ -2089,7 +2110,7 @@ r"""
             init_test[next_state] = init_test[state]
         return init_train, init_test
     
-    def _parallelize_pytree(self, pytree):
+    def _broadcast_pytree(self, pytree):
         if self.parallel_updates is None:
             return pytree
         
@@ -2385,8 +2406,8 @@ r"""
         # initialize model parameters
         if model_params is None:
             model_params = self.compiled.model_params
-        model_params = self._parallelize_pytree(model_params)
-        model_params_test = self._parallelize_pytree(self.test_compiled.model_params)
+        model_params = self._broadcast_pytree(model_params)
+        model_params_test = self._broadcast_pytree(self.test_compiled.model_params)
         
         # initialize policy parameters
         if guess is None:
@@ -2394,7 +2415,7 @@ r"""
             policy_params, opt_state, opt_aux = self.initialize(
                 subkey, policy_hyperparams, train_subs)
         else:
-            policy_params = self._parallelize_pytree(guess)
+            policy_params = self._broadcast_pytree(guess)
             opt_state, opt_aux = self.init_optimizer(policy_params)
         
         # initialize pgpe parameters
@@ -2695,9 +2716,6 @@ r"""
         max_grad_norm = max(jax.tree_util.tree_leaves(grad_norm))
         grad_is_zero = np.allclose(max_grad_norm, 0)
         
-        validation_error = 100 * abs(test_return - train_return) / \
-                            max(abs(train_return), abs(test_return))
-        
         # divergence if the solution is not finite
         if not np.isfinite(train_return):
             return termcolor.colored('[FAIL] Training loss diverged.', 'red')
@@ -2720,6 +2738,8 @@ r"""
         
         # model is likely poor IF:
         # 1. the train and test return disagree
+        validation_error = 100 * abs(test_return - train_return) / \
+                            max(abs(train_return), abs(test_return))
         if not (validation_error < 20):
             return termcolor.colored(
                 f'[WARN] Progress was made '
