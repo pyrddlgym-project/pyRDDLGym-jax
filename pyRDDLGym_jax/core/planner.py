@@ -609,7 +609,7 @@ class JaxStraightLinePlan(JaxPlan):
             start = 0
             for (name, size) in action_sizes.items():
                 action = output[..., start:start + size]
-                action = jnp.reshape(action, newshape=shapes[name][1:])
+                action = jnp.reshape(action, shapes[name][1:])
                 if noop[name]:
                     action = 1.0 - action
                 actions[name] = action
@@ -842,7 +842,7 @@ class JaxStraightLinePlan(JaxPlan):
 
     def guess_next_epoch(self, params: Pytree) -> Pytree:
         next_fn = JaxStraightLinePlan._guess_next_epoch
-        return jax.tree_map(next_fn, params)
+        return jax.tree_util.tree_map(next_fn, params)
 
 
 class JaxDeepReactivePolicy(JaxPlan):
@@ -1060,7 +1060,7 @@ class JaxDeepReactivePolicy(JaxPlan):
             for (name, size) in layer_sizes.items():
                 if ranges[name] == 'bool':
                     action = output[..., start:start + size]
-                    action = jnp.reshape(action, newshape=shapes[name])
+                    action = jnp.reshape(action, shapes[name])
                     if noop[name]:
                         action = 1.0 - action
                     actions[name] = action
@@ -1355,7 +1355,7 @@ class GaussianPGPE(PGPE):
         
         def _jax_wrapped_pgpe_init(key, policy_params):
             mu = policy_params
-            sigma = jax.tree_map(partial(jnp.full_like, fill_value=sigma0), mu)
+            sigma = jax.tree_util.tree_map(partial(jnp.full_like, fill_value=sigma0), mu)
             pgpe_params = (mu, sigma)
             pgpe_opt_state = (mu_optimizer.init(mu), sigma_optimizer.init(sigma))
             r_max = -jnp.inf
@@ -1403,13 +1403,14 @@ class GaussianPGPE(PGPE):
             treedef = jax.tree_util.tree_structure(sigma)
             keys = random.split(key, num=treedef.num_leaves)
             keys_pytree = jax.tree_util.tree_unflatten(treedef=treedef, leaves=keys)
-            epsilon = jax.tree_map(_jax_wrapped_mu_noise, keys_pytree, sigma)
-            p1 = jax.tree_map(jnp.add, mu, epsilon)
-            p2 = jax.tree_map(jnp.subtract, mu, epsilon)
+            epsilon = jax.tree_util.tree_map(_jax_wrapped_mu_noise, keys_pytree, sigma)
+            p1 = jax.tree_util.tree_map(jnp.add, mu, epsilon)
+            p2 = jax.tree_util.tree_map(jnp.subtract, mu, epsilon)
             if super_symmetric:
-                epsilon_star = jax.tree_map(_jax_wrapped_epsilon_star, sigma, epsilon)     
-                p3 = jax.tree_map(jnp.add, mu, epsilon_star)
-                p4 = jax.tree_map(jnp.subtract, mu, epsilon_star)
+                epsilon_star = jax.tree_util.tree_map(
+                    _jax_wrapped_epsilon_star, sigma, epsilon)     
+                p3 = jax.tree_util.tree_map(jnp.add, mu, epsilon_star)
+                p4 = jax.tree_util.tree_map(jnp.subtract, mu, epsilon_star)
             else:
                 epsilon_star, p3, p4 = epsilon, p1, p2
             return p1, p2, p3, p4, epsilon, epsilon_star
@@ -1477,11 +1478,11 @@ class GaussianPGPE(PGPE):
                 r_max = jnp.maximum(r_max, r4)       
             else:
                 r3, r4 = r1, r2            
-            grad_mu = jax.tree_map(
+            grad_mu = jax.tree_util.tree_map(
                 partial(_jax_wrapped_mu_grad, r1=r1, r2=r2, r3=r3, r4=r4, m=r_max), 
                 epsilon, epsilon_star
             ) 
-            grad_sigma = jax.tree_map(
+            grad_sigma = jax.tree_util.tree_map(
                 partial(_jax_wrapped_sigma_grad, 
                         r1=r1, r2=r2, r3=r3, r4=r4, m=r_max, ent=ent), 
                 epsilon, epsilon_star, sigma
@@ -1500,7 +1501,7 @@ class GaussianPGPE(PGPE):
                     _jax_wrapped_pgpe_grad, 
                     in_axes=(0, None, None, None, None, None, None, None)
                 )(keys, mu, sigma, r_max, ent, policy_hyperparams, subs, model_params)
-                mu_grad, sigma_grad = jax.tree_map(
+                mu_grad, sigma_grad = jax.tree_util.tree_map(
                     partial(jnp.mean, axis=0), (mu_grads, sigma_grads))
                 new_r_max = jnp.max(r_maxs)
             return mu_grad, sigma_grad, new_r_max
@@ -1524,7 +1525,7 @@ class GaussianPGPE(PGPE):
                 sigma_grad, sigma_state, params=sigma) 
             new_mu = optax.apply_updates(mu, mu_updates)
             new_sigma = optax.apply_updates(sigma, sigma_updates)
-            new_sigma = jax.tree_map(
+            new_sigma = jax.tree_util.tree_map(
                 partial(jnp.clip, min=sigma_lo, max=sigma_hi), new_sigma)
             return new_mu, new_sigma, new_mu_state, new_sigma_state
 
@@ -1545,7 +1546,7 @@ class GaussianPGPE(PGPE):
             if max_kl is not None:
                 old_mu_lr = new_mu_state.hyperparams['learning_rate']
                 old_sigma_lr = new_sigma_state.hyperparams['learning_rate']
-                kl_terms = jax.tree_map(
+                kl_terms = jax.tree_util.tree_map(
                     _jax_wrapped_pgpe_kl_term, new_mu, new_sigma, mu, sigma)
                 total_kl = jax.tree_util.tree_reduce(jnp.add, kl_terms)
                 kl_reduction = jnp.minimum(1.0, jnp.sqrt(max_kl / total_kl))
@@ -1934,7 +1935,8 @@ r"""
         
         # optimization
         self.update = self._jax_update(train_loss)
-        self.pytree_at = jax.jit(lambda tree, i: jax.tree_map(lambda x: x[i], tree))
+        self.pytree_at = jax.jit(
+            lambda tree, i: jax.tree_util.tree_map(lambda x: x[i], tree))
 
         # pgpe option
         if self.use_pgpe:
@@ -2023,7 +2025,7 @@ r"""
         # check if the gradients are all zeros
         def _jax_wrapped_zero_gradients(grad):
             leaves, _ = jax.tree_util.tree_flatten(
-                jax.tree_map(partial(jnp.allclose, b=0), grad))
+                jax.tree_util.tree_map(partial(jnp.allclose, b=0), grad))
             return jnp.all(jnp.asarray(leaves))
         
         # calculate the plan gradient w.r.t. return loss and update optimizer
@@ -2082,7 +2084,7 @@ r"""
             def select_fn(leaf1, leaf2):
                 expanded_mask = pgpe_mask[(...,) + (jnp.newaxis,) * (jnp.ndim(leaf1) - 1)]
                 return jnp.where(expanded_mask, leaf1, leaf2)
-            policy_params = jax.tree_map(select_fn, pgpe_param, policy_params)
+            policy_params = jax.tree_util.tree_map(select_fn, pgpe_param, policy_params)
             test_loss = jnp.where(pgpe_mask, pgpe_loss, test_loss)
             test_loss_smooth = jnp.where(pgpe_mask, pgpe_loss_smooth, test_loss_smooth)
             expanded_mask = pgpe_mask[(...,) + (jnp.newaxis,) * (jnp.ndim(converged) - 1)]
@@ -2104,7 +2106,7 @@ r"""
                     f'Variable <{name}> in subs argument is not a '
                     f'valid p-variable, must be one of '
                     f'{set(self.test_compiled.init_values.keys())}.')
-            value = np.reshape(value, newshape=np.shape(init_value))[np.newaxis, ...]
+            value = np.reshape(value, np.shape(init_value))[np.newaxis, ...]
             train_value = np.repeat(value, repeats=n_train, axis=0)
             train_value = np.asarray(train_value, dtype=self.compiled.REAL)
             init_train[name] = train_value
@@ -2134,7 +2136,7 @@ r"""
                 x[np.newaxis, ...], shape=(self.parallel_updates,) + np.shape(x))
             return x
                 
-        return jax.tree_map(make_batched, pytree)
+        return jax.tree_util.tree_map(make_batched, pytree)
     
     def as_optimization_problem(
             self, key: Optional[random.PRNGKey]=None,
@@ -2717,7 +2719,8 @@ r"""
         
         # summarize and test for convergence
         if print_summary:
-            grad_norm = jax.tree_map(lambda x: np.linalg.norm(x).item(), best_grad)
+            grad_norm = jax.tree_util.tree_map(
+                lambda x: np.linalg.norm(x).item(), best_grad)
             diagnosis = self._perform_diagnosis(
                 last_iter_improve, -np.min(train_loss), -np.min(test_loss_smooth), 
                 -best_loss, grad_norm)
@@ -2819,7 +2822,7 @@ r"""
             
         # cast device arrays to numpy
         actions = self.test_policy(key, params, policy_hyperparams, step, subs)
-        actions = jax.tree_map(np.asarray, actions)
+        actions = jax.tree_util.tree_map(np.asarray, actions)
         return actions      
        
 
