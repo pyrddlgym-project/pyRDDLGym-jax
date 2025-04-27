@@ -84,11 +84,11 @@ class JaxRDDLSimulator(RDDLSimulator):
         self.levels = compiled.levels
         self.traced = compiled.traced
         
-        self.invariants = jax.tree_map(jax.jit, compiled.invariants)
-        self.preconds = jax.tree_map(jax.jit, compiled.preconditions)
-        self.terminals = jax.tree_map(jax.jit, compiled.terminations)
+        self.invariants = jax.tree_util.tree_map(jax.jit, compiled.invariants)
+        self.preconds = jax.tree_util.tree_map(jax.jit, compiled.preconditions)
+        self.terminals = jax.tree_util.tree_map(jax.jit, compiled.terminations)
         self.reward = jax.jit(compiled.reward)
-        jax_cpfs = jax.tree_map(jax.jit, compiled.cpfs)
+        jax_cpfs = jax.tree_util.tree_map(jax.jit, compiled.cpfs)
         self.model_params = compiled.model_params
         
         # level analysis

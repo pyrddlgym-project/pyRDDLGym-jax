@@ -430,7 +430,7 @@ class JaxRDDLCompiler:
                 _jax_wrapped_single_step_policy,
                 in_axes=(0, None, None, None, 0, None)
             )(keys, policy_params, hyperparams, step, subs, model_params)
-            model_params = jax.tree_map(partial(jnp.mean, axis=0), model_params)
+            model_params = jax.tree_util.tree_map(partial(jnp.mean, axis=0), model_params)
             carry = (key, policy_params, hyperparams, subs, model_params)
             return carry, log            
             
@@ -440,7 +440,7 @@ class JaxRDDLCompiler:
             start = (key, policy_params, hyperparams, subs, model_params)
             steps = jnp.arange(n_steps)
             end, log = jax.lax.scan(_jax_wrapped_batched_step_policy, start, steps)
-            log = jax.tree_map(partial(jnp.swapaxes, axis1=0, axis2=1), log)
+            log = jax.tree_util.tree_map(partial(jnp.swapaxes, axis1=0, axis2=1), log)
             model_params = end[-1]
             return log, model_params
         
