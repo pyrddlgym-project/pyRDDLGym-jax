@@ -423,7 +423,7 @@ class JaxMCTSPlanner:
 
         # update the MCTS tree normally
         if t == self.T:
-            return 0.0, key, None, 0, 0, 0, 0, 0
+            return 0.0, key, None, 0, 0, 0, 0, 0, opt_state
         vC, rollout, key = self._select_action(subs, vD, c, key, alpha)
         vD2, added, key = self._select_state(vD, vC, subs, key, beta)
         subs0 = subs
@@ -647,7 +647,7 @@ class JaxMCTSController(BaseAgent):
 
 
 if __name__ == '__main__':
-    env = pyRDDLGym.make('Reservoir_Continuous', '0', vectorized=True)
+    env = pyRDDLGym.make('MountainCar_Discrete_gym', '0', vectorized=True)
     rddl = env.model
     rddl.horizon = 120
     
