@@ -229,13 +229,19 @@ def _load_config(config, args):
 
 
 def load_config(path: str) -> Tuple[Kwargs, ...]:
-    '''Loads a config file at the specified file path.'''
+    '''Loads a config file at the specified file path.
+    
+    :param path: the path of the config file to load and parse
+    '''
     config, args = _parse_config_file(path)
     return _load_config(config, args)
 
 
 def load_config_from_string(value: str) -> Tuple[Kwargs, ...]:
-    '''Loads config file contents specified explicitly as a string value.'''
+    '''Loads config file contents specified explicitly as a string value.
+    
+    :param value: the string in json format containing the config contents to parse
+    '''
     config, args = _parse_config_string(value)
     return _load_config(config, args)
     
@@ -1802,6 +1808,9 @@ class JaxBackpropPlanner:
         self._jax_compile_optimizer()
     
     def summarize_system(self) -> str:
+        '''Returns a string containing information about the system, Python version 
+        and jax-related packages that are relevant to the current planner.
+        '''
         try:
             jaxlib_version = jax._src.lib.version_str
         except Exception as _:
@@ -1830,6 +1839,9 @@ r"""
                 f'devices: {devices_short}\n')
     
     def summarize_relaxations(self) -> str:
+        '''Returns a summary table containing all non-differentiable operators
+        and their relaxations.
+        '''
         result = ''
         if self.compiled.model_params:
             result += ('Some RDDL operations are non-differentiable '
@@ -1846,6 +1858,9 @@ r"""
         return result
         
     def summarize_hyperparameters(self) -> str:
+        '''Returns a string summarizing the hyper-parameters of the current planner 
+        instance.
+        '''
         result = (f'objective hyper-parameters:\n'
                   f'    utility_fn        ={self.utility.__name__}\n'
                   f'    utility args      ={self.utility_kwargs}\n'
