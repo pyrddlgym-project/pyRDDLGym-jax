@@ -986,7 +986,8 @@ class JaxRDDLCompiler:
             sample_cases = [None] * len(jax_cases)
             for (i, jax_case) in enumerate(jax_cases):
                 sample_cases[i], key, err_case, params = jax_case(x, params, key)
-                err |= err_case                
+                err |= err_case      
+            sample_cases = jnp.asarray(sample_cases)          
             sample_cases = jnp.asarray(sample_cases, dtype=self._fix_dtype(sample_cases))
             
             # predicate (enum) is an integer - use it to extract from case array
