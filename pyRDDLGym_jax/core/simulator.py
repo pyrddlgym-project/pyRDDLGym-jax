@@ -19,10 +19,12 @@
 
 
 import time
-from typing import Dict, Optional
+import numpy as np
+from typing import Dict, Optional, Union
 
 import jax
 
+from pyRDDLGym.core.compiler.initializer import RDDLValueInitializer
 from pyRDDLGym.core.compiler.model import RDDLLiftedModel
 from pyRDDLGym.core.debug.exception import (
     RDDLActionPreconditionNotSatisfiedError,
@@ -35,7 +37,7 @@ from pyRDDLGym.core.simulator import RDDLSimulator
 
 from pyRDDLGym_jax.core.compiler import JaxRDDLCompiler
 
-Args = Dict[str, Value]
+Args = Dict[str, Union[np.ndarray, Value]]
 
 
 class JaxRDDLSimulator(RDDLSimulator):
@@ -45,6 +47,7 @@ class JaxRDDLSimulator(RDDLSimulator):
                  raise_error: bool=True,
                  logger: Optional[Logger]=None,
                  keep_tensors: bool=False,
+                 objects_as_strings: bool=True,
                  **compiler_args) -> None:
         '''Creates a new simulator for the given RDDL model with Jax as a backend.
         
@@ -57,6 +60,8 @@ class JaxRDDLSimulator(RDDLSimulator):
         :param logger: to log information about compilation to file
         :param keep_tensors: whether the sampler takes actions and
         returns state in numpy array form
+        param objects_as_strings: whether to return object values as strings (defaults
+        to integer indices if False)
         :param **compiler_args: keyword arguments to pass to the Jax compiler
         '''
         if key is None:
@@ -67,7 +72,8 @@ class JaxRDDLSimulator(RDDLSimulator):
         
         # generate direct sampling with default numpy RNG and operations
         super(JaxRDDLSimulator, self).__init__(
-            rddl, logger=logger, keep_tensors=keep_tensors)
+            rddl, logger=logger, 
+            keep_tensors=keep_tensors, objects_as_strings=objects_as_strings)
     
     def seed(self, seed: int) -> None:
         super(JaxRDDLSimulator, self).seed(seed)
@@ -139,7 +145,6 @@ class JaxRDDLSimulator(RDDLSimulator):
     
     def check_action_preconditions(self, actions: Args, silent: bool=False) -> bool:
         '''Throws an exception if the action preconditions are not satisfied.'''
-        actions = self._process_actions(actions)
         subs = self.subs
         subs.update(actions)
         
@@ -180,7 +185,6 @@ class JaxRDDLSimulator(RDDLSimulator):
         '''
         rddl = self.rddl
         keep_tensors = self.keep_tensors
-        actions = self._process_actions(actions)
         subs = self.subs
         subs.update(actions)
         
@@ -196,20 +200,40 @@ class JaxRDDLSimulator(RDDLSimulator):
         # update state
         self.state = {}
         for (state, next_state) in rddl.next_state.items():
+
+            # set state = state' for the next epoch
             subs[state] = subs[next_state]
+
+            # convert object integer to string representation
+            state_values = subs[state]
+            if self.objects_as_strings:
+                ptype = rddl.variable_ranges[state]
+                if ptype not in RDDLValueInitializer.NUMPY_TYPES:
+                    state_values = rddl.index_to_object_string_array(ptype, state_values)
+
+            # optional grounding of state dictionary
             if keep_tensors:
-                self.state[state] = subs[state]
+                self.state[state] = state_values
             else:
-                self.state.update(rddl.ground_var_with_values(state, subs[state]))
+                self.state.update(rddl.ground_var_with_values(state, state_values))
         
         # update observation
         if self._pomdp: 
             obs = {}
             for var in rddl.observ_fluents:
+
+                # convert object integer to string representation
+                obs_values = subs[var]
+                if self.objects_as_strings:
+                    ptype = rddl.variable_ranges[var]
+                    if ptype not in RDDLValueInitializer.NUMPY_TYPES:
+                        obs_values = rddl.index_to_object_string_array(ptype, obs_values)
+
+                # optional grounding of observ-fluent dictionary    
                 if keep_tensors:
-                    obs[var] = subs[var]
+                    obs[var] = obs_values
                 else:
-                    obs.update(rddl.ground_var_with_values(var, subs[var]))
+                    obs.update(rddl.ground_var_with_values(var, obs_values))
         else:
             obs = self.state
         
