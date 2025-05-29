@@ -1,0 +1,21 @@
+non-fluents Reservoir_2nf {
+    domain = reservoir_control;
+    objects {
+        reservoir: { t1, t2 };
+    };
+    non-fluents {
+        RES_CONNECT(t1,t2);
+        CONNECTED_TO_SEA(t2);
+    };
+}
+
+instance Reservoir2 {
+    domain = reservoir_control;
+    non-fluents = Reservoir_2nf;
+    init-state {
+        rlevel(t1) = 45.0;
+    };
+    max-nondef-actions = pos-inf;
+    horizon = 120;
+    discount = 1.0;
+}
