@@ -2121,7 +2121,9 @@ r"""
                     f'Variable <{name}> in subs argument is not a '
                     f'valid p-variable, must be one of '
                     f'{set(self.test_compiled.init_values.keys())}.')
-            value = np.reshape(value, np.shape(init_value))[np.newaxis, ...]
+            value = np.reshape(value, np.shape(init_value))[np.newaxis, ...]            
+            if value.dtype.type is np.str_:
+                value = rddl.object_string_to_index_array(rddl.variable_ranges[name], value)
             train_value = np.repeat(value, repeats=n_train, axis=0)
             train_value = np.asarray(train_value, dtype=self.compiled.REAL)
             init_train[name] = train_value
@@ -2813,6 +2815,7 @@ r"""
         :param policy_hyperparams: hyper-parameters for the policy/plan, such as
         weights for sigmoid wrapping boolean actions (optional)
         '''
+        subs = subs.copy()
         
         # check compatibility of the subs dictionary
         for (var, values) in subs.items():
@@ -2831,9 +2834,13 @@ r"""
                 if step == 0 and var in self.rddl.observ_fluents:
                     subs[var] = self.test_compiled.init_values[var]
                 else:
-                    raise ValueError(
-                        f'Values {values} assigned to p-variable <{var}> are '
-                        f'non-numeric of type {dtype}.')
+                    if dtype.type is np.str_:
+                        prange = self.rddl.variable_ranges[var]
+                        subs[var] = self.rddl.object_string_to_index_array(prange, subs[var])     
+                    else:               
+                        raise ValueError(
+                            f'Values {values} assigned to p-variable <{var}> are '
+                            f'non-numeric of type {dtype}.')
             
         # cast device arrays to numpy
         actions = self.test_policy(key, params, policy_hyperparams, step, subs)
