@@ -707,7 +707,10 @@ class JaxRDDLCompiler:
                     sample = jnp.asarray(value, dtype=self._fix_dtype(value))
                     new_slices = [None] * len(jax_nested_expr)
                     for (i, jax_expr) in enumerate(jax_nested_expr):
-                        new_slices[i], key, err, params = jax_expr(x, params, key)
+                        new_slice, key, err, params = jax_expr(x, params, key)
+                        if not jnp.issubdtype(jnp.result_type(new_slice), jnp.integer):
+                            new_slice = jnp.asarray(new_slice, dtype=self.INT)
+                        new_slices[i] = new_slice
                         error |= err
                     new_slices = tuple(new_slices)
                     sample = sample[new_slices]
