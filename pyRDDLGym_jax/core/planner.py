@@ -2924,6 +2924,8 @@ class JaxOfflineController(BaseAgent):
         
     def reset(self) -> None:
         self.step = 0
+
+        # train the policy if required to reset at the start of every episode
         if self.train_on_reset and not self.params_given:
             callback = self.planner.optimize(key=self.key, **self.train_kwargs)
             self.callback = callback
@@ -2981,12 +2983,15 @@ class JaxOnlineController(BaseAgent):
                     f'[attempt {attempts}].', 'yellow')
                 print(message)
             callback = planner.optimize(
-                key=self.key, guess=self.guess, subs=state, **self.train_kwargs)
-            
+                key=self.key, guess=self.guess, subs=state, **self.train_kwargs)    
         self.callback = callback
         params = callback['best_params']
+
+        # get the action from the parameters for the current state
         self.key, subkey = random.split(self.key)
         actions = planner.get_action(subkey, params, 0, state, self.eval_hyperparams)
+
+        # apply warm start for the next epoch
         if self.warm_start:
             self.guess = planner.plan.guess_next_epoch(params)
         return actions
