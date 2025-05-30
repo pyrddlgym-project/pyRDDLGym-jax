@@ -3,23 +3,47 @@ import argparse
 from pyRDDLGym_jax.examples import run_plan, run_tune
 
 def main():
-    parser = argparse.ArgumentParser(description="Command line parser for the JaxPlan planner.")
+    parser = argparse.ArgumentParser(prog='jaxplan',
+                                     description="command line parser for the jaxplan planner")
     subparsers = parser.add_subparsers(dest="jaxplan", required=True)
 
     # planning
-    parser_plan = subparsers.add_parser("plan", help="Executes JaxPlan on a specified RDDL problem and method (slp, drp, or replan).")
-    parser_plan.add_argument('args', nargs=argparse.REMAINDER)
+    parser_plan = subparsers.add_parser("plan", 
+                                        help="execute jaxplan on a specified RDDL problem")
+    parser_plan.add_argument('domain', type=str,  
+                             help='name of domain in rddlrepository or a valid file path')
+    parser_plan.add_argument('instance', type=str, 
+                             help='name of instance in rddlrepository or a valid file path')
+    parser_plan.add_argument('method', type=str, 
+                             help='training method to apply: [slp, drp] are offline methods, and [replan] are online')
+    parser_plan.add_argument('-e', '--episodes', type=int, required=False, default=1, 
+                             help='number of training or evaluation episodes')
 
     # tuning
-    parser_tune = subparsers.add_parser("tune", help="Tunes JaxPlan on a specified RDDL problem and method (slp, drp, or replan).")
-    parser_tune.add_argument('args', nargs=argparse.REMAINDER)
+    parser_tune = subparsers.add_parser("tune", 
+                                        help="tune jaxplan on a specified RDDL problem")
+    parser_tune.add_argument('domain', type=str,  
+                             help='name of domain in rddlrepository or a valid file path')
+    parser_tune.add_argument('instance', type=str, 
+                             help='name of instance in rddlrepository or a valid file path')
+    parser_tune.add_argument('method', type=str, 
+                             help='training method to apply: [slp, drp] are offline methods, and [replan] are online')
+    parser_tune.add_argument('-t', '--trials', type=int, required=False, default=5, 
+                             help='number of evaluation rollouts per hyper-parameter choice')
+    parser_tune.add_argument('-i', '--iters', type=int, required=False, default=20, 
+                             help='number of iterations of bayesian optimization')
+    parser_tune.add_argument('-w', '--workers', type=int, required=False, default=4, 
+                             help='number of parallel hyper-parameters to evaluate per iteration')
+    parser_tune.add_argument('-d', '--dashboard', type=bool, required=False, default=False, 
+                             help='show the dashboard')
 
     # dispatch
     args = parser.parse_args()
     if args.jaxplan == "plan":
-        run_plan.run_from_args(args.args)
+        run_plan.main(args.domain, args.instance, args.method, args.episodes)
     elif args.jaxplan == "tune":
-        run_tune.run_from_args(args.args)
+        run_tune.main(args.domain, args.instance, args.method, 
+                      args.trials, args.iters, args.workers, args.dashboard)
     else:
         parser.print_help()
 
