@@ -371,16 +371,30 @@ class JaxParameterTuning:
         '''Tunes the Bayesian optimization algorithm hyper-parameters.'''
         print(f'Kernel: {repr(optimizer._gp.kernel_)}.')
         
-    def tune(self, key: int, log_file: str, show_dashboard: bool=False) -> ParameterValues:
-        '''Tunes the hyper-parameters for Jax planner, returns the best found.'''
+    def tune(self, key: int, 
+             log_file: Optional[str]=None, 
+             show_dashboard: bool=False, 
+             print_hyperparams: bool=False) -> ParameterValues:
+        '''Tunes the hyper-parameters for Jax planner, returns the best found.
         
-        print(self.summarize_hyperparameters())
+        :param key: RNG key to seed the hyper-parameter optimizer
+        :param log_file: optional path to file where tuning progress will be saved
+        :param show_dashboard: whether to display tuning results in a dashboard
+        :param print_hyperparams: whether to print a hyper-parameter summary of the 
+        optimizer
+        '''
+        
+        if self.verbose:
+            print(JaxBackpropPlanner.summarize_system())
+        if print_hyperparams:
+            print(self.summarize_hyperparameters())
         
         # clear and prepare output file
-        with open(log_file, 'w', newline='') as file:
-            writer = csv.writer(file)
-            writer.writerow(COLUMNS + list(self.hyperparams_dict.keys()))
-        
+        if log_file is not None:
+            with open(log_file, 'w', newline='') as file:
+                writer = csv.writer(file)
+                writer.writerow(COLUMNS + list(self.hyperparams_dict.keys()))
+            
         # create a dash-board for visualizing experiment runs
         if show_dashboard and JaxPlannerDashboard is not None:
             dashboard = JaxPlannerDashboard()
@@ -519,9 +533,10 @@ class JaxParameterTuning:
                 self.tune_optimizer(optimizer)
                 
                 # write results of all processes in current iteration to file
-                with open(log_file, 'a', newline='') as file:
-                    writer = csv.writer(file)
-                    writer.writerows(rows)
+                if log_file is not None:
+                    with open(log_file, 'a', newline='') as file:
+                        writer = csv.writer(file)
+                        writer.writerows(rows)
                     
                 # update the dashboard tuning
                 if show_dashboard:

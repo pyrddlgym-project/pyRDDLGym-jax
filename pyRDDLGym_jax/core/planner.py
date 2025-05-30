@@ -1808,7 +1808,8 @@ class JaxBackpropPlanner:
         self._jax_compile_rddl()        
         self._jax_compile_optimizer()
     
-    def summarize_system(self) -> str:
+    @staticmethod
+    def summarize_system() -> str:
         '''Returns a string containing information about the system, Python version 
         and jax-related packages that are relevant to the current planner.
         '''
