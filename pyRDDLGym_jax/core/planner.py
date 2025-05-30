@@ -39,6 +39,7 @@ import configparser
 from enum import Enum
 from functools import partial
 import os
+import pickle
 import sys
 import time
 import traceback
@@ -2865,8 +2866,9 @@ class JaxOfflineController(BaseAgent):
     def __init__(self, planner: JaxBackpropPlanner,
                  key: Optional[random.PRNGKey]=None,
                  eval_hyperparams: Optional[Dict[str, Any]]=None,
-                 params: Optional[Pytree]=None,
+                 params: Optional[Union[str, Pytree]]=None,
                  train_on_reset: bool=False,
+                 save_path: Optional[str]=None,
                  **train_kwargs) -> None:
         '''Creates a new JAX offline control policy that is trained once, then
         deployed later.
@@ -2877,8 +2879,10 @@ class JaxOfflineController(BaseAgent):
         :param eval_hyperparams: policy hyperparameters to apply for evaluation
         or whenever sample_action is called
         :param params: use the specified policy parameters instead of calling
-        planner.optimize()
+        planner.optimize(); can be a string pointing to a valid file path where params
+        have been saved, or a pytree of parameters
         :param train_on_reset: retrain policy parameters on every episode reset
+        :param save_path: optional path to save parameters to
         :param **train_kwargs: any keyword arguments to be passed to the planner
         for optimization
         '''
@@ -2891,12 +2895,24 @@ class JaxOfflineController(BaseAgent):
         self.train_kwargs = train_kwargs        
         self.params_given = params is not None
         
+        # load the policy from file
+        if not self.train_on_reset and params is not None and isinstance(params, str):
+            with open(params, 'rb') as file:
+                params = pickle.load(file)
+
+        # train the policy
         self.step = 0
         self.callback = None
         if not self.train_on_reset and not self.params_given:
             callback = self.planner.optimize(key=self.key, **self.train_kwargs)
             self.callback = callback
             params = callback['best_params'] 
+
+            # save the policy
+            if save_path is not None:
+                with open(save_path, 'wb') as file:
+                    pickle.dump(params, file)
+
         self.params = params  
         
     def sample_action(self, state: Dict[str, Any]) -> Dict[str, Any]:
