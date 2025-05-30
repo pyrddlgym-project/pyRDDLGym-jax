@@ -26,7 +26,7 @@ from pyRDDLGym_jax.core.planner import (
 )
 
     
-def main(domain, instance, method, episodes=1):
+def main(domain: str, instance: str, method: str, episodes: int=1) -> None:
     
     # set up the environment
     env = pyRDDLGym.make(domain, instance, vectorized=True)
