@@ -36,7 +36,8 @@ def power_10(x):
     return 10.0 ** x
 
 
-def main(domain, instance, method, trials=5, iters=20, workers=4, dashboard=False):
+def main(domain: str, instance: str, method: str, 
+         trials: int=5, iters: int=20, workers: int=4, dashboard: bool=False) -> None:
     
     # set up the environment   
     env = pyRDDLGym.make(domain, instance, vectorized=True)
