@@ -195,7 +195,7 @@ More documentation about this and other new features will be coming soon.
 A basic run script is provided to run automatic Bayesian hyper-parameter tuning for the most sensitive parameters of JaxPlan:
 
 ```shell
-jaxplan tune <domain> <instance> <method> <trials> <iters> <workers> <dashboard>
+jaxplan tune <domain> <instance> <method> <trials> <iters> <workers> <dashboard> <filepath>
 ```
 
 where:
@@ -205,7 +205,8 @@ where:
 - ``trials`` is the (optional) number of trials/episodes to average in evaluating each hyper-parameter setting
 - ``iters`` is the (optional) maximum number of iterations/evaluations of Bayesian optimization to perform
 - ``workers`` is the (optional) number of parallel evaluations to be done at each iteration, e.g. the total evaluations = ``iters * workers``
-- ``dashboard`` is whether the optimizations are tracked in the dashboard application.
+- ``dashboard`` is whether the optimizations are tracked in the dashboard application
+- ``filepath`` is the optional file path where a config file with the best hyper-parameter setting will be saved.
 
 It is easy to tune a custom range of the planner's hyper-parameters efficiently. 
 First create a config file template with patterns replacing concrete parameter values that you want to tune, e.g.:
@@ -245,23 +246,17 @@ env = pyRDDLGym.make(domain, instance, vectorized=True)
 with open('path/to/config.cfg', 'r') as file: 
     config_template = file.read() 
     
-# map parameters in the config that will be tuned
+# tune weight from 10^-1 ... 10^5 and lr from 10^-5 ... 10^1
 def power_10(x):
-    return 10.0 ** x
-    
-hyperparams = [
-    Hyperparameter('TUNABLE_WEIGHT', -1., 5., power_10),  # tune weight from 10^-1 ... 10^5
-    Hyperparameter('TUNABLE_LEARNING_RATE', -5., 1., power_10),   # tune lr from 10^-5 ... 10^1
-]
+    return 10.0 ** x    
+
+hyperparams = [Hyperparameter('TUNABLE_WEIGHT', -1., 5., power_10),
+               Hyperparameter('TUNABLE_LEARNING_RATE', -5., 1., power_10)]
     
 # build the tuner and tune
 tuning = JaxParameterTuning(env=env,
-                            config_template=config_template,
-                            hyperparams=hyperparams,
-                            online=False,
-                            eval_trials=trials,
-                            num_workers=workers,
-                            gp_iters=iters)
+                            config_template=config_template, hyperparams=hyperparams,
+                            online=False, eval_trials=trials, num_workers=workers, gp_iters=iters)
 tuning.tune(key=42, log_file='path/to/log.csv')
 ```
   
