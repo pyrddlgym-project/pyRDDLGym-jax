@@ -37,7 +37,8 @@ def power_10(x):
 
 
 def main(domain: str, instance: str, method: str, 
-         trials: int=5, iters: int=20, workers: int=4, dashboard: bool=False) -> None:
+         trials: int=5, iters: int=20, workers: int=4, dashboard: bool=False, 
+         filepath: str='') -> None:
     
     # set up the environment   
     env = pyRDDLGym.make(domain, instance, vectorized=True)
@@ -69,6 +70,9 @@ def main(domain: str, instance: str, method: str,
     tuning.tune(key=42, 
                 log_file=f'gp_{method}_{domain}_{instance}.csv', 
                 show_dashboard=dashboard)
+    if filepath is not None and filepath:
+        with open(filepath, "w") as file:
+            file.write(tuning.best_config)
     
     # evaluate the agent on the best parameters
     planner_args, _, train_args = load_config_from_string(tuning.best_config)
@@ -81,7 +85,7 @@ def main(domain: str, instance: str, method: str,
 
 def run_from_args(args):
     if len(args) < 3:
-        print('python run_tune.py <domain> <instance> <method> [<trials>] [<iters>] [<workers>] [<dashboard>]')
+        print('python run_tune.py <domain> <instance> <method> [<trials>] [<iters>] [<workers>] [<dashboard>] [<filepath>]')
         exit(1)
     if args[2] not in ['drp', 'slp', 'replan']:
         print('<method> in [drp, slp, replan]')
@@ -91,6 +95,7 @@ def run_from_args(args):
     if len(args) >= 5: kwargs['iters'] = int(args[4])
     if len(args) >= 6: kwargs['workers'] = int(args[5])
     if len(args) >= 7: kwargs['dashboard'] = bool(args[6])
+    if len(args) >= 8: kwargs['filepath'] = bool(args[7])
     main(**kwargs) 
 
 
