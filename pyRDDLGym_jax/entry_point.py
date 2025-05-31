@@ -36,6 +36,8 @@ def main():
                              help='number of parallel hyper-parameters to evaluate per iteration')
     parser_tune.add_argument('-d', '--dashboard', type=bool, required=False, default=False, 
                              help='show the dashboard')
+    parser_tune.add_argument('-f', '--filepath', type=str, required=False, default='', 
+                             help='where to save the config file of the best hyper-parameters')
 
     # dispatch
     args = parser.parse_args()
@@ -43,7 +45,8 @@ def main():
         run_plan.main(args.domain, args.instance, args.method, args.episodes)
     elif args.jaxplan == "tune":
         run_tune.main(args.domain, args.instance, args.method, 
-                      args.trials, args.iters, args.workers, args.dashboard)
+                      args.trials, args.iters, args.workers, args.dashboard, 
+                      args.filepath)
     else:
         parser.print_help()
 
