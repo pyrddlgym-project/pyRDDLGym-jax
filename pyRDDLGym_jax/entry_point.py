@@ -2,14 +2,18 @@ import argparse
 
 from pyRDDLGym_jax.examples import run_plan, run_tune
 
+EPILOG = 'For complete documentation, see https://pyrddlgym.readthedocs.io/en/latest/jax.html.'
+
 def main():
     parser = argparse.ArgumentParser(prog='jaxplan',
-                                     description="command line parser for the jaxplan planner")
+                                     description="command line parser for the jaxplan planner",
+                                     epilog=EPILOG)
     subparsers = parser.add_subparsers(dest="jaxplan", required=True)
 
     # planning
     parser_plan = subparsers.add_parser("plan", 
-                                        help="execute jaxplan on a specified RDDL problem")
+                                        help="execute jaxplan on a specified RDDL problem",
+                                        epilog=EPILOG)
     parser_plan.add_argument('domain', type=str,  
                              help='name of domain in rddlrepository or a valid file path')
     parser_plan.add_argument('instance', type=str, 
@@ -21,7 +25,8 @@ def main():
 
     # tuning
     parser_tune = subparsers.add_parser("tune", 
-                                        help="tune jaxplan on a specified RDDL problem")
+                                        help="tune jaxplan on a specified RDDL problem",
+                                        epilog=EPILOG)
     parser_tune.add_argument('domain', type=str,  
                              help='name of domain in rddlrepository or a valid file path')
     parser_tune.add_argument('instance', type=str, 
