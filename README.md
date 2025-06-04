@@ -70,7 +70,7 @@ pip install pyRDDLGym-jax[extra,dashboard]
 A basic run script is provided to train JaxPlan on any RDDL problem:
 
 ```shell
-jaxplan plan <domain> <instance> <method> <episodes>
+jaxplan plan <domain> <instance> <method> --episodes <episodes>
 ```
 
 where:
@@ -195,7 +195,7 @@ More documentation about this and other new features will be coming soon.
 A basic run script is provided to run automatic Bayesian hyper-parameter tuning for the most sensitive parameters of JaxPlan:
 
 ```shell
-jaxplan tune <domain> <instance> <method> <trials> <iters> <workers> <dashboard> <filepath>
+jaxplan tune <domain> <instance> <method> --trials <trials> --iters <iters> --workers <workers> --dashboard <dashboard> --filepath <filepath>
 ```
 
 where:
@@ -249,7 +249,6 @@ with open('path/to/config.cfg', 'r') as file:
 # tune weight from 10^-1 ... 10^5 and lr from 10^-5 ... 10^1
 def power_10(x):
     return 10.0 ** x    
-
 hyperparams = [Hyperparameter('TUNABLE_WEIGHT', -1., 5., power_10),
                Hyperparameter('TUNABLE_LEARNING_RATE', -5., 1., power_10)]
     
