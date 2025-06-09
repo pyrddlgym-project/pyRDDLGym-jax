@@ -1,16 +1,17 @@
 from collections import deque
 from enum import Enum
+from functools import partial
 import sys
 import time
 from tqdm import tqdm
 from typing import Any, Callable, Dict, Generator, Iterable, Optional, Tuple
 
 import jax
+import jax.nn.initializers as initializers
 import jax.numpy as jnp
 import jax.random as random
 import numpy as np
 import optax
-import termcolor
 
 from pyRDDLGym.core.compiler.model import RDDLLiftedModel
 
@@ -45,9 +46,11 @@ class JaxModelLearner:
     def __init__(self, rddl: RDDLLiftedModel, 
                  param_ranges: Dict[str, Tuple[Optional[np.ndarray], Optional[np.ndarray]]],
                  batch_size_train: int=32,
-                 use64bit: bool=False,
                  optimizer: Callable[..., optax.GradientTransformation]=optax.rmsprop,
                  optimizer_kwargs: Optional[Kwargs]=None,
+                 initializer: initializers.Initializer = initializers.normal(),
+                 wrap_non_bool: bool=True,
+                 use64bit: bool=False,
                  logic: Logic=ExactLogic()) -> None:
         '''Creates a new gradient-based algorithm for inferring unknown non-fluents
         in a RDDL domain from a data set or stream coming from the real environment.
@@ -56,20 +59,25 @@ class JaxModelLearner:
         :param param_ranges: the ranges of all learnable non-fluents
         :param batch_size_train: how many transitions to compute per optimization 
         step
-        :param use64bit: whether to perform arithmetic in 64 bi
         :param optimizer: a factory for an optax SGD algorithm
         :param optimizer_kwargs: a dictionary of parameters to pass to the SGD
         factory (e.g. which parameters are controllable externally)
+        :param initializer: how to initialize non-fluents
+        :param wrap_non_bool: whether to wrap non-boolean trainable parameters to satisfy
+        required ranges as specified in param_ranges (use a projected gradient otherwise)
+        :param use64bit: whether to perform arithmetic in 64 bit
         :param logic: a subclass of Logic for mapping exact mathematical
         operations to their differentiable counterparts 
         '''
         self.rddl = rddl
-        self.param_ranges = param_ranges
+        self.param_ranges = param_ranges.copy()
         self.batch_size_train = batch_size_train
-        self.use64bit = use64bit
         if optimizer_kwargs is None:
             optimizer_kwargs = {'learning_rate': 0.001}
         self.optimizer_kwargs = optimizer_kwargs
+        self.initializer = initializer
+        self.wrap_non_bool = wrap_non_bool
+        self.use64bit = use64bit
         self.logic = logic
 
         # build the optimizer
@@ -103,23 +111,40 @@ class JaxModelLearner:
         # compile the transition step function
         step_fn = self.compiled.compile_transition()
 
-        def _jax_wrapped_step(key, param_fluents, subs, actions):
+        def _jax_wrapped_step(key, param_fluents, subs, actions, hyperparams):
             for (name, param) in param_fluents.items():
                 subs[name] = param
-            return step_fn(key, actions, subs, {})
+            return step_fn(key, actions, subs, hyperparams)
 
         # batched step function
-        def _jax_wrapped_batched_step(key, param_fluents, subs, actions):
+        # TODO: come up with a better way to reduce the hyperparams batch dim
+        def _jax_wrapped_batched_step(key, param_fluents, subs, actions, hyperparams):
             keys = jnp.asarray(random.split(key, num=self.batch_size_train))
-            _, log, _ = jax.vmap(_jax_wrapped_step, in_axes=(0, None, 0, 0))(
-                keys, param_fluents, subs, actions)
+            _, log, hyperparams = jax.vmap(
+                _jax_wrapped_step, in_axes=(0, None, 0, 0, None)
+            )(keys, param_fluents, subs, actions, hyperparams)
             fluents = log['fluents']
-            return fluents
+            hyperparams = jax.tree_util.tree_map(partial(jnp.mean, axis=0), hyperparams)
+            return fluents, hyperparams
 
         batched_step_fn = jax.jit(_jax_wrapped_batched_step)
         return batched_step_fn        
 
     def _jax_map(self):
+
+        # compute case indices for bounding
+        case_indices = {}
+        if self.wrap_non_bool:
+            for (name, (lower, upper)) in self.param_ranges.items():
+                if lower is None: lower = -np.inf
+                if upper is None: upper = +np.inf
+                self.param_ranges[name] = (lower, upper)
+                case_indices[name] = (
+                    0 * (np.isfinite(lower) & np.isfinite(upper)) +
+                    1 * (np.isfinite(lower) & ~np.isfinite(upper)) +
+                    2 * (~np.isfinite(lower) & np.isfinite(upper)) +
+                    3 * (~np.isfinite(lower) & ~np.isfinite(upper))
+                )
         
         # map trainable parameters to their non-fluent values
         def _jax_wrapped_params_to_fluents(params):
@@ -128,7 +153,18 @@ class JaxModelLearner:
                 if self.rddl.variable_ranges[name] == 'bool':
                     param_fluents[name] = jax.nn.sigmoid(param)
                 else:
-                    param_fluents[name] = param
+                    if self.wrap_non_bool:
+                        lower, upper = self.param_ranges[name]
+                        cases = [
+                            lambda x: lower + (upper - lower) * jax.nn.sigmoid(x),
+                            lambda x: lower + (jax.nn.elu(x) + 1.0),
+                            lambda x: upper - (jax.nn.elu(-x) + 1.0),
+                            lambda x: x
+                        ]
+                        indices = case_indices[name]
+                        param_fluents[name] = jax.lax.switch(indices, cases, param)
+                    else:
+                        param_fluents[name] = param
             return param_fluents
         
         map_fn = jax.jit(_jax_wrapped_params_to_fluents)
@@ -138,8 +174,9 @@ class JaxModelLearner:
 
         # use binary cross entropy for bool fluents
         # mean squared error for continuous and integer fluents
-        def _jax_wrapped_batched_model_loss(key, param_fluents, subs, actions, next_fluents):
-            fluents = step_fn(key, param_fluents, subs, actions)
+        def _jax_wrapped_batched_model_loss(key, param_fluents, subs, actions, next_fluents, 
+                                            hyperparams):
+            fluents, hyperparams = step_fn(key, param_fluents, subs, actions, hyperparams)
             total_loss = 0.0
             for (name, next_value) in next_fluents.items():
                 preds = jnp.asarray(fluents[name], dtype=self.compiled.REAL)
@@ -152,19 +189,19 @@ class JaxModelLearner:
                 else:
                     loss_values = jnp.square(preds - targets)
                 total_loss += jnp.mean(loss_values)
-            return total_loss
+            return total_loss, hyperparams
         
         # loss with the parameters mapped to their fluents
-        def _jax_wrapped_batched_loss(key, params, subs, actions, next_fluents):
+        def _jax_wrapped_batched_loss(key, params, subs, actions, next_fluents, hyperparams):
             param_fluents = map_fn(params)
-            loss = _jax_wrapped_batched_model_loss(
-                key, param_fluents, subs, actions, next_fluents)
-            return loss
+            loss, hyperparams = _jax_wrapped_batched_model_loss(
+                key, param_fluents, subs, actions, next_fluents, hyperparams)
+            return loss, hyperparams
 
         loss_fn = jax.jit(_jax_wrapped_batched_loss)
         return loss_fn
     
-    def _jax_init(self, project_fn, SCALE=0.01):
+    def _jax_init(self, project_fn):
         optimizer = self.optimizer
         
         # initialize both the non-fluents and optimizer
@@ -173,7 +210,7 @@ class JaxModelLearner:
             for name in self.param_ranges:
                 shape = jnp.shape(self.compiled.init_values[name])
                 key, subkey = random.split(key)
-                params[name] = SCALE * random.normal(key=subkey, shape=shape)
+                params[name] = self.initializer(subkey, shape, dtype=self.compiled.REAL)
             params = project_fn(params)
             opt_state = optimizer.init(params)
             return params, opt_state
@@ -185,24 +222,30 @@ class JaxModelLearner:
         optimizer = self.optimizer
 
         # projected gradient trick to satisfy box constraints on params
-        def _jax_wrapped_project_params(params):
-            new_params = {}
-            for (name, value) in params.items():
-                if self.rddl.variable_ranges[name] == 'bool':
-                    new_params[name] = value
-                else:
-                    lower, upper = self.param_ranges[name]
-                    new_params[name] = jnp.clip(value, lower, upper)
-            return new_params
+        if self.wrap_non_bool:
+            def _jax_wrapped_project_params(params):
+                return params
+        else:
+            def _jax_wrapped_project_params(params):
+                new_params = {}
+                for (name, value) in params.items():
+                    if self.rddl.variable_ranges[name] == 'bool':
+                        new_params[name] = value
+                    else:
+                        lower, upper = self.param_ranges[name]
+                        new_params[name] = jnp.clip(value, lower, upper)
+                return new_params
 
         # gradient descent update
-        def _jax_wrapped_params_update(key, params, subs, actions, next_fluents, opt_state):
-            loss_val, grad = jax.value_and_grad(loss_fn, argnums=1)(
-                key, params, subs, actions, next_fluents)
+        def _jax_wrapped_params_update(key, params, subs, actions, next_fluents, 
+                                       hyperparams, opt_state):
+            (loss_val, hyperparams), grad = jax.value_and_grad(
+                loss_fn, argnums=1, has_aux=True
+            )(key, params, subs, actions, next_fluents, hyperparams)
             updates, opt_state = optimizer.update(grad, opt_state)
             params = optax.apply_updates(params, updates)
             params = _jax_wrapped_project_params(params)
-            return params, opt_state, loss_val
+            return params, opt_state, loss_val, hyperparams
     
         update_fn = jax.jit(_jax_wrapped_params_update)
         project_fn = jax.jit(_jax_wrapped_project_params)
@@ -223,7 +266,7 @@ class JaxModelLearner:
     # ESTIMATE API
     # ===========================================================================
 
-    def estimate(self, *args, **kwargs) -> Optional[Callback]:
+    def optimize(self, *args, **kwargs) -> Optional[Callback]:
         '''Estimate the unknown parameters from the given data set. 
         Return the callback from training.
 
@@ -235,7 +278,7 @@ class JaxModelLearner:
         :param train_seconds: total time allocated for gradient descent     
         :param print_progress: whether to print the progress bar during training
         '''
-        it = self.estimate_generator(*args, **kwargs)
+        it = self.optimize_generator(*args, **kwargs)
         
         # https://stackoverflow.com/questions/50937966/fastest-most-pythonic-way-to-consume-an-iterator
         callback = None
@@ -248,7 +291,7 @@ class JaxModelLearner:
                 pass
         return callback
 
-    def estimate_generator(self, data: Iterable[Tuple[State, Action, State]],
+    def optimize_generator(self, data: Iterable[Tuple[State, Action, State]],
                            key: Optional[random.PRNGKey]=None,
                            epochs: int=999999,
                            train_seconds: float=120.,
@@ -278,6 +321,7 @@ class JaxModelLearner:
         # initialize parameter fluents to optimize
         key, subkey = random.split(key)
         params, opt_state = self.init_fn(subkey)
+        hyperparams = self.compiled.model_params
 
         # progress bar
         if print_progress:
@@ -295,8 +339,8 @@ class JaxModelLearner:
             # gradient update
             subs.update(states)
             key, subkey = random.split(key)
-            params, opt_state, loss = self.update_fn(
-                subkey, params, subs, actions, next_states, opt_state)
+            params, opt_state, loss, hyperparams = self.update_fn(
+                subkey, params, subs, actions, next_states, hyperparams, opt_state)
             param_fluents = self.map_fn(params)
             param_fluents = {name: param_fluents[name] for name in self.param_ranges}
 
@@ -338,12 +382,12 @@ class JaxModelLearner:
 
 if __name__ == '__main__':
     import pyRDDLGym
-    env = pyRDDLGym.make('RaceCar_ippc2023', '1', vectorized=True)
+    env = pyRDDLGym.make('PowerGen_ippc2023', '1', vectorized=True)
     model = JaxModelLearner(rddl=env.model, 
                             param_ranges={
-                                'MASS': (0.001, None), 
-                                'DT': (0.001, None), 
-                                'X0': (None, None)}, 
+                                'DEMAND-EXP-COEF': (0., None),
+                                'TEMP-MIN': (None, None),
+                                'TEMP-VARIANCE': (0., None)}, 
                             batch_size_train=32, 
                             optimizer_kwargs = {'learning_rate': 0.003})
 
@@ -351,21 +395,28 @@ if __name__ == '__main__':
     def data_iterator():
         key = random.PRNGKey(42)
         subs = model._batched_init_subs()
-        param_fluents = {'MASS': np.array(3.0), 'DT': np.array(0.3), 'X0': np.array(0.1)}
+        param_fluents = {
+            'DEMAND-EXP-COEF': np.array(0.08),
+            'TEMP-MIN': np.array(-30.0),
+            'TEMP-VARIANCE': np.array(8.0)
+        }
         while True:
-            states = {'x': np.random.uniform(-1., 1., (32,)),
-                      'y': np.random.uniform(-1., 1., (32,)),
-                      'vx': np.random.uniform(-1., 1., (32,)),
-                      'vy': np.random.uniform(-1., 1., (32,))}
-            actions = {'fx': np.random.uniform(-1., 1., (32,)),
-                       'fy': np.random.uniform(-1., 1., (32,))}
+            states = {
+                'prevProd': np.random.uniform(0., 6., (32, 2)),
+                'prevOn': np.random.uniform(0., 1., (32, 2)) <= 0.5,
+                'temperature': np.random.uniform(-40., 40., (32,))
+            }
+            actions = {
+                'curProd': np.random.uniform(0., 6., (32, 2))
+            }
             key, subkey = random.split(key)
             subs.update(states)
             for (state, next_state) in model.rddl.next_state.items():
                 subs[next_state] = subs[state] 
-            next_states = model.step_fn(subkey, param_fluents, subs, actions)
+            next_states, _ = model.step_fn(subkey, param_fluents, subs, actions, {})
             yield (states, actions, next_states)
     
     # train it
-    for cb in model.estimate_generator(data_iterator(), epochs=2000):
-        print(cb['param_fluents'])
+    for cb in model.optimize_generator(data_iterator(), epochs=30000):
+        if cb['iteration'] % 100 == 0:
+            print(cb['param_fluents'])
