@@ -57,13 +57,13 @@ class JaxLearnerStatus(Enum):
     can be used to monitor and act based on the learner's progress.'''
     
     NORMAL = 0
-    NO_PROGRESS = 2
-    INVALID_GRADIENT = 4
-    TIME_BUDGET_REACHED = 5
-    ITER_BUDGET_REACHED = 6
+    NO_PROGRESS = 1
+    INVALID_GRADIENT = 2
+    TIME_BUDGET_REACHED = 3
+    ITER_BUDGET_REACHED = 4
     
     def is_terminal(self) -> bool:
-        return self.value == 1 or self.value >= 4
+        return self.value >= 2
     
 
 class JaxModelLearner:
@@ -381,7 +381,6 @@ class JaxModelLearner:
             progress_bar = None
 
         status = JaxLearnerStatus.NORMAL
-        printed_zero_warning = False
 
         # main training loop
         for (it, (states, actions, next_states)) in enumerate(data):
@@ -395,6 +394,12 @@ class JaxModelLearner:
             param_fluents = self.map_fn(params)
             param_fluents = {name: param_fluents[name] for name in self.param_ranges}
 
+            # check for learnability
+            params_zero_grads = {
+                name for (name, zero_grad) in zero_grads.items() if zero_grad}
+            if params_zero_grads:
+                status = JaxLearnerStatus.NO_PROGRESS
+
             # reached computation budget
             elapsed = time.time() - start_time - elapsed_outside_loop
             if elapsed >= train_seconds:
@@ -402,19 +407,6 @@ class JaxModelLearner:
             if it >= epochs - 1:
                 status = JaxLearnerStatus.ITER_BUDGET_REACHED
             
-            # check for learnability
-            params_zero_grads = {name 
-                                 for (name, zero_grad) in zero_grads.items() if zero_grad}
-            if params_zero_grads:
-                status = JaxLearnerStatus.NO_PROGRESS
-                if not printed_zero_warning:
-                    message = termcolor.colored(
-                        f'[WARN] Gradients of non-fluents(s) {params_zero_grads} '
-                        f'are zero or close to zero, which suggests they are difficult '
-                        f'to learn from the given data set.', 'yellow')
-                    progress_bar.write(message)
-                    printed_zero_warning = True
-
             # build a callback
             progress_percent = 100 * min(
                 1, max(0, elapsed / train_seconds, it / (epochs - 1)))
@@ -447,36 +439,33 @@ class JaxModelLearner:
 
 if __name__ == '__main__':
     import pyRDDLGym
-    env = pyRDDLGym.make('CartPole_Continuous_gym', '0', vectorized=True)
+    env = pyRDDLGym.make('RaceCar_ippc2023', '1', vectorized=True)
     bs = 1
     model = JaxModelLearner(rddl=env.model, 
                             param_ranges={
-                                'GRAVITY': (0., None),
-                                'CART-MASS': (0., None),
-                                'POLE-LEN': (0., None),
-                                'TIME-STEP': (0., None)}, 
+                                'MASS': (0., None),
+                                'DT': (0., None)}, 
                             batch_size_train=bs, 
-                            optimizer_kwargs = {'learning_rate': 0.1})
+                            optimizer_kwargs = {'learning_rate': 0.01})
 
     # make some data
     def data_iterator():
         key = random.PRNGKey(42)
         subs = model._batched_init_subs()
         param_fluents = {
-            'GRAVITY': 6.1,
-            'CART-MASS': 2.0,
-            'POLE-LEN': 3.0,
-            'TIME-STEP': 0.05
+            'MASS': 2.1,
+            'DT': 0.2
         }
         while True:
             states = {
-                'pos': np.random.uniform(-2.4, 2.4, (bs,)),
-                'vel': np.random.uniform(-2., 2., (bs,)),
-                'ang-pos': np.random.uniform(-0.2, 0.2, (bs,)),
-                'ang-vel': np.random.uniform(-1., 1., (bs,))
+                'x': np.random.uniform(0., 1., (bs,)),
+                'y': np.random.uniform(0., 1., (bs,)),
+                'vx': np.random.uniform(-1., 1., (bs,)),
+                'vy': np.random.uniform(-1., 1., (bs,))
             }
             actions = {
-                'force': np.random.uniform(-10., 10., (bs,))
+                'fx': np.random.uniform(-1., 1., (bs,)),
+                'fy': np.random.uniform(-1., 1., (bs,))
             }
             subs.update(states)
             key, subkey = random.split(key)
@@ -485,6 +474,6 @@ if __name__ == '__main__':
             yield (states, actions, next_states)
     
     # train it
-    for cb in model.optimize_generator(data_iterator(), epochs=30000):
+    for cb in model.optimize_generator(data_iterator(), epochs=1000):
         if cb['iteration'] % 100 == 0:
             print(cb['param_fluents'])
