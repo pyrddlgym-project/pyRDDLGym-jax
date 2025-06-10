@@ -46,6 +46,7 @@ class JaxModelLearner:
     def __init__(self, rddl: RDDLLiftedModel, 
                  param_ranges: Dict[str, Tuple[Optional[np.ndarray], Optional[np.ndarray]]],
                  batch_size_train: int=32,
+                 samples_per_datapoint: int=1,
                  optimizer: Callable[..., optax.GradientTransformation]=optax.rmsprop,
                  optimizer_kwargs: Optional[Kwargs]=None,
                  initializer: initializers.Initializer = initializers.normal(),
@@ -59,6 +60,8 @@ class JaxModelLearner:
         :param param_ranges: the ranges of all learnable non-fluents
         :param batch_size_train: how many transitions to compute per optimization 
         step
+        :param samples_per_datapoint: how many random samples to produce from the step
+        function per data point during training
         :param optimizer: a factory for an optax SGD algorithm
         :param optimizer_kwargs: a dictionary of parameters to pass to the SGD
         factory (e.g. which parameters are controllable externally)
@@ -72,6 +75,7 @@ class JaxModelLearner:
         self.rddl = rddl
         self.param_ranges = param_ranges.copy()
         self.batch_size_train = batch_size_train
+        self.samples_per_datapoint = samples_per_datapoint
         if optimizer_kwargs is None:
             optimizer_kwargs = {'learning_rate': 0.001}
         self.optimizer_kwargs = optimizer_kwargs
@@ -127,7 +131,17 @@ class JaxModelLearner:
             hyperparams = jax.tree_util.tree_map(partial(jnp.mean, axis=0), hyperparams)
             return fluents, hyperparams
 
-        batched_step_fn = jax.jit(_jax_wrapped_batched_step)
+        # batched step function with parallel samples per data point
+        # TODO: come up with a better way to reduce the hyperparams batch dim
+        def _jax_wrapped_batched_parallel_step(key, param_fluents, subs, actions, hyperparams):
+            keys = jnp.asarray(random.split(key, num=self.samples_per_datapoint))
+            fluents, hyperparams = jax.vmap(
+                _jax_wrapped_batched_step, in_axes=(0, None, None, None, None)
+            )(keys, param_fluents, subs, actions, hyperparams)
+            hyperparams = jax.tree_util.tree_map(partial(jnp.mean, axis=0), hyperparams)
+            return fluents, hyperparams
+
+        batched_step_fn = jax.jit(_jax_wrapped_batched_parallel_step)
         return batched_step_fn        
 
     def _jax_map(self):
@@ -180,7 +194,7 @@ class JaxModelLearner:
             total_loss = 0.0
             for (name, next_value) in next_fluents.items():
                 preds = jnp.asarray(fluents[name], dtype=self.compiled.REAL)
-                targets = jnp.asarray(next_value, dtype=self.compiled.REAL)
+                targets = jnp.asarray(next_value, dtype=self.compiled.REAL)[jnp.newaxis, ...]
                 if self.rddl.variable_ranges[name] == 'bool':
                     preds = jnp.clip(preds, EPS, 1.0 - EPS)
                     log_preds = jnp.log(preds)
@@ -188,7 +202,7 @@ class JaxModelLearner:
                     loss_values = -targets * log_preds - (1.0 - targets) * log_not_preds
                 else:
                     loss_values = jnp.square(preds - targets)
-                total_loss += jnp.mean(loss_values)
+                total_loss += jnp.mean(loss_values) / len(next_fluents)
             return total_loss, hyperparams
         
         # loss with the parameters mapped to their fluents
@@ -414,6 +428,7 @@ if __name__ == '__main__':
             for (state, next_state) in model.rddl.next_state.items():
                 subs[next_state] = subs[state] 
             next_states, _ = model.step_fn(subkey, param_fluents, subs, actions, {})
+            next_states = jax.tree_util.tree_map(lambda x: np.asarray(x)[0, ...], next_states)
             yield (states, actions, next_states)
     
     # train it
