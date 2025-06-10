@@ -22,7 +22,32 @@ Kwargs = Dict[str, Any]
 State = Dict[str, np.ndarray]
 Action = Dict[str, np.ndarray]
 Callback = Dict[str, Any]
+LossFunction = Callable[[jnp.ndarray, jnp.ndarray], jnp.ndarray]
 
+
+# ***********************************************************************
+# ALL VERSIONS OF JAX MODEL LEARNER
+#
+# - several standard loss functions 
+# - gradient based model learning
+# 
+# ***********************************************************************
+
+
+def mean_squared_error(target, pred):
+    loss_values = jnp.square(target - pred)
+    return loss_values
+
+
+def binary_cross_entropy(eps=1e-6):
+    def _jax_wrapped_binary_cross_entropy_loss(target, pred):
+        pred = jnp.clip(pred, eps, 1.0 - eps)
+        log_pred = jnp.log(pred)
+        log_not_pred = jnp.log(1.0 - pred)
+        loss_values = -target * log_pred - (1.0 - target) * log_not_pred
+        return loss_values
+    return _jax_wrapped_binary_cross_entropy_loss
+        
 
 class JaxLearnerStatus(Enum):
     '''Represents the status of a parameter update from the JAX model learner, 
@@ -52,6 +77,9 @@ class JaxModelLearner:
                  initializer: initializers.Initializer = initializers.normal(),
                  wrap_non_bool: bool=True,
                  use64bit: bool=False,
+                 bool_fluent_loss: LossFunction=binary_cross_entropy(),
+                 real_fluent_loss: LossFunction=mean_squared_error,
+                 int_fluent_loss: LossFunction=mean_squared_error,
                  logic: Logic=ExactLogic()) -> None:
         '''Creates a new gradient-based algorithm for inferring unknown non-fluents
         in a RDDL domain from a data set or stream coming from the real environment.
@@ -69,6 +97,9 @@ class JaxModelLearner:
         :param wrap_non_bool: whether to wrap non-boolean trainable parameters to satisfy
         required ranges as specified in param_ranges (use a projected gradient otherwise)
         :param use64bit: whether to perform arithmetic in 64 bit
+        :param bool_fluent_loss: loss function to optimize for bool-valued fluents
+        :param real_fluent_loss: loss function to optimize for real-valued fluents
+        :param int_fluent_loss: loss function to optimize for int-valued fluents
         :param logic: a subclass of Logic for mapping exact mathematical
         operations to their differentiable counterparts 
         '''
@@ -82,6 +113,9 @@ class JaxModelLearner:
         self.initializer = initializer
         self.wrap_non_bool = wrap_non_bool
         self.use64bit = use64bit
+        self.bool_fluent_loss = bool_fluent_loss
+        self.real_fluent_loss = real_fluent_loss
+        self.int_fluent_loss = int_fluent_loss
         self.logic = logic
 
         # build the optimizer
@@ -184,7 +218,7 @@ class JaxModelLearner:
         map_fn = jax.jit(_jax_wrapped_params_to_fluents)
         return map_fn
 
-    def _jax_loss(self, map_fn, step_fn, EPS=1e-6):
+    def _jax_loss(self, map_fn, step_fn):
 
         # use binary cross entropy for bool fluents
         # mean squared error for continuous and integer fluents
@@ -196,12 +230,11 @@ class JaxModelLearner:
                 preds = jnp.asarray(fluents[name], dtype=self.compiled.REAL)
                 targets = jnp.asarray(next_value, dtype=self.compiled.REAL)[jnp.newaxis, ...]
                 if self.rddl.variable_ranges[name] == 'bool':
-                    preds = jnp.clip(preds, EPS, 1.0 - EPS)
-                    log_preds = jnp.log(preds)
-                    log_not_preds = jnp.log(1.0 - preds)
-                    loss_values = -targets * log_preds - (1.0 - targets) * log_not_preds
+                    loss_values = self.bool_fluent_loss(targets, preds)
+                elif self.rddl.variable_ranges[name] == 'real':
+                    loss_values = self.real_fluent_loss(targets, preds)
                 else:
-                    loss_values = jnp.square(preds - targets)
+                    loss_values = self.int_fluent_loss(targets, preds)
                 total_loss += jnp.mean(loss_values) / len(next_fluents)
             return total_loss, hyperparams
         
