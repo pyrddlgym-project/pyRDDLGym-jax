@@ -27,28 +27,44 @@ LossFunction = Callable[[jnp.ndarray, jnp.ndarray], jnp.ndarray]
 
 
 # ***********************************************************************
-# ALL VERSIONS OF JAX MODEL LEARNER
+# ALL VERSIONS OF LOSS FUNCTIONS
 #
-# - several standard loss functions 
-# - gradient based model learning
+# - loss functions based on specific likelihood assumptions (MSE, Huber, cross-entropy)
 # 
 # ***********************************************************************
 
 
-def mean_squared_error(target, pred):
-    loss_values = jnp.square(target - pred)
-    return loss_values
+def mean_squared_error() -> LossFunction:
+    def _jax_wrapped_mse_loss(target, pred):
+        loss_values = jnp.square(target - pred)
+        return loss_values
+    return jax.jit(_jax_wrapped_mse_loss)
 
 
-def binary_cross_entropy(eps=1e-6):
+def huber_loss(delta: float=1.0) -> LossFunction:
+    def _jax_wrapped_huber_loss(target, pred):
+        loss_values = optax.losses.huber_loss(pred, target, delta=delta)
+        return loss_values
+    return jax.jit(_jax_wrapped_huber_loss)
+
+
+def binary_cross_entropy(eps: float=1e-6) -> LossFunction:
     def _jax_wrapped_binary_cross_entropy_loss(target, pred):
         pred = jnp.clip(pred, eps, 1.0 - eps)
         log_pred = jnp.log(pred)
         log_not_pred = jnp.log(1.0 - pred)
         loss_values = -target * log_pred - (1.0 - target) * log_not_pred
         return loss_values
-    return _jax_wrapped_binary_cross_entropy_loss
-        
+    return jax.jit(_jax_wrapped_binary_cross_entropy_loss)
+
+
+# ***********************************************************************
+# ALL VERSIONS OF JAX MODEL LEARNER
+#
+# - gradient based model learning
+# 
+# ***********************************************************************
+
 
 class JaxLearnerStatus(Enum):
     '''Represents the status of a parameter update from the JAX model learner, 
@@ -80,8 +96,8 @@ class JaxModelLearner:
                  wrap_non_bool: bool=True,
                  use64bit: bool=False,
                  bool_fluent_loss: LossFunction=binary_cross_entropy(),
-                 real_fluent_loss: LossFunction=mean_squared_error,
-                 int_fluent_loss: LossFunction=mean_squared_error,
+                 real_fluent_loss: LossFunction=mean_squared_error(),
+                 int_fluent_loss: LossFunction=mean_squared_error(),
                  logic: Logic=ExactLogic()) -> None:
         '''Creates a new gradient-based algorithm for inferring unknown non-fluents
         in a RDDL domain from a data set or stream coming from the real environment.
@@ -439,29 +455,28 @@ class JaxModelLearner:
 
 if __name__ == '__main__':
     import pyRDDLGym
-    env = pyRDDLGym.make('RaceCar_ippc2023', '1', vectorized=True)
-    bs = 1
+    env = pyRDDLGym.make('Reservoir_Continuous', '0', vectorized=True)
+    bs = 32
     model = JaxModelLearner(rddl=env.model, 
                             param_ranges={
-                                'MASS': (0., None),
-                                'DT': (0., None)}, 
+                                'RAIN_VAR': (0., None)
+                            }, 
                             batch_size_train=bs, 
-                            optimizer_kwargs = {'learning_rate': 0.01})
+                            samples_per_datapoint=1,
+                            optimizer_kwargs = {'learning_rate': 0.003})
 
     # make some data
     def data_iterator():
-        key = random.PRNGKey(42)
+        key = random.PRNGKey(round(time.time() * 1000))
         subs = model._batched_init_subs()
         epoch = 0
         param_fluents = {
-            'MASS': 2.1,
-            'DT': 0.2
+            'RAIN_VAR': np.array([1.0, 6.0, 5.0])
         }
         while True:
             states = {k: np.asarray(subs[k]) for k in model.rddl.state_fluents}
             actions = {
-                'fx': np.random.uniform(-1., 1., (bs,)),
-                'fy': np.random.uniform(-1., 1., (bs,))
+                'release': np.random.uniform(0., 100., (bs, 3))
             }
             key, subkey = random.split(key)
             subs, _ = model.step_fn(subkey, param_fluents, subs, actions, {})
@@ -474,6 +489,6 @@ if __name__ == '__main__':
             yield (states, actions, next_states)
     
     # train it
-    for cb in model.optimize_generator(data_iterator(), epochs=1000):
-        if cb['iteration'] % 100 == 0:
+    for cb in model.optimize_generator(data_iterator(), epochs=10000):
+        if cb['iteration'] % 500 == 0:
             print(cb['param_fluents'])
