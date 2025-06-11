@@ -294,7 +294,7 @@ class JaxModelLearner:
             updates, opt_state = optimizer.update(grad, opt_state)
             params = optax.apply_updates(params, updates)
             params = _jax_wrapped_project_params(params)
-            zero_grads = jax.tree_util.tree_map(lambda g: jnp.allclose(g, 0.0), grad)
+            zero_grads = jax.tree_util.tree_map(partial(jnp.allclose, b=0.0), grad)
             return params, opt_state, loss_val, zero_grads, hyperparams
     
         update_fn = jax.jit(_jax_wrapped_params_update)
