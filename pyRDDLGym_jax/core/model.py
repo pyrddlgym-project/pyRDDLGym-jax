@@ -452,25 +452,25 @@ if __name__ == '__main__':
     def data_iterator():
         key = random.PRNGKey(42)
         subs = model._batched_init_subs()
+        epoch = 0
         param_fluents = {
             'MASS': 2.1,
             'DT': 0.2
         }
         while True:
-            states = {
-                'x': np.random.uniform(0., 1., (bs,)),
-                'y': np.random.uniform(0., 1., (bs,)),
-                'vx': np.random.uniform(-1., 1., (bs,)),
-                'vy': np.random.uniform(-1., 1., (bs,))
-            }
+            states = {k: np.asarray(subs[k]) for k in model.rddl.state_fluents}
             actions = {
                 'fx': np.random.uniform(-1., 1., (bs,)),
                 'fy': np.random.uniform(-1., 1., (bs,))
             }
-            subs.update(states)
             key, subkey = random.split(key)
-            next_subs, _ = model.step_fn(subkey, param_fluents, subs, actions, {})
-            next_states = {k: np.asarray(next_subs[k])[0, ...] for k in states}
+            subs, _ = model.step_fn(subkey, param_fluents, subs, actions, {})
+            subs = {k: np.asarray(v)[0, ...] for k, v in subs.items()}
+            next_states = {k: subs[k] for k in model.rddl.state_fluents}
+            epoch += 1
+            if epoch > env.horizon:
+                subs = model._batched_init_subs()
+                epoch = 0
             yield (states, actions, next_states)
     
     # train it
