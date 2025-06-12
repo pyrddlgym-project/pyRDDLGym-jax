@@ -1056,15 +1056,13 @@ class ExactLogic(Logic):
     def control_if(self, id, init_params):
         return self._jax_wrapped_calc_if_then_else_exact
     
-    @staticmethod
-    def _jax_wrapped_calc_switch_exact(pred, cases, params):
-        pred = pred[jnp.newaxis, ...]
-        sample = jnp.take_along_axis(cases, pred, axis=0)
-        assert sample.shape[0] == 1
-        return sample[0, ...], params
-    
     def control_switch(self, id, init_params):
-        return self._jax_wrapped_calc_switch_exact
+        def _jax_wrapped_calc_switch_exact(pred, cases, params):
+            pred = jnp.asarray(pred[jnp.newaxis, ...], dtype=self.INT)
+            sample = jnp.take_along_axis(cases, pred, axis=0)
+            assert sample.shape[0] == 1
+            return sample[0, ...], params
+        return _jax_wrapped_calc_switch_exact
     
     # ===========================================================================
     # random variables
