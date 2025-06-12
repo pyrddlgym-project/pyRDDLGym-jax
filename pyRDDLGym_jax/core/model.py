@@ -1,8 +1,8 @@
 from collections import deque
+from copy import deepcopy
 from enum import Enum
 from functools import partial
 import sys
-import termcolor
 import time
 from tqdm import tqdm
 from typing import Any, Callable, Dict, Generator, Iterable, Optional, Tuple
@@ -22,6 +22,7 @@ from pyRDDLGym_jax.core.planner import JaxRDDLCompilerWithGrad
 Kwargs = Dict[str, Any]
 State = Dict[str, np.ndarray]
 Action = Dict[str, np.ndarray]
+Params = Dict[str, np.ndarray]
 Callback = Dict[str, Any]
 LossFunction = Callable[[jnp.ndarray, jnp.ndarray], jnp.ndarray]
 
@@ -451,32 +452,39 @@ class JaxModelLearner:
             # abortion check
             if status.is_terminal():
                 break
-            
+    
+    def learned_model(self, param_fluents: Params) -> RDDLLiftedModel:
+        model = deepcopy(self.rddl)
+        for (name, values) in param_fluents.items():
+            prange = model.variable_ranges[name]
+            if prange == 'real':
+                pass
+            elif prange == 'bool':
+                values = values > 0.5
+            else:
+                values = np.asarray(values, dtype=self.compiled.INT)
+            values = np.ravel(values, order='C').tolist()
+            model.non_fluents[name] = values
+        return model
+
 
 if __name__ == '__main__':
     import pyRDDLGym
-    env = pyRDDLGym.make('Reservoir_Continuous', '0', vectorized=True)
+    from pyRDDLGym.core.debug.decompiler import RDDLDecompiler
     bs = 32
-    model = JaxModelLearner(rddl=env.model, 
-                            param_ranges={
-                                'RAIN_VAR': (0., None)
-                            }, 
-                            batch_size_train=bs, 
-                            samples_per_datapoint=1,
-                            optimizer_kwargs = {'learning_rate': 0.003})
 
     # make some data
     def data_iterator():
+        env = pyRDDLGym.make('CartPole_Continuous_gym', '0', vectorized=True)
+        model = JaxModelLearner(rddl=env.model, param_ranges={}, batch_size_train=bs)
         key = random.PRNGKey(round(time.time() * 1000))
         subs = model._batched_init_subs()
         epoch = 0
-        param_fluents = {
-            'RAIN_VAR': np.array([1.0, 6.0, 5.0])
-        }
+        param_fluents = {}
         while True:
             states = {k: np.asarray(subs[k]) for k in model.rddl.state_fluents}
             actions = {
-                'release': np.random.uniform(0., 100., (bs, 3))
+                'force': np.random.uniform(-10., 10., (bs,))
             }
             key, subkey = random.split(key)
             subs, _ = model.step_fn(subkey, param_fluents, subs, actions, {})
@@ -489,6 +497,20 @@ if __name__ == '__main__':
             yield (states, actions, next_states)
     
     # train it
-    for cb in model.optimize_generator(data_iterator(), epochs=10000):
-        if cb['iteration'] % 500 == 0:
-            print(cb['param_fluents'])
+    env = pyRDDLGym.make('TestJax', '0', vectorized=True)
+    model_learner = JaxModelLearner(rddl=env.model, 
+                                    param_ranges={
+                                        'w1': (None, None), 'b1': (None, None),
+                                        'w2': (None, None), 'b2': (None, None),
+                                        'w1o': (None, None), 'b1o': (None, None),
+                                        'w2o': (None, None), 'b2o': (None, None)
+                                    }, 
+                                    batch_size_train=bs, 
+                                    optimizer_kwargs = {'learning_rate': 0.0003})
+    for cb in model_learner.optimize_generator(data_iterator(), epochs=10000):
+        if cb['iteration'] > 0 and cb['iteration'] % 100 == 0:
+            print(cb['train_loss'])
+    learned = model_learner.learned_model(cb['param_fluents'])
+    decompiler = RDDLDecompiler()
+    print(decompiler.decompile_domain(learned))
+    print(decompiler.decompile_instance(learned))
