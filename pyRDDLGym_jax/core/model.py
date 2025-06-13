@@ -22,6 +22,7 @@ from pyRDDLGym_jax.core.planner import JaxRDDLCompilerWithGrad
 Kwargs = Dict[str, Any]
 State = Dict[str, np.ndarray]
 Action = Dict[str, np.ndarray]
+DataStream = Iterable[Tuple[State, Action, State]]
 Params = Dict[str, np.ndarray]
 Callback = Dict[str, Any]
 LossFunction = Callable[[jnp.ndarray, jnp.ndarray], jnp.ndarray]
@@ -358,7 +359,7 @@ class JaxModelLearner:
                 pass
         return callback
 
-    def optimize_generator(self, data: Iterable[Tuple[State, Action, State]],
+    def optimize_generator(self, data: DataStream,
                            key: Optional[random.PRNGKey]=None,
                            epochs: int=999999,
                            train_seconds: float=120.,
@@ -453,8 +454,8 @@ class JaxModelLearner:
             if status.is_terminal():
                 break
     
-    def evaluate_loss(self, data: Iterable[Tuple[State, Action, State]],
-                      key: random.PRNGKey, 
+    def evaluate_loss(self, data: DataStream,
+                      key: Optional[random.PRNGKey], 
                       param_fluents: Params) -> float:
         '''Evaluates the model loss of the given learned non-fluent values and the data.
 
@@ -469,14 +470,12 @@ class JaxModelLearner:
         subs = self._batched_init_subs()
         hyperparams = self.compiled.model_params
         mean_loss = 0.0
-        loss_count = 0
-        for (states, actions, next_states) in data:
+        for (it, (states, actions, next_states)) in enumerate(data):
             subs.update(states)
             key, subkey = random.split(key)
             loss_value, _ = self.loss_fn(
                 subkey, param_fluents, subs, actions, next_states, hyperparams)
-            loss_count += 1
-            mean_loss += (loss_value - mean_loss) / loss_count
+            mean_loss += (loss_value - mean_loss) / (it + 1)
         return mean_loss
 
     def learned_model(self, param_fluents: Params) -> RDDLLiftedModel:
