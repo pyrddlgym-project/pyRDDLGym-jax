@@ -453,7 +453,38 @@ class JaxModelLearner:
             if status.is_terminal():
                 break
     
+    def evaluate_loss(self, data: Iterable[Tuple[State, Action, State]],
+                      key: random.PRNGKey, 
+                      param_fluents: Params) -> float:
+        '''Evaluates the model loss of the given learned non-fluent values and the data.
+
+        :param data: a data stream represented as a (possibly infinite) sequence of 
+        transition batches of the form (states, actions, next-states), where each element
+        is a numpy array of leading dimension equal to batch_size_train
+        :param key: JAX PRNG key (derived from clock if not provided)
+        :param param_fluents: the learned non-fluent values
+        '''
+        if key is None:
+            key = random.PRNGKey(round(time.time() * 1000))
+        subs = self._batched_init_subs()
+        hyperparams = self.compiled.model_params
+        mean_loss = 0.0
+        loss_count = 0
+        for (states, actions, next_states) in data:
+            subs.update(states)
+            key, subkey = random.split(key)
+            loss_value, _ = self.loss_fn(
+                subkey, param_fluents, subs, actions, next_states, hyperparams)
+            loss_count += 1
+            mean_loss += (loss_value - mean_loss) / loss_count
+        return mean_loss
+
     def learned_model(self, param_fluents: Params) -> RDDLLiftedModel:
+        '''Substitutes the given learned non-fluent values into the RDDL model and returns
+        the new model.
+
+        :param param_fluents: the learned non-fluent values
+        '''
         model = deepcopy(self.rddl)
         for (name, values) in param_fluents.items():
             prange = model.variable_ranges[name]
