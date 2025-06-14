@@ -142,6 +142,24 @@ class JaxModelLearner:
         self.logic = logic
         self.model_params_reduction = model_params_reduction
 
+        # validate param_ranges
+        for (name, values) in param_ranges.items():
+            if name not in rddl.non_fluents:
+                raise ValueError(
+                    f'param_ranges key <{name}> is not a valid non-fluent '
+                    f'in the current rddl.')
+            if not isinstance(values, (tuple, list)):
+                raise ValueError(
+                    f'param_ranges values with key <{name}> are neither a tuple nor a list.')
+            if len(values) != 2:
+                raise ValueError(
+                    f'param_ranges values with key <{name}> must be of length 2, '
+                    f'got length {len(values)}.')
+            lower, upper = values
+            if lower is not None and upper is not None and not np.all(lower <= upper):
+                raise ValueError(
+                    f'param_ranges values with key <{name}> do not satisfy lower <= upper.')
+
         # build the optimizer
         optimizer = optimizer(**optimizer_kwargs)
         pipeline = [optimizer]
