@@ -31,7 +31,7 @@ LossFunction = Callable[[jnp.ndarray, jnp.ndarray], jnp.ndarray]
 # ***********************************************************************
 # ALL VERSIONS OF LOSS FUNCTIONS
 #
-# - loss functions based on specific likelihood assumptions (MSE, Huber, cross-entropy)
+# - loss functions based on specific likelihood assumptions (MSE, cross-entropy)
 # 
 # ***********************************************************************
 
@@ -43,13 +43,6 @@ def mean_squared_error() -> LossFunction:
     return jax.jit(_jax_wrapped_mse_loss)
 
 
-def huber_loss(delta: float=1.0) -> LossFunction:
-    def _jax_wrapped_huber_loss(target, pred):
-        loss_values = optax.losses.huber_loss(pred, target, delta=delta)
-        return loss_values
-    return jax.jit(_jax_wrapped_huber_loss)
-
-
 def binary_cross_entropy(eps: float=1e-6) -> LossFunction:
     def _jax_wrapped_binary_cross_entropy_loss(target, pred):
         pred = jnp.clip(pred, eps, 1.0 - eps)
@@ -58,6 +51,13 @@ def binary_cross_entropy(eps: float=1e-6) -> LossFunction:
         loss_values = -target * log_pred - (1.0 - target) * log_not_pred
         return loss_values
     return jax.jit(_jax_wrapped_binary_cross_entropy_loss)
+
+
+def optax_loss(loss_fn: LossFunction, **kwargs) -> LossFunction:
+    def _jax_wrapped_optax_loss(target, pred):
+        loss_values = loss_fn(pred, target, **kwargs)
+        return loss_values
+    return jax.jit(_jax_wrapped_optax_loss)
 
 
 # ***********************************************************************
