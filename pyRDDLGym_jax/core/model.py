@@ -100,7 +100,8 @@ class JaxModelLearner:
                  bool_fluent_loss: LossFunction=binary_cross_entropy(),
                  real_fluent_loss: LossFunction=mean_squared_error(),
                  int_fluent_loss: LossFunction=mean_squared_error(),
-                 logic: Logic=ExactLogic()) -> None:
+                 logic: Logic=ExactLogic(),
+                 model_params_reduction: Callable=lambda x: x[0]) -> None:
         '''Creates a new gradient-based algorithm for inferring unknown non-fluents
         in a RDDL domain from a data set or stream coming from the real environment.
         
@@ -122,6 +123,8 @@ class JaxModelLearner:
         :param int_fluent_loss: loss function to optimize for int-valued fluents
         :param logic: a subclass of Logic for mapping exact mathematical
         operations to their differentiable counterparts 
+        :param model_params_reduction: how to aggregate updated model_params across runs
+        in the batch (defaults to selecting the first element's parameters in the batch)
         '''
         self.rddl = rddl
         self.param_ranges = param_ranges.copy()
@@ -137,6 +140,7 @@ class JaxModelLearner:
         self.real_fluent_loss = real_fluent_loss
         self.int_fluent_loss = int_fluent_loss
         self.logic = logic
+        self.model_params_reduction = model_params_reduction
 
         # build the optimizer
         optimizer = optimizer(**optimizer_kwargs)
@@ -176,23 +180,21 @@ class JaxModelLearner:
             return subs, hyperparams
 
         # batched step function
-        # TODO: come up with a better way to reduce the hyperparams batch dim
         def _jax_wrapped_batched_step(key, param_fluents, subs, actions, hyperparams):
             keys = jnp.asarray(random.split(key, num=self.batch_size_train))
             subs, hyperparams = jax.vmap(
                 _jax_wrapped_step, in_axes=(0, None, 0, 0, None)
             )(keys, param_fluents, subs, actions, hyperparams)
-            hyperparams = jax.tree_util.tree_map(partial(jnp.mean, axis=0), hyperparams)
+            hyperparams = jax.tree_util.tree_map(self.model_params_reduction, hyperparams)
             return subs, hyperparams
 
         # batched step function with parallel samples per data point
-        # TODO: come up with a better way to reduce the hyperparams batch dim
         def _jax_wrapped_batched_parallel_step(key, param_fluents, subs, actions, hyperparams):
             keys = jnp.asarray(random.split(key, num=self.samples_per_datapoint))
             subs, hyperparams = jax.vmap(
                 _jax_wrapped_batched_step, in_axes=(0, None, None, None, None)
             )(keys, param_fluents, subs, actions, hyperparams)
-            hyperparams = jax.tree_util.tree_map(partial(jnp.mean, axis=0), hyperparams)
+            hyperparams = jax.tree_util.tree_map(self.model_params_reduction, hyperparams)
             return subs, hyperparams
 
         batched_step_fn = jax.jit(_jax_wrapped_batched_parallel_step)
