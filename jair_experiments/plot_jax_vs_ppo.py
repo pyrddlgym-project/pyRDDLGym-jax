@@ -1,12 +1,23 @@
+import os
 import matplotlib.pyplot as plt
+plt.rcParams['font.size'] = '12'
+plt.rcParams['axes.labelsize'] = '18'
+plt.rcParams['axes.titlesize'] = '18'
+plt.rcParams['ytick.labelsize'] = '14'
+plt.rcParams['xtick.labelsize'] = '14'
+plt.rcParams['legend.fontsize'] = '16'
+
 import numpy as np
 
 
 def plot_jax_vs_ppo(instance, upto=None):
 
     # load baseline data
-    ppo_data = np.genfromtxt(f'ppo_instance{instance}_mean.csv', delimiter=',')
-    jax_data = np.genfromtxt(f'jaxplan_instance{instance}_return_slp.csv')
+    abspath = os.path.dirname(os.path.abspath(__file__))
+    ppo_data = np.genfromtxt(os.path.join(abspath, f'ppo_output{instance}_mean_20u.csv'), delimiter=',')
+    jax_data = np.genfromtxt(os.path.join(abspath, f'jaxplan_instance{instance}_return_slp.csv'))
+    print(ppo_data.shape)
+    print(jax_data.shape)
     if upto is not None:
         ppo_data = ppo_data[:upto]
         jax_data = jax_data[:upto]
@@ -22,9 +33,9 @@ def plot_jax_vs_ppo(instance, upto=None):
 
     # plot
     plt.subplot()
-    plt.plot(x, jax_mean, color='black', linewidth=2, label='JaxPlan')
+    plt.plot(x, jax_mean, color='black', linewidth=1.5, label='JaxPlan')
     plt.fill_between(x, jax_mean - jax_se, jax_mean + jax_se, color='black', alpha=0.15)
-    plt.plot(x, ppo_mean, color='black', linestyle='--', linewidth=1, label='PPO')
+    plt.plot(x, ppo_mean, color='black', linestyle='dotted', linewidth=1, label='PPO')
     plt.fill_between(x, ppo_mean - ppo_se, ppo_mean + ppo_se, color='black', alpha=0.15)
     plt.xlabel('Episode')
     plt.ylabel('Total Reward per Episode')
@@ -35,6 +46,6 @@ def plot_jax_vs_ppo(instance, upto=None):
 
 
 if __name__ == '__main__':
-    plot_jax_vs_ppo(1, 5000)
-    plot_jax_vs_ppo(3, 5000)
+    plot_jax_vs_ppo(1, 10000)
+    plot_jax_vs_ppo(3, 10000)
     plot_jax_vs_ppo(10, 10000)
