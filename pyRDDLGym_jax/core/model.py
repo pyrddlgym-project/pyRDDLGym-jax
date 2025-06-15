@@ -514,13 +514,18 @@ class JaxModelLearner:
             else:
                 values = np.asarray(values, dtype=self.compiled.INT)
             values = np.ravel(values, order='C').tolist()
+            if not self.rddl.variable_params[name]:
+                assert(len(values) == 1)
+                values = values[0]
             model.non_fluents[name] = values
         return model
 
 
 if __name__ == '__main__':
+    import os
     import pyRDDLGym
     from pyRDDLGym.core.debug.decompiler import RDDLDecompiler
+    from pyRDDLGym_jax.core.planner import load_config, JaxBackpropPlanner, JaxOfflineController
     bs = 32
 
     # make some data
@@ -529,10 +534,15 @@ if __name__ == '__main__':
         model = JaxModelLearner(rddl=env.model, param_ranges={}, batch_size_train=bs)
         key = random.PRNGKey(round(time.time() * 1000))
         subs = model._batched_init_subs()
-        epoch = 0
         param_fluents = {}
         while True:
-            states = {k: np.asarray(subs[k]) for k in model.rddl.state_fluents}
+            states = {
+                'pos': np.random.uniform(-2.4, 2.4, (bs,)),
+                'vel': np.random.uniform(-2.4, 2.4, (bs,)),
+                'ang-pos': np.random.uniform(-0.21, 0.21, (bs,)),
+                'ang-vel': np.random.uniform(-0.21, 0.21, (bs,))
+            }
+            subs.update(states)
             actions = {
                 'force': np.random.uniform(-10., 10., (bs,))
             }
@@ -540,10 +550,6 @@ if __name__ == '__main__':
             subs, _ = model.step_fn(subkey, param_fluents, subs, actions, {})
             subs = {k: np.asarray(v)[0, ...] for k, v in subs.items()}
             next_states = {k: subs[k] for k in model.rddl.state_fluents}
-            epoch += 1
-            if epoch > env.horizon:
-                subs = model._batched_init_subs()
-                epoch = 0
             yield (states, actions, next_states)
     
     # train it
@@ -558,9 +564,16 @@ if __name__ == '__main__':
                                     batch_size_train=bs, 
                                     optimizer_kwargs = {'learning_rate': 0.0003})
     for cb in model_learner.optimize_generator(data_iterator(), epochs=10000):
-        if cb['iteration'] > 0 and cb['iteration'] % 100 == 0:
-            print(cb['train_loss'])
-    learned = model_learner.learned_model(cb['param_fluents'])
-    decompiler = RDDLDecompiler()
-    print(decompiler.decompile_domain(learned))
-    print(decompiler.decompile_instance(learned))
+        pass
+
+    # planning in the trained model
+    model = model_learner.learned_model(cb['param_fluents'])
+    abs_path = os.path.dirname(os.path.abspath(__file__))        
+    config_path = os.path.join(os.path.dirname(abs_path), 'examples', 'configs', 'default_drp.cfg') 
+    planner_args, _, train_args = load_config(config_path)
+    planner = JaxBackpropPlanner(rddl=model, **planner_args)
+    controller = JaxOfflineController(planner, **train_args)
+
+    # evaluation of the plan
+    test_env = pyRDDLGym.make('CartPole_Continuous_gym', '0', vectorized=True)
+    controller.evaluate(test_env, episodes=1, verbose=True, render=True)
