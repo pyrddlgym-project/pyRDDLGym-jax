@@ -170,7 +170,7 @@ class JaxModelLearner:
         self.map_fn = self._jax_map()
         self.loss_fn = self._jax_loss(map_fn=self.map_fn, step_fn=self.step_fn)
         self.update_fn, self.project_fn = self._jax_update(loss_fn=self.loss_fn)
-        self.init_fn = self._jax_init(project_fn=self.project_fn)
+        self.init_fn, self.init_opt_fn = self._jax_init(project_fn=self.project_fn)
     
     # ===========================================================================
     # COMPILATION SUBROUTINES
@@ -302,18 +302,24 @@ class JaxModelLearner:
             opt_state = optimizer.init(params)
             return params, opt_state
         
+        # initialize just the optimizer given the non-fluents
+        def _jax_wrapped_init_optimizer(params):
+            params = project_fn(params)
+            opt_state = optimizer.init(params)
+            return params, opt_state
+        
         init_fn = jax.jit(_jax_wrapped_init_params_optimizer)
-        return init_fn
+        init_opt_fn = jax.jit(_jax_wrapped_init_optimizer)
+        return init_fn, init_opt_fn
                     
     def _jax_update(self, loss_fn):
         optimizer = self.optimizer
 
         # projected gradient trick to satisfy box constraints on params
-        if self.wrap_non_bool:
-            def _jax_wrapped_project_params(params):
+        def _jax_wrapped_project_params(params):
+            if self.wrap_non_bool:
                 return params
-        else:
-            def _jax_wrapped_project_params(params):
+            else:
                 new_params = {}
                 for (name, value) in params.items():
                     if self.rddl.variable_ranges[name] == 'bool':
@@ -363,7 +369,9 @@ class JaxModelLearner:
         is a numpy array of leading dimension equal to batch_size_train
         :param key: JAX PRNG key (derived from clock if not provided)
         :param epochs: the maximum number of steps of gradient descent
-        :param train_seconds: total time allocated for gradient descent     
+        :param train_seconds: total time allocated for gradient descent  
+        :param guess: initial non-fluent parameters: if None will use the initializer
+        specified in this instance   
         :param print_progress: whether to print the progress bar during training
         '''
         it = self.optimize_generator(*args, **kwargs)
@@ -383,6 +391,7 @@ class JaxModelLearner:
                            key: Optional[random.PRNGKey]=None,
                            epochs: int=999999,
                            train_seconds: float=120.,
+                           guess: Optional[Params]=None,
                            print_progress: bool=True) -> Generator[Callback, None, None]:
         '''Return a generator for estimating the unknown parameters from the given data set. 
         Generator can be iterated over to lazily estimate the parameters, yielding
@@ -393,7 +402,9 @@ class JaxModelLearner:
         is a numpy array of leading dimension equal to batch_size_train
         :param key: JAX PRNG key (derived from clock if not provided)
         :param epochs: the maximum number of steps of gradient descent
-        :param train_seconds: total time allocated for gradient descent     
+        :param train_seconds: total time allocated for gradient descent
+        :param guess: initial non-fluent parameters: if None will use the initializer
+        specified in this instance
         :param print_progress: whether to print the progress bar during training
         '''
         start_time = time.time()
@@ -407,8 +418,13 @@ class JaxModelLearner:
         subs = self._batched_init_subs()
 
         # initialize parameter fluents to optimize
-        key, subkey = random.split(key)
-        params, opt_state = self.init_fn(subkey)
+        if guess is None:
+            key, subkey = random.split(key)
+            params, opt_state = self.init_fn(subkey)
+        else:
+            params, opt_state = self.init_opt_fn(guess)
+
+        # initialize model hyper-parameters
         hyperparams = self.compiled.model_params
 
         # progress bar
@@ -417,8 +433,6 @@ class JaxModelLearner:
                 None, total=100, bar_format='{l_bar}{bar}| {elapsed} {postfix}')
         else:
             progress_bar = None
-
-        status = JaxLearnerStatus.NORMAL
 
         # main training loop
         for (it, (states, actions, next_states)) in enumerate(data):
@@ -429,6 +443,8 @@ class JaxModelLearner:
             key, subkey = random.split(key)
             params, opt_state, loss, zero_grads, hyperparams = self.update_fn(
                 subkey, params, subs, actions, next_states, hyperparams, opt_state)
+            
+            # extract non-fluent values from the trainable parameters
             param_fluents = self.map_fn(params)
             param_fluents = {name: param_fluents[name] for name in self.param_ranges}
 
@@ -452,6 +468,7 @@ class JaxModelLearner:
                 'status': status,
                 'iteration': it,
                 'train_loss': loss,
+                'params': params,
                 'param_fluents': param_fluents,
                 'key': key,
                 'progress': progress_percent
@@ -524,7 +541,6 @@ class JaxModelLearner:
 if __name__ == '__main__':
     import os
     import pyRDDLGym
-    from pyRDDLGym.core.debug.decompiler import RDDLDecompiler
     from pyRDDLGym_jax.core.planner import load_config, JaxBackpropPlanner, JaxOfflineController
     bs = 32
 
