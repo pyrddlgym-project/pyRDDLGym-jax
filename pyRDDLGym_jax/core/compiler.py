@@ -367,7 +367,8 @@ class JaxRDDLCompiler:
                          n_batch: int,
                          check_constraints: bool=False,
                          constraint_func: bool=False, 
-                         init_params_constr: Dict[str, Any]={}) -> Callable:
+                         init_params_constr: Dict[str, Any]={},
+                         model_params_reduction: Callable=lambda x: x[0]) -> Callable:
         '''Compiles the current RDDL model into a JAX transition function that 
         samples trajectories with a fixed horizon from a policy.
         
@@ -399,6 +400,8 @@ class JaxRDDLCompiler:
         returned log and does not raise an exception
         :param constraint_func: produces the h(s, a) constraint function
         in addition to the usual outputs
+        :param model_params_reduction: how to aggregate updated model_params across runs
+        in the batch (defaults to selecting the first element's parameters in the batch)
         '''
         rddl = self.rddl
         jax_step_fn = self.compile_transition(
@@ -421,7 +424,6 @@ class JaxRDDLCompiler:
             return jax_step_fn(subkey, actions, subs, model_params)
                         
         # do a batched step update from the policy
-        # TODO: come up with a better way to reduce the model_param batch dim
         def _jax_wrapped_batched_step_policy(carry, step):
             key, policy_params, hyperparams, subs, model_params = carry  
             key, *subkeys = random.split(key, num=1 + n_batch)
@@ -430,7 +432,7 @@ class JaxRDDLCompiler:
                 _jax_wrapped_single_step_policy,
                 in_axes=(0, None, None, None, 0, None)
             )(keys, policy_params, hyperparams, step, subs, model_params)
-            model_params = jax.tree_util.tree_map(partial(jnp.mean, axis=0), model_params)
+            model_params = jax.tree_util.tree_map(model_params_reduction, model_params)
             carry = (key, policy_params, hyperparams, subs, model_params)
             return carry, log            
             
