@@ -700,7 +700,7 @@ class JaxStraightLinePlan(JaxPlan):
             return new_params, True
         
         # convert softmax action back to action dict
-        action_sizes = {var: np.prod(shape[1:], dtype=int) 
+        action_sizes = {var: np.prod(shape[1:], dtype=np.int64) 
                         for (var, shape) in shapes.items()
                         if ranges[var] == 'bool'}
         
@@ -784,7 +784,7 @@ class JaxStraightLinePlan(JaxPlan):
                 scores = []
                 for (var, param) in params.items():
                     if ranges[var] == 'bool':
-                        param_flat = jnp.ravel(param)
+                        param_flat = jnp.ravel(param, order='C')
                         if noop[var]:
                             if wrap_sigmoid:
                                 param_flat = -param_flat
@@ -1033,7 +1033,7 @@ class JaxDeepReactivePolicy(JaxPlan):
         wrap_non_bool = self._wrap_non_bool
         init = self._initializer
         layers = list(enumerate(zip(self._topology, self._activations)))
-        layer_sizes = {var: np.prod(shape, dtype=int) 
+        layer_sizes = {var: np.prod(shape, dtype=np.int64) 
                        for (var, shape) in shapes.items()}
         layer_names = {var: f'output_{var}'.replace('-', '_') for var in shapes}
         
@@ -1080,7 +1080,7 @@ class JaxDeepReactivePolicy(JaxPlan):
             non_bool_dims = 0
             for (var, value) in subs.items():
                 if var in observed_vars:
-                    state = jnp.ravel(value)
+                    state = jnp.ravel(value, order='C')
                     if ranges[var] == 'bool':
                         states_bool.append(state)
                     else:
@@ -1734,11 +1734,20 @@ def mean_semivariance_utility(returns: jnp.ndarray, beta: float) -> float:
 
 
 @jax.jit
+def sharpe_utility(returns: jnp.ndarray, risk_free: float) -> float:
+    return (jnp.mean(returns) - risk_free) / (jnp.std(returns) + 1e-10)
+
+
+@jax.jit
+def var_utility(returns: jnp.ndarray, alpha: float) -> float:
+    return jnp.percentile(returns, q=100 * alpha)
+
+
+@jax.jit
 def cvar_utility(returns: jnp.ndarray, alpha: float) -> float:
     var = jnp.percentile(returns, q=100 * alpha)
     mask = returns <= var
-    weights = mask / jnp.maximum(1, jnp.sum(mask))
-    return jnp.sum(returns * weights)
+    return jnp.sum(returns * mask) / jnp.maximum(1, jnp.sum(mask))
 
 
 # set of all currently valid built-in utility functions
@@ -1748,8 +1757,10 @@ UTILITY_LOOKUP = {
     'mean_std': mean_deviation_utility,
     'mean_semivar': mean_semivariance_utility,
     'mean_semidev': mean_semideviation_utility,
+    'sharpe': sharpe_utility,
     'entropic': entropic_utility,
     'exponential': entropic_utility,
+    'var': var_utility,
     'cvar': cvar_utility
 }
 
