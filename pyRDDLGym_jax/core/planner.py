@@ -2676,6 +2676,7 @@ r"""
                 'model_params': model_params,
                 'progress': progress_percent,
                 'train_log': train_log,
+                'policy_hyperparams': policy_hyperparams,
                 **test_log
             }
 
@@ -2895,6 +2896,7 @@ class JaxOfflineController(BaseAgent):
         self.train_on_reset = train_on_reset
         self.train_kwargs = train_kwargs        
         self.params_given = params is not None
+        self.hyperparams_given = eval_hyperparams is not None
         
         # load the policy from file
         if not self.train_on_reset and params is not None and isinstance(params, str):
@@ -2908,6 +2910,8 @@ class JaxOfflineController(BaseAgent):
             callback = self.planner.optimize(key=self.key, **self.train_kwargs)
             self.callback = callback
             params = callback['best_params'] 
+            if not self.hyperparams_given:
+                self.eval_hyperparams = callback['policy_hyperparams']
 
             # save the policy
             if save_path is not None:
@@ -2931,6 +2935,8 @@ class JaxOfflineController(BaseAgent):
             callback = self.planner.optimize(key=self.key, **self.train_kwargs)
             self.callback = callback
             self.params = callback['best_params']
+            if not self.hyperparams_given:
+                self.eval_hyperparams = callback['policy_hyperparams']
 
 
 class JaxOnlineController(BaseAgent):
@@ -2963,6 +2969,7 @@ class JaxOnlineController(BaseAgent):
             key = random.PRNGKey(round(time.time() * 1000))
         self.key = key
         self.eval_hyperparams = eval_hyperparams
+        self.hyperparams_given = eval_hyperparams is not None
         self.warm_start = warm_start
         self.train_kwargs = train_kwargs
         self.max_attempts = max_attempts
@@ -2987,6 +2994,8 @@ class JaxOnlineController(BaseAgent):
                 key=self.key, guess=self.guess, subs=state, **self.train_kwargs)    
         self.callback = callback
         params = callback['best_params']
+        if not self.hyperparams_given:
+            self.eval_hyperparams = callback['policy_hyperparams']
 
         # get the action from the parameters for the current state
         self.key, subkey = random.split(self.key)
