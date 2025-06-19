@@ -412,7 +412,10 @@ class StaticNormalizer(Preprocessor):
 
         # static bounds
         def _jax_wrapped_normalizer_update(subs, stats):
-            return stats        
+            stats = {var: (jnp.asarray(lower, dtype=compiled.REAL), 
+                           jnp.asarray(upper, dtype=compiled.REAL)) 
+                     for (var, (lower, upper)) in bounded_vars.items()}     
+            return stats   
         self._update = jax.jit(_jax_wrapped_normalizer_update)
 
         # apply min max scaling
