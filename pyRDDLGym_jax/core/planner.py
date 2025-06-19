@@ -344,6 +344,87 @@ class JaxRDDLCompilerWithGrad(JaxRDDLCompiler):
 
 
 # ***********************************************************************
+# ALL VERSIONS OF STATE PREPROCESSING FOR DRP
+# 
+# - static normalization
+# 
+# ***********************************************************************
+
+
+class Preprocessor(metaclass=ABCMeta):
+    '''Base class for all state preprocessors.'''
+
+    HYPERPARAMS_KEY = 'preprocessor__'
+
+    def __init__(self) -> None:
+        self._initializer = None
+        self._update = None
+        self._transform = None
+
+    @property
+    def initialize(self):
+        return self._initializer
+
+    @property
+    def update(self):
+        return self._update
+    
+    @property
+    def transform(self):
+        return self._transform
+    
+    @abstractmethod
+    def compile(self, compiled: JaxRDDLCompilerWithGrad) -> None:
+        pass
+
+
+class StaticNormalizer(Preprocessor):
+    '''Normalize values by box constraints on fluents computed from the RDDL domain.'''
+
+    def compile(self, compiled: JaxRDDLCompilerWithGrad) -> None:
+        
+        # adjust for partial observability
+        rddl = compiled.rddl
+        if rddl.observ_fluents:
+            observed_vars = rddl.observ_fluents
+        else:
+            observed_vars = rddl.state_fluents
+
+        # ignore boolean fluents and infinite bounds
+        bounded_vars = {}
+        for var in observed_vars:
+            if rddl.variable_ranges[var] != 'bool':
+                lower, upper = compiled.constraints.bounds[var]
+                if np.all(np.isfinite(lower) & np.isfinite(upper) & (lower < upper)):
+                    bounded_vars[var] = (lower, upper)
+        
+        # initialize to ranges computed by the constraint parser
+        def _jax_wrapped_normalizer_init():
+            return bounded_vars        
+        self._initializer = jax.jit(_jax_wrapped_normalizer_init)
+
+        # static bounds
+        def _jax_wrapped_normalizer_update(subs, stats):
+            return stats        
+        self._update = jax.jit(_jax_wrapped_normalizer_update)
+
+        # apply min max scaling
+        def _jax_wrapped_normalizer_transform(subs, stats):
+            new_subs = {}
+            for (var, values) in subs.items():
+                if var in stats:
+                    lower, upper = stats[var]
+                    new_dims = jnp.ndim(values) - jnp.ndim(lower)
+                    lower = lower[(jnp.newaxis,) * new_dims + (...,)]
+                    upper = upper[(jnp.newaxis,) * new_dims + (...,)]
+                    new_subs[var] = (values - lower) / (upper - lower)
+                else:
+                    new_subs[var] = values
+            return new_subs
+        self._transform = jax.jit(_jax_wrapped_normalizer_transform)
+
+
+# ***********************************************************************
 # ALL VERSIONS OF JAX PLANS
 # 
 # - straight line plan
@@ -368,7 +449,8 @@ class JaxPlan(metaclass=ABCMeta):
     @abstractmethod
     def compile(self, compiled: JaxRDDLCompilerWithGrad,
                 _bounds: Bounds,
-                horizon: int) -> None:
+                horizon: int,
+                preprocessor: Optional[Preprocessor]=None) -> None:
         pass
     
     @abstractmethod
@@ -519,7 +601,8 @@ class JaxStraightLinePlan(JaxPlan):
     
     def compile(self, compiled: JaxRDDLCompilerWithGrad,
                 _bounds: Bounds,
-                horizon: int) -> None:
+                horizon: int,
+                preprocessor: Optional[Preprocessor]=None) -> None:
         rddl = compiled.rddl
         
         # calculate the correct action box bounds
@@ -908,7 +991,8 @@ class JaxDeepReactivePolicy(JaxPlan):
         
     def compile(self, compiled: JaxRDDLCompilerWithGrad,
                 _bounds: Bounds,
-                horizon: int) -> None:
+                horizon: int,
+                preprocessor: Optional[Preprocessor]=None) -> None:
         rddl = compiled.rddl
         
         # calculate the correct action box bounds
@@ -973,7 +1057,12 @@ class JaxDeepReactivePolicy(JaxPlan):
                 normalize = False
         
         # convert subs dictionary into a state vector to feed to the MLP
-        def _jax_wrapped_policy_input(subs):
+        def _jax_wrapped_policy_input(subs, hyperparams):
+
+            # optional state preprocessing
+            if preprocessor is not None:
+                stats = hyperparams[preprocessor.HYPERPARAMS_KEY]
+                subs = preprocessor.transform(subs, stats)
             
             # concatenate all state variables into a single vector
             # optionally apply layer norm to each input tensor
@@ -1010,8 +1099,8 @@ class JaxDeepReactivePolicy(JaxPlan):
             return state
             
         # predict actions from the policy network for current state
-        def _jax_wrapped_policy_network_predict(subs):
-            state = _jax_wrapped_policy_input(subs)
+        def _jax_wrapped_policy_network_predict(subs, hyperparams):
+            state = _jax_wrapped_policy_input(subs, hyperparams)
             
             # feed state vector through hidden layers
             hidden = state
@@ -1076,7 +1165,7 @@ class JaxDeepReactivePolicy(JaxPlan):
         
         # train action prediction
         def _jax_wrapped_drp_predict_train(key, params, hyperparams, step, subs):
-            actions = predict_fn.apply(params, subs)
+            actions = predict_fn.apply(params, subs, hyperparams)
             if not wrap_non_bool:
                 for (var, action) in actions.items():
                     if var != bool_key and ranges[var] != 'bool':
@@ -1126,7 +1215,7 @@ class JaxDeepReactivePolicy(JaxPlan):
             subs = {var: value[0, ...] 
                     for (var, value) in subs.items()
                     if var in observed_vars}
-            params = predict_fn.init(key, subs)
+            params = predict_fn.init(key, subs, hyperparams)
             return params
         
         self.initializer = _jax_wrapped_drp_init
@@ -1689,7 +1778,8 @@ class JaxBackpropPlanner:
                  logger: Optional[Logger]=None,
                  dashboard_viz: Optional[Any]=None,
                  print_warnings: bool=True,
-                 parallel_updates: Optional[int]=None) -> None:
+                 parallel_updates: Optional[int]=None,
+                 preprocessor: Optional[Preprocessor]=None) -> None:
         '''Creates a new gradient-based algorithm for optimizing action sequences
         (plan) in the given RDDL. Some operations will be converted to their
         differentiable counterparts; the specific operations can be customized
@@ -1731,6 +1821,7 @@ class JaxBackpropPlanner:
         to pass to the dashboard to visualize the policy
         :param print_warnings: whether to print warnings
         :param parallel_updates: how many optimizers to run independently in parallel
+        :param preprocessor: optional preprocessor for state inputs to plan
         '''
         self.rddl = rddl
         self.plan = plan
@@ -1756,6 +1847,7 @@ class JaxBackpropPlanner:
         self.pgpe = pgpe
         self.use_pgpe = pgpe is not None
         self.print_warnings = print_warnings
+        self.preprocessor = preprocessor
         
         # set optimizer
         try:
@@ -1881,7 +1973,8 @@ r"""
                   f'    noise_kwargs      ={self.noise_kwargs}\n'
                   f'    batch_size_train  ={self.batch_size_train}\n'
                   f'    batch_size_test   ={self.batch_size_test}\n'
-                  f'    parallel_updates  ={self.parallel_updates}\n')
+                  f'    parallel_updates  ={self.parallel_updates}\n'
+                  f'    preprocessor      ={self.preprocessor}\n')
         result += str(self.plan)
         if self.use_pgpe:
             result += str(self.pgpe)
@@ -1917,10 +2010,15 @@ r"""
         
     def _jax_compile_optimizer(self):
         
+        # preprocessor
+        if self.preprocessor is not None:
+            self.preprocessor.compile(self.compiled)   
+
         # policy
         self.plan.compile(self.compiled,
                           _bounds=self._action_bounds,
-                          horizon=self.horizon)
+                          horizon=self.horizon,
+                          preprocessor=self.preprocessor)
         self.train_policy = jax.jit(self.plan.train_policy)
         self.test_policy = jax.jit(self.plan.test_policy)
         
@@ -2397,7 +2495,13 @@ r"""
                             f'which could be suboptimal.', 'yellow')
                         print(message)
                     policy_hyperparams[action] = 1.0
-            
+        
+        # initialize preprocessor
+        preproc_key = None
+        if self.preprocessor is not None:
+            preproc_key = self.preprocessor.HYPERPARAMS_KEY
+            policy_hyperparams[preproc_key] = self.preprocessor.initialize()
+
         # print summary of parameters:
         if print_summary:
             print(self.summarize_system())
@@ -2524,6 +2628,11 @@ r"""
                  subkey, policy_params, policy_hyperparams, train_subs, model_params, 
                  opt_state, opt_aux)
             
+            # update the preprocessor
+            if self.preprocessor is not None:                
+                policy_hyperparams[preproc_key] = self.preprocessor.update(
+                    train_log['fluents'], policy_hyperparams[preproc_key])
+
             # evaluate
             test_loss, (test_log, model_params_test) = self.test_loss(
                 subkey, policy_params, policy_hyperparams, test_subs, model_params_test)
@@ -2754,7 +2863,8 @@ r"""
     
     def _perform_diagnosis(self, last_iter_improve,
                            train_return, test_return, best_return, grad_norm):
-        max_grad_norm = max(jax.tree_util.tree_leaves(grad_norm))
+        grad_norms = jax.tree_util.tree_leaves(grad_norm)
+        max_grad_norm = max(grad_norms) if grad_norms else np.nan
         grad_is_zero = np.allclose(max_grad_norm, 0)
         
         # divergence if the solution is not finite
