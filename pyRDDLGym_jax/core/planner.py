@@ -207,6 +207,13 @@ def _load_config(config, args):
                 pgpe_kwargs['optimizer'] = pgpe_optimizer
         planner_args['pgpe'] = getattr(sys.modules[__name__], pgpe_method)(**pgpe_kwargs)
 
+    # preprocessor settings
+    preproc_method = planner_args.get('preprocessor', None)
+    preproc_kwargs = planner_args.pop('preprocessor_kwargs', {})
+    if preproc_method is not None:
+        planner_args['preprocessor'] = getattr(
+            sys.modules[__name__], preproc_method)(**preproc_kwargs)
+
     # optimize call RNG key
     planner_key = train_args.get('key', None)
     if planner_key is not None:
