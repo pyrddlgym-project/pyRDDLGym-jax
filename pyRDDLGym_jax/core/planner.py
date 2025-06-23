@@ -388,6 +388,13 @@ class Preprocessor(metaclass=ABCMeta):
 class StaticNormalizer(Preprocessor):
     '''Normalize values by box constraints on fluents computed from the RDDL domain.'''
 
+    def __init__(self, fluent_bounds: Dict[str, Tuple[np.ndarray, np.ndarray]]={}) -> None:
+        '''Create a new instance of the static normalizer.
+
+        :param fluent_bounds: optional bounds on fluents to overwrite default values.
+        '''
+        self.fluent_bounds = fluent_bounds
+
     def compile(self, compiled: JaxRDDLCompilerWithGrad) -> None:
         
         # adjust for partial observability
@@ -404,6 +411,9 @@ class StaticNormalizer(Preprocessor):
                 lower, upper = compiled.constraints.bounds[var]
                 if np.all(np.isfinite(lower) & np.isfinite(upper) & (lower < upper)):
                     bounded_vars[var] = (lower, upper)
+                user_bounds = self.fluent_bounds.get(var, None)
+                if user_bounds is not None:
+                    bounded_vars[var] = tuple(user_bounds)
         
         # initialize to ranges computed by the constraint parser
         def _jax_wrapped_normalizer_init():
