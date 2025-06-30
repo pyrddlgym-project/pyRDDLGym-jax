@@ -159,6 +159,7 @@ class JaxMCTSPlanner:
     # ===========================================================================
 
     def _jax_compile_rddl(self):
+        rddl = self.rddl
 
         # compile exact RDDL model
         self.compiled = JaxRDDLCompiler(rddl)
