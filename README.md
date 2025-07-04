@@ -173,13 +173,7 @@ controller = JaxOfflineController(planner, **train_args)
 ## JaxPlan Dashboard
 
 Since version 1.0, JaxPlan has an optional dashboard that allows keeping track of the planner performance across multiple runs, 
-and visualization of the policy or model, and other useful debugging features.
-
-<p align="middle">
-<img src="https://github.com/pyrddlgym-project/pyRDDLGym-jax/blob/main/Images/dashboard.png" width="480" height="248" margin=0/>
-</p>
-
-To run the dashboard, add the following entry to your config file:
+and visualization of the policy or model, and other useful debugging features. To run the dashboard, add the following to your config file:
 
 ```ini
 ...
@@ -187,8 +181,6 @@ To run the dashboard, add the following entry to your config file:
 dashboard=True
 ...
 ```
-
-More documentation about this and other new features will be coming soon.
 
 ## Tuning the Planner
 
