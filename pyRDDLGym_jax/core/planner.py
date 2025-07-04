@@ -2057,14 +2057,16 @@ r"""
         train_rollouts = self.compiled.compile_rollouts(
             policy=self.plan.train_policy,
             n_steps=self.horizon,
-            n_batch=self.batch_size_train
+            n_batch=self.batch_size_train,
+            cache_path_info=self.preprocessor is not None
         )
         self.train_rollouts = train_rollouts
         
         test_rollouts = self.test_compiled.compile_rollouts(
             policy=self.plan.test_policy,
             n_steps=self.horizon,
-            n_batch=self.batch_size_test
+            n_batch=self.batch_size_test,
+            cache_path_info=False
         )
         self.test_rollouts = jax.jit(test_rollouts)
         

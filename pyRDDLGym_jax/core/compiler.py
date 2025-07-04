@@ -237,7 +237,8 @@ class JaxRDDLCompiler:
     
     def compile_transition(self, check_constraints: bool=False,
                            constraint_func: bool=False, 
-                           init_params_constr: Dict[str, Any]={}) -> Callable:
+                           init_params_constr: Dict[str, Any]={},
+                           cache_path_info: bool=False) -> Callable:
         '''Compiles the current RDDL model into a JAX transition function that 
         samples the next state.
         
@@ -274,6 +275,7 @@ class JaxRDDLCompiler:
         returned log and does not raise an exception
         :param constraint_func: produces the h(s, a) function described above
         in addition to the usual outputs
+        :param cache_path_info: whether to save full path traces as part of the log
         '''
         NORMAL = JaxRDDLCompiler.ERROR_CODES['NORMAL']        
         rddl = self.rddl
@@ -322,8 +324,11 @@ class JaxRDDLCompiler:
             errors |= err
             
             # calculate fluent values
-            fluents = {name: values for (name, values) in subs.items() 
-                       if name not in rddl.non_fluents}
+            if cache_path_info:
+                fluents = {name: values for (name, values) in subs.items() 
+                           if name not in rddl.non_fluents}
+            else:
+                fluents = {}
             
             # set the next state to the current state
             for (state, next_state) in rddl.next_state.items():
@@ -368,7 +373,8 @@ class JaxRDDLCompiler:
                          check_constraints: bool=False,
                          constraint_func: bool=False, 
                          init_params_constr: Dict[str, Any]={},
-                         model_params_reduction: Callable=lambda x: x[0]) -> Callable:
+                         model_params_reduction: Callable=lambda x: x[0],
+                         cache_path_info: bool=False) -> Callable:
         '''Compiles the current RDDL model into a JAX transition function that 
         samples trajectories with a fixed horizon from a policy.
         
@@ -402,10 +408,11 @@ class JaxRDDLCompiler:
         in addition to the usual outputs
         :param model_params_reduction: how to aggregate updated model_params across runs
         in the batch (defaults to selecting the first element's parameters in the batch)
+        :param cache_path_info: whether to save full path traces as part of the log
         '''
         rddl = self.rddl
         jax_step_fn = self.compile_transition(
-            check_constraints, constraint_func, init_params_constr)
+            check_constraints, constraint_func, init_params_constr, cache_path_info)
         
         # for POMDP only observ-fluents are assumed visible to the policy
         if rddl.observ_fluents:
