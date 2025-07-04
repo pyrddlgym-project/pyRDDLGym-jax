@@ -29,7 +29,7 @@ setup(
       url="https://github.com/pyrddlgym-project/pyRDDLGym-jax",
       packages=find_packages(),
       install_requires=[
-          'pyRDDLGym>=2.0',
+          'pyRDDLGym>=2.3',
           'tqdm>=4.66',
           'jax>=0.4.12',
           'optax>=0.1.9',
