@@ -1,6 +1,7 @@
 import os
 import sys
 import numpy as np
+import time
 
 import pyRDDLGym
 from pyRDDLGym_gurobi.core.planner import GurobiOnlineController, load_config
@@ -24,13 +25,18 @@ def main(instance):
         state, _ = env.reset(seed=it)
         returns = []
         cuml_return = 0.0
+        train_time = 0.0
         for _ in range(env.horizon):
+            start_time = time.time()
             action = controller.sample_action(state)
+            end_time = time.time()
+            train_time += end_time - start_time
             state, reward, *_ = env.step(action)
             cuml_return += reward
             returns.append(cuml_return)
             print(cuml_return)
         all_returns.append(returns)
+        print(train_time)
     all_returns = np.asarray(all_returns).T
     np.savetxt(f'gurobiplan_instance{instance}.csv', all_returns)
 

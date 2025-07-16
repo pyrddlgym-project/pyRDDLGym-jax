@@ -2,14 +2,23 @@ import os
 import sys
 import jax
 import numpy as np
+import time
 
 import pyRDDLGym
-from pyRDDLGym_jax.core.planner import load_config, JaxBackpropPlanner
+from pyRDDLGym_jax.core.planner import load_config, JaxBackpropPlanner, JaxOfflineController
 
 
 NUM_TRIALS = 20
 
-    
+
+def measure_evaluation_time(planner, policy_params, env):
+    controller = JaxOfflineController(planner, params=policy_params)
+    start_time = time.time()
+    controller.evaluate(env, episodes=100)
+    end_time = time.time()
+    print(f'eval time = {(end_time - start_time) / 100}')
+
+
 def main(instance):
     PATH = os.path.dirname(os.path.abspath(__file__))
     config_path = os.path.join(PATH, 'Reservoir_jaxplan.cfg') 
@@ -29,6 +38,9 @@ def main(instance):
             times.append(callback['elapsed_time'])
         all_returns.append(returns)
         all_times.append(times)
+        time_to_train = callback['elapsed_time'] / callback['iteration']
+        print(time_to_train)
+        print(measure_evaluation_time(planner, callback['best_params'], env))
     all_returns = np.asarray(all_returns).T
     all_times = np.asarray(all_times).T
     np.savetxt(f'jaxplan_instance{instance}_return_slp.csv', all_returns)

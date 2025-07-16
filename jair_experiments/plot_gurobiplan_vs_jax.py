@@ -20,7 +20,7 @@ def plot_gurobi_vs_jax(instance):
     print(jax_data.shape)
     grb_mean = np.mean(grb_data, axis=1)
     grb_se = np.std(grb_data, axis=1) / np.sqrt(grb_data.shape[1])
-    print(f'gurobi result={grb_data[-1]}')
+    print(f'gurobi result={grb_mean[-1]}')
     jax_mean = np.mean(jax_data, axis=1)
     jax_se = np.std(jax_data, axis=1) / np.sqrt(jax_data.shape[1])
     print(f'jax result={jax_mean[-1]}')

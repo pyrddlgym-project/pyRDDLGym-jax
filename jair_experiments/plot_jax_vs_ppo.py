@@ -27,8 +27,10 @@ def plot_jax_vs_ppo(instance, upto=None):
         jax_data = np.concat([jax_data, padding], axis=0)
     ppo_mean = np.mean(ppo_data, axis=1)
     ppo_se = np.std(ppo_data, axis=1) / np.sqrt(ppo_data.shape[1])
+    print(f'ppo result={ppo_mean[-1]}')
     jax_mean = np.mean(jax_data, axis=1)
     jax_se = np.std(jax_data, axis=1) / np.sqrt(jax_data.shape[1])
+    print(f'jax result={jax_mean[-1]}')
     x = np.arange(ppo_mean.shape[0])
 
     # plot
