@@ -20,7 +20,7 @@
 
 import time
 import numpy as np
-from typing import Dict, Optional, Union
+from typing import Callable, Dict, Optional, Union
 
 import jax
 
@@ -48,6 +48,7 @@ class JaxRDDLSimulator(RDDLSimulator):
                  logger: Optional[Logger]=None,
                  keep_tensors: bool=False,
                  objects_as_strings: bool=True,
+                 python_functions: Optional[Dict[str, Callable]]=None,
                  **compiler_args) -> None:
         '''Creates a new simulator for the given RDDL model with Jax as a backend.
         
@@ -60,8 +61,9 @@ class JaxRDDLSimulator(RDDLSimulator):
         :param logger: to log information about compilation to file
         :param keep_tensors: whether the sampler takes actions and
         returns state in numpy array form
-        param objects_as_strings: whether to return object values as strings (defaults
+        :param objects_as_strings: whether to return object values as strings (defaults
         to integer indices if False)
+        :param python_functions: dictionary of external Python functions to call from RDDL
         :param **compiler_args: keyword arguments to pass to the Jax compiler
         '''
         if key is None:
@@ -73,7 +75,8 @@ class JaxRDDLSimulator(RDDLSimulator):
         # generate direct sampling with default numpy RNG and operations
         super(JaxRDDLSimulator, self).__init__(
             rddl, logger=logger, 
-            keep_tensors=keep_tensors, objects_as_strings=objects_as_strings)
+            keep_tensors=keep_tensors, objects_as_strings=objects_as_strings,
+            python_functions=python_functions)
     
     def seed(self, seed: int) -> None:
         super(JaxRDDLSimulator, self).seed(seed)
@@ -83,7 +86,12 @@ class JaxRDDLSimulator(RDDLSimulator):
         rddl = self.rddl
         
         # compilation
-        compiled = JaxRDDLCompiler(rddl, logger=self.logger, **self.compiler_args)
+        compiled = JaxRDDLCompiler(
+            rddl, 
+            logger=self.logger, 
+            python_functions=self.python_functions, 
+            **self.compiler_args
+        )
         compiled.compile(log_jax_expr=True, heading='SIMULATION MODEL')
         
         self.init_values = compiled.init_values
