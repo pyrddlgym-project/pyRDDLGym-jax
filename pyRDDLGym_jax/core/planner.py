@@ -1810,7 +1810,8 @@ class JaxBackpropPlanner:
                  dashboard_viz: Optional[Any]=None,
                  print_warnings: bool=True,
                  parallel_updates: Optional[int]=None,
-                 preprocessor: Optional[Preprocessor]=None) -> None:
+                 preprocessor: Optional[Preprocessor]=None,
+                 python_functions: Optional[Dict[str, Callable]]=None) -> None:
         '''Creates a new gradient-based algorithm for optimizing action sequences
         (plan) in the given RDDL. Some operations will be converted to their
         differentiable counterparts; the specific operations can be customized
@@ -1853,6 +1854,7 @@ class JaxBackpropPlanner:
         :param print_warnings: whether to print warnings
         :param parallel_updates: how many optimizers to run independently in parallel
         :param preprocessor: optional preprocessor for state inputs to plan
+        :param python_functions: dictionary of external Python functions to call from RDDL
         '''
         self.rddl = rddl
         self.plan = plan
@@ -1879,7 +1881,10 @@ class JaxBackpropPlanner:
         self.use_pgpe = pgpe is not None
         self.print_warnings = print_warnings
         self.preprocessor = preprocessor
-        
+        if python_functions is None:
+            python_functions = {}
+        self.python_functions = python_functions
+
         # set optimizer
         try:
             optimizer = optax.inject_hyperparams(optimizer)(**optimizer_kwargs)
@@ -2027,7 +2032,8 @@ r"""
             use64bit=self.use64bit,
             cpfs_without_grad=self.cpfs_without_grad,
             compile_non_fluent_exact=self.compile_non_fluent_exact,
-            print_warnings=self.print_warnings
+            print_warnings=self.print_warnings,
+            python_functions=self.python_functions
         )
         self.compiled.compile(log_jax_expr=True, heading='RELAXED MODEL')
         
@@ -2035,7 +2041,8 @@ r"""
         self.test_compiled = JaxRDDLCompiler(
             rddl=rddl,
             logger=self.logger,
-            use64bit=self.use64bit
+            use64bit=self.use64bit,
+            python_functions=self.python_functions
         )
         self.test_compiled.compile(log_jax_expr=True, heading='EXACT MODEL')
         
