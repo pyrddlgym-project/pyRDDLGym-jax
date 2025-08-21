@@ -30,7 +30,8 @@ from pyRDDLGym.core.debug.exception import (
     print_stack_trace, 
     raise_warning,
     RDDLInvalidNumberOfArgumentsError, 
-    RDDLNotImplementedError
+    RDDLNotImplementedError,
+    RDDLUndefinedVariableError
 )
 from pyRDDLGym.core.debug.logger import Logger
 from pyRDDLGym.core.simulator import RDDLSimulatorPrecompiled
@@ -941,7 +942,7 @@ class JaxRDDLCompiler:
         _, pyfunc_name = expr.etype
         pyfunc = self.python_functions.get(pyfunc_name)
         if pyfunc is None:
-            raise ValueError(
+            raise RDDLUndefinedVariableError(
                 f'Undefined external Python function <{pyfunc_name}>, '
                 f'must be one of {list(self.python_functions.keys())}.\n' +  
                 print_stack_trace(expr))
