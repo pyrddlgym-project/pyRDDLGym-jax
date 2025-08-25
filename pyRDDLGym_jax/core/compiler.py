@@ -983,8 +983,12 @@ class JaxRDDLCompiler:
             # output dimension for each combination is captured variables (n1, n2, ...)
             # so the total dimension of the output array is (k, n1, n2, ...)
             sample = jax.vmap(pyfunc, in_axes=0)(*flat_samples)
+            if not isinstance(sample, jnp.ndarray):
+                raise ValueError(
+                    f'Output of external Python function <{pyfunc_name}> '
+                    f'is not a JAX array.\n' + print_stack_trace(expr))                        
+            
             pyfunc_dims = jnp.shape(sample)[1:]
-                        
             if len(require_dims) != len(pyfunc_dims):
                 raise ValueError(
                     f'Output of external Python function <{pyfunc_name}> returned array with '
