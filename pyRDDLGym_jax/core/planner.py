@@ -668,7 +668,7 @@ class JaxStraightLinePlan(JaxPlan):
                 return action
             
         wrap_non_bool = self._wrap_non_bool
-        
+
         def _jax_non_bool_param_to_action(var, param, hyperparams):
             if wrap_non_bool:
                 lower, upper = bounds_safe[var]
