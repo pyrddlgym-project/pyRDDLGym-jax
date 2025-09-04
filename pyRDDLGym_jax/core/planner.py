@@ -788,7 +788,7 @@ class JaxStraightLinePlan(JaxPlan):
             # shift the boolean actions uniformly, clipping at the min/max values
             # the amount to move is such that only top allowed_actions actions
             # are still active (e.g. not equal to noop) after the shift
-            def _jax_wrapped_sorting_project(params, hyperparams):
+            def _jax_wrapped_sorting_project(params, hyperparams ):
                 
                 # find the amount to shift action parameters
                 # if noop is True pretend it is False and reflect the parameter
@@ -3069,6 +3069,7 @@ class JaxOfflineController(BaseAgent):
         actions = self.planner.get_action(
             subkey, self.params, self.step, state, self.eval_hyperparams)
         self.step += 1
+
         return actions
         
     def reset(self) -> None:
