@@ -1,5 +1,6 @@
 # ***********************************************************************
 # JAXPLAN
+#try lo change
 # 
 # Author: Michael Gimelfarb
 #
@@ -666,7 +667,7 @@ class JaxStraightLinePlan(JaxPlan):
                 return jax.scipy.special.logit(action) / weight
             else:
                 return action
-            
+
         wrap_non_bool = self._wrap_non_bool
 
         def _jax_non_bool_param_to_action(var, param, hyperparams):
