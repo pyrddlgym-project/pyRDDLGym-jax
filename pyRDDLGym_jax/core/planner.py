@@ -4,7 +4,7 @@
 ##  try to chang the planner - the sample action       ##
 ##########################################################
 #SX
-# Author: Michael Gimelfarb
+# Author: Michael GimelfarbS
 #
 # REFERENCES:
 #
