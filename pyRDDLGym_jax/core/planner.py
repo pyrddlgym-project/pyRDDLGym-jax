@@ -3,12 +3,12 @@
 ##########################################################
 ##  try to chang the planner - the sample action       ##
 ##########################################################
-#
+#SX
 # Author: Michael Gimelfarb
 #
 # REFERENCES:
 #
-# [1] Gimelfarb, Michael, Ayal Taitler, and Scott Sanner. "JaxPlan and GurobiPlan: 
+# [1] Gimelfarb, Michael, Ayal Taitler, and Scott Sanner. "JaxPlan and GurobiPlan:
 # Optimization Baselines for Replanning in Discrete and Mixed Discrete-Continuous 
 # Probabilistic Domains." Proceedings of the International Conference on Automated 
 # Planning and Scheduling. Vol. 34. 2024.
