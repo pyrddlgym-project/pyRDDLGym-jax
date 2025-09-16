@@ -30,7 +30,8 @@ from pyRDDLGym.core.debug.exception import (
     print_stack_trace, 
     raise_warning,
     RDDLInvalidNumberOfArgumentsError, 
-    RDDLNotImplementedError
+    RDDLNotImplementedError,
+    RDDLUndefinedVariableError
 )
 from pyRDDLGym.core.debug.logger import Logger
 from pyRDDLGym.core.simulator import RDDLSimulatorPrecompiled
@@ -56,7 +57,8 @@ class JaxRDDLCompiler:
                  allow_synchronous_state: bool=True,
                  logger: Optional[Logger]=None,
                  use64bit: bool=False,
-                 compile_non_fluent_exact: bool=True) -> None:
+                 compile_non_fluent_exact: bool=True,
+                 python_functions: Optional[Dict[str, Callable]]=None) -> None:
         '''Creates a new RDDL to Jax compiler.
         
         :param rddl: the RDDL model to compile into Jax
@@ -65,7 +67,8 @@ class JaxRDDLCompiler:
         :param logger: to log information about compilation to file
         :param use64bit: whether to use 64 bit arithmetic
         :param compile_non_fluent_exact: whether non-fluent expressions 
-        are always compiled using exact JAX expressions.
+        are always compiled using exact JAX expressions
+        :param python_functions: dictionary of external Python functions to call from RDDL
         '''
         self.rddl = rddl
         self.logger = logger
@@ -99,11 +102,15 @@ class JaxRDDLCompiler:
         self.traced = tracer.trace()
         
         # extract the box constraints on actions
+        if python_functions is None:
+            python_functions = {}
+        self.python_functions = python_functions
         simulator = RDDLSimulatorPrecompiled(
             rddl=self.rddl,
             init_values=self.init_values,
             levels=self.levels,
-            trace_info=self.traced
+            trace_info=self.traced,
+            python_functions=python_functions
         )  
         constraints = RDDLConstraints(simulator, vectorized=True)
         self.constraints = constraints
@@ -605,6 +612,8 @@ class JaxRDDLCompiler:
             jax_expr = self._jax_aggregation(expr, init_params)
         elif etype == 'func':
             jax_expr = self._jax_functional(expr, init_params)
+        elif etype == 'pyfunc':
+            jax_expr = self._jax_pyfunc(expr, init_params)
         elif etype == 'control':
             jax_expr = self._jax_control(expr, init_params)
         elif etype == 'randomvar':
@@ -926,6 +935,84 @@ class JaxRDDLCompiler:
         raise RDDLNotImplementedError(
             f'Function {op} is not supported.\n' + print_stack_trace(expr))   
     
+    def _jax_pyfunc(self, expr, init_params):
+        NORMAL = JaxRDDLCompiler.ERROR_CODES['NORMAL']
+
+        # get the Python function by name
+        _, pyfunc_name = expr.etype
+        pyfunc = self.python_functions.get(pyfunc_name)
+        if pyfunc is None:
+            raise RDDLUndefinedVariableError(
+                f'Undefined external Python function <{pyfunc_name}>, '
+                f'must be one of {list(self.python_functions.keys())}.\n' +  
+                print_stack_trace(expr))
+        
+        captured_vars, args = expr.args
+        scope_vars = self.traced.cached_objects_in_scope(expr)
+        dest_indices = self.traced.cached_sim_info(expr)
+        free_vars = [p for p in scope_vars if p[0] not in captured_vars]
+        free_dims = self.rddl.object_counts(p for (_, p) in free_vars)
+        num_free_vars = len(free_vars)
+        captured_types = [t for (p, t) in scope_vars if p in captured_vars]
+        require_dims = self.rddl.object_counts(captured_types)
+
+        # compile the inputs to the function
+        jax_inputs = [self._jax(arg, init_params) for arg in args]
+
+        # compile the function evaluation function
+        def _jax_wrapped_external_function(x, params, key):
+
+            # evaluate inputs to the function
+            # first dimensions are non-captured vars in outer scope followed by all the _
+            error = NORMAL
+            flat_samples = []
+            for jax_expr in jax_inputs:
+                sample, key, err, params = jax_expr(x, params, key)
+                shape = jnp.shape(sample)
+                first_dim = 1
+                for dim in shape[:num_free_vars]:
+                    first_dim *= dim
+                new_shape = (first_dim,) + shape[num_free_vars:]
+                flat_sample = jnp.reshape(sample, new_shape)
+                flat_samples.append(flat_sample)
+                error |= err
+
+            # now all the inputs have dimensions equal to (k,) + the number of _ occurences
+            # k is the number of possible non-captured object combinations
+            # evaluate the function independently for each combination
+            # output dimension for each combination is captured variables (n1, n2, ...)
+            # so the total dimension of the output array is (k, n1, n2, ...)
+            sample = jax.vmap(pyfunc, in_axes=0)(*flat_samples)
+            if not isinstance(sample, jnp.ndarray):
+                raise ValueError(
+                    f'Output of external Python function <{pyfunc_name}> '
+                    f'is not a JAX array.\n' + print_stack_trace(expr))                        
+            
+            pyfunc_dims = jnp.shape(sample)[1:]
+            if len(require_dims) != len(pyfunc_dims):
+                raise ValueError(
+                    f'External Python function <{pyfunc_name}> returned array with '
+                    f'{len(pyfunc_dims)} dimensions, which does not match the '
+                    f'number of captured parameter(s) {len(require_dims)}.\n' +  
+                    print_stack_trace(expr))
+            for (param, require_dim, actual_dim) in zip(captured_vars, require_dims, pyfunc_dims):
+                if require_dim != actual_dim:
+                    raise ValueError(
+                        f'External Python function <{pyfunc_name}> returned array with '
+                        f'{actual_dim} elements for captured parameter <{param}>, '
+                        f'which does not match the number of objects {require_dim}.\n' + 
+                        print_stack_trace(expr))
+
+            # unravel the combinations k back into their original dimensions
+            sample = jnp.reshape(sample, free_dims + pyfunc_dims)
+            
+            # rearrange the output dimensions to match the outer scope
+            source_indices = [num_free_vars + i for i in range(len(pyfunc_dims))]
+            sample = jnp.moveaxis(sample, source=source_indices, destination=dest_indices)
+            return sample, key, error, params
+        
+        return _jax_wrapped_external_function
+
     # ===========================================================================
     # control flow
     # ===========================================================================
