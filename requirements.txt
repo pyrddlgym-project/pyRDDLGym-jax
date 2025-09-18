@@ -1,4 +1,4 @@
-pyRDDLGym>=2.3
+pyRDDLGym>=2.5
 tqdm>=4.66
 jax>=0.4.12
 optax>=0.1.9
