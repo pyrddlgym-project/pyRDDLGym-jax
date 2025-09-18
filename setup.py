@@ -19,7 +19,7 @@ long_description = (Path(__file__).parent / "README.md").read_text()
 
 setup(
       name='pyRDDLGym-jax',
-      version='2.6',
+      version='2.7',
       author="Michael Gimelfarb, Ayal Taitler, Scott Sanner",
       author_email="mike.gimelfarb@mail.utoronto.ca, ataitler@gmail.com, ssanner@mie.utoronto.ca",
       description="pyRDDLGym-jax: automatic differentiation for solving sequential planning problems in JAX.",
