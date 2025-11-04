@@ -530,15 +530,22 @@ class JaxPlan(metaclass=ABCMeta):
             if prange == 'bool':
                 lower, upper = None, None
             else:
+
+                # enum values are ordered from 0 to number of objects - 1
                 if prange in compiled.rddl.enum_types:
                     lower = np.zeros(shape=shapes[name][1:])
                     upper = len(compiled.rddl.type_to_objects[prange]) - 1
                     upper = np.ones(shape=shapes[name][1:]) * upper
                 else:
                     lower, upper = compiled.constraints.bounds[name]
+                
+                # override with user defined bounds
                 lower, upper = user_bounds.get(name, (lower, upper))
                 lower = np.asarray(lower, dtype=compiled.REAL)
                 upper = np.asarray(upper, dtype=compiled.REAL)
+
+                # get masks for a jax conditional statement to avoid numerical errors
+                # for infinite values
                 lower_finite = np.isfinite(lower)
                 upper_finite = np.isfinite(upper)
                 bounds_safe[name] = (np.where(lower_finite, lower, 0.0),
@@ -548,11 +555,13 @@ class JaxPlan(metaclass=ABCMeta):
                                     ~lower_finite & upper_finite,
                                     ~lower_finite & ~upper_finite]
             bounds[name] = (lower, upper)
+
             if compiled.print_warnings:
                 message = termcolor.colored(
                     f'[INFO] Bounds of action-fluent <{name}> set to {bounds[name]}.', 
                     'green')
                 print(message)
+
         return shapes, bounds, bounds_safe, cond_lists
     
     def _count_bool_actions(self, rddl: RDDLLiftedModel):
@@ -630,7 +639,8 @@ class JaxStraightLinePlan(JaxPlan):
             compiled, _bounds, horizon)
         self.bounds = bounds
         
-        # action concurrency check
+        # enable constraint satisfaction subroutines during optimization 
+        # if there are nontrivial concurrency constraints in the problem description 
         bool_action_count, allowed_actions = self._count_bool_actions(rddl)
         use_constraint_satisfaction = allowed_actions < bool_action_count        
         if compiled.print_warnings and use_constraint_satisfaction: 
@@ -639,7 +649,8 @@ class JaxStraightLinePlan(JaxPlan):
                 f'max_nondef_actions since total boolean actions '
                 f'{bool_action_count} > max_nondef_actions {allowed_actions}.', 'green')
             print(message)
-            
+        
+        # get the noop action values
         noop = {var: (values[0] if isinstance(values, list) else values)
                 for (var, values) in rddl.action_fluents.items()}
         bool_key = 'bool__'
@@ -649,7 +660,11 @@ class JaxStraightLinePlan(JaxPlan):
         #
         # ***********************************************************************
         
-        # define the mapping between trainable parameter and action
+        # boolean actions are parameters wrapped by sigmoid to ensure [0, 1]:
+        #
+        #   action = sigmoid(weight * param)
+        #
+        # here weight is a hyper-parameter and param is the trainable policy parameter
         wrap_sigmoid = self._wrap_sigmoid
         bool_threshold = 0.0 if wrap_sigmoid else 0.5
         
@@ -666,7 +681,10 @@ class JaxStraightLinePlan(JaxPlan):
                 return jax.scipy.special.logit(action) / weight
             else:
                 return action
-            
+        
+        # the same technique could be applied to non-bool actions following Bueno et al.
+        # this is disabled by default since the gradient projection trick seems to work
+        # better, especially for one-sided bounds (-inf, B) or (B, +inf)
         wrap_non_bool = self._wrap_non_bool
         
         def _jax_non_bool_param_to_action(var, param, hyperparams):
@@ -684,7 +702,9 @@ class JaxStraightLinePlan(JaxPlan):
                 action = param
             return action
         
-        # handle box constraints    
+        # if the user wants min/max values for clipping boolean action parameters
+        # this might be a good idea to avoid saturation of action-fluents since the
+        # gradient could vanish as a result  
         min_action = self._min_action_prob
         max_action = 1.0 - min_action
         
@@ -709,11 +729,14 @@ class JaxStraightLinePlan(JaxPlan):
                     new_params[var] = jnp.clip(param, *bounds[var])
             return new_params, True
         
-        # convert softmax action back to action dict
+        # a different option to handle boolean action concurrency constraints with |A| = 1
+        # is to use a softmax activation layer over pooled action parameters
         action_sizes = {var: np.prod(shape[1:], dtype=np.int64) 
                         for (var, shape) in shapes.items()
                         if ranges[var] == 'bool'}
         
+        # given a softmax output, this simply unpacks the result of the softmax back into
+        # the original action fluent dictionary
         def _jax_unstack_bool_from_softmax(output):
             actions = {}
             start = 0
@@ -726,7 +749,8 @@ class JaxStraightLinePlan(JaxPlan):
                 start += size
             return actions
                 
-        # train plan prediction (TODO: implement one-hot for integer actions)        
+        # the main subroutine to compute the trainable rddl actions from the trainable
+        # parameters (TODO: implement one-hot for integer actions)        
         def _jax_wrapped_slp_predict_train(key, params, hyperparams, step, subs):
             actions = {}
             for (var, param) in params.items():
@@ -741,7 +765,9 @@ class JaxStraightLinePlan(JaxPlan):
                     actions[var] = _jax_non_bool_param_to_action(var, action, hyperparams)
             return actions
         
-        # test plan prediction
+        # the main subroutine to compute the test rddl actions from the trainable 
+        # parameters: the difference here is that actions are converted to their required
+        # types (i.e. bool, int, float)
         def _jax_wrapped_slp_predict_test(key, params, hyperparams, step, subs):
             actions = {}
             for (var, param) in params.items():
@@ -925,6 +951,7 @@ class JaxStraightLinePlan(JaxPlan):
         init = self._initializer
         stack_bool_params = use_constraint_satisfaction and self._wrap_softmax
         
+        # use the user required initializer and project actions to feasible range
         def _jax_wrapped_slp_init(key, hyperparams, subs):
             params = {}
             for (var, shape) in shapes.items():
@@ -947,10 +974,10 @@ class JaxStraightLinePlan(JaxPlan):
     @staticmethod
     @jax.jit
     def _guess_next_epoch(param):
-        # "progress" the plan one step forward and set last action to second-last
         return jnp.append(param[1:, ...], param[-1:, ...], axis=0)
 
     def guess_next_epoch(self, params: Pytree) -> Pytree:
+        # "progress" the plan one step forward and set last action to second-last
         next_fn = JaxStraightLinePlan._guess_next_epoch
         return jax.tree_util.tree_map(next_fn, params)
 
@@ -1021,13 +1048,17 @@ class JaxDeepReactivePolicy(JaxPlan):
         shapes = {var: value[1:] for (var, value) in shapes.items()}
         self.bounds = bounds
         
-        # action concurrency check - only allow one action non-noop for now
+        # enable constraint satisfaction subroutines during optimization 
+        # if there are nontrivial concurrency constraints in the problem description
+        # only handles the case where |A| = 1 for now, as there is no way to do projection
+        # currently (TODO: fix this)
         bool_action_count, allowed_actions = self._count_bool_actions(rddl)
         if 1 < allowed_actions < bool_action_count:
             raise RDDLNotImplementedError(
                 f'DRPs currently do not support max-nondef-actions {allowed_actions} > 1.')
         use_constraint_satisfaction = allowed_actions < bool_action_count
-            
+        
+        # get the noop action values
         noop = {var: (values[0] if isinstance(values, list) else values)
                 for (var, values) in rddl.action_fluents.items()}                   
         bool_key = 'bool__'
@@ -1036,7 +1067,8 @@ class JaxDeepReactivePolicy(JaxPlan):
         # POLICY NETWORK PREDICTION
         #
         # ***********************************************************************
-                   
+            
+        # compute the correct shapes of the output layers based on the action-fluent shape
         ranges = rddl.variable_ranges
         normalize = self._normalize
         normalize_per_layer = self._normalize_per_layer
@@ -1047,14 +1079,15 @@ class JaxDeepReactivePolicy(JaxPlan):
                        for (var, shape) in shapes.items()}
         layer_names = {var: f'output_{var}'.replace('-', '_') for var in shapes}
         
-        # inputs for the policy network
+        # inputs for the policy network are states for fully observed and obs for POMDPs
         if rddl.observ_fluents:
             observed_vars = rddl.observ_fluents
         else:
             observed_vars = rddl.state_fluents
         input_names = {var: f'{var}'.replace('-', '_') for var in observed_vars}
         
-        # catch if input norm is applied to size 1 tensor
+        # catch if input norm is applied to size 1 tensor:
+        # this leads to incorrect behavior as the input is always "1"
         if normalize:
             non_bool_dims = 0
             for (var, values) in observed_vars.items():
@@ -1139,7 +1172,7 @@ class JaxDeepReactivePolicy(JaxPlan):
                 if not shapes[var]:
                     output = jnp.squeeze(output)
                 
-                # project action output to valid box constraints 
+                # project action output to valid box constraints following Bueno et. al.
                 if ranges[var] == 'bool':
                     if not use_constraint_satisfaction:
                         actions[var] = jax.nn.sigmoid(output)
@@ -1158,7 +1191,8 @@ class JaxDeepReactivePolicy(JaxPlan):
                         action = output
                     actions[var] = action
             
-            # for constraint satisfaction wrap bool actions with softmax
+            # for constraint satisfaction wrap bool actions with softmax:
+            # this only works when |A| = 1
             if use_constraint_satisfaction:
                 linear = hk.Linear(bool_action_count, name='output_bool', w_init=init)
                 output = jax.nn.softmax(linear(hidden))
@@ -1166,10 +1200,12 @@ class JaxDeepReactivePolicy(JaxPlan):
              
             return actions
         
+        # we need pure JAX functions for the policy network prediction
         predict_fn = hk.transform(_jax_wrapped_policy_network_predict)
         predict_fn = hk.without_apply_rng(predict_fn)            
         
-        # convert softmax action back to action dict
+        # given a softmax output, this simply unpacks the result of the softmax back into
+        # the original action fluent dictionary
         def _jax_unstack_bool_from_softmax(output):
             actions = {}
             start = 0
@@ -1183,7 +1219,8 @@ class JaxDeepReactivePolicy(JaxPlan):
                     start += size
             return actions
         
-        # train action prediction
+        # the main subroutine to compute the trainable rddl actions from the trainable
+        # parameters and the current state/obs dictionary       
         def _jax_wrapped_drp_predict_train(key, params, hyperparams, step, subs):
             actions = predict_fn.apply(params, subs, hyperparams)
             if not wrap_non_bool:
@@ -1196,7 +1233,9 @@ class JaxDeepReactivePolicy(JaxPlan):
                 del actions[bool_key]
             return actions
         
-        # test action prediction
+        # the main subroutine to compute the test rddl actions from the trainable 
+        # parameters and state/obs dict: the difference here is that actions are converted 
+        # to their required types (i.e. bool, int, float)
         def _jax_wrapped_drp_predict_test(key, params, hyperparams, step, subs):
             actions = _jax_wrapped_drp_predict_train(key, params, hyperparams, step, subs)
             new_actions = {}
@@ -1231,6 +1270,7 @@ class JaxDeepReactivePolicy(JaxPlan):
         #
         # ***********************************************************************
         
+        # initialize policy parameters according to user-desired weight initializer
         def _jax_wrapped_drp_init(key, hyperparams, subs):
             subs = {var: value[0, ...] 
                     for (var, value) in subs.items()
@@ -1241,6 +1281,7 @@ class JaxDeepReactivePolicy(JaxPlan):
         self.initializer = _jax_wrapped_drp_init
         
     def guess_next_epoch(self, params: Pytree) -> Pytree:
+        # this is easy: just warm-start from the previously obtained policy
         return params
     
     
@@ -1458,6 +1499,7 @@ class GaussianPGPE(PGPE):
         max_kl = self.max_kl
         
         # entropy regularization penalty is decayed exponentially by elapsed budget
+        # this uses the optimizer progress (as percentage) to move the decay
         start_entropy_coeff = self.start_entropy_coeff
         if start_entropy_coeff == 0:
             entropy_coeff_decay = 0
@@ -1469,6 +1511,8 @@ class GaussianPGPE(PGPE):
         #
         # ***********************************************************************
         
+        # use the default initializer for the (mean, sigma) parameters
+        # these parameters define the sampling distribution over policy parameters
         def _jax_wrapped_pgpe_init(key, policy_params):
             mu = policy_params
             sigma = jax.tree_util.tree_map(partial(jnp.full_like, fill_value=sigma0), mu)
@@ -1477,11 +1521,11 @@ class GaussianPGPE(PGPE):
             r_max = -jnp.inf
             return pgpe_params, pgpe_opt_state, r_max
         
+        # for parallel policy update, initialize multiple indepdendent (mean, sigma)
+        # gaussians that will be optimized in parallel
         if parallel_updates is None:
             self._initializer = jax.jit(_jax_wrapped_pgpe_init)
         else:
-
-            # for parallel policy update
             def _jax_wrapped_pgpe_inits(key, policy_params):
                 keys = jnp.asarray(random.split(key, num=parallel_updates))
                 return jax.vmap(_jax_wrapped_pgpe_init, in_axes=0)(keys, policy_params)
@@ -1493,16 +1537,20 @@ class GaussianPGPE(PGPE):
         #
         # ***********************************************************************
 
+        # sample from i.i.d. Normal(0, sigma)
         def _jax_wrapped_mu_noise(key, sigma):
             return sigma * random.normal(key, shape=jnp.shape(sigma), dtype=real_dtype)
 
         # this samples a noise variable epsilon* from epsilon with the N(0, 1) density
-        # according to super-symmetric sampling paper
+        # according to super-symmetric sampling paper:
+        # the paper presents a more accurate formula which is used by default
         def _jax_wrapped_epsilon_star(sigma, epsilon):
-            c1, c2, c3 = -0.06655, -0.9706, 0.124
             phi = 0.67449 * sigma
             a = (sigma - jnp.abs(epsilon)) / sigma
+
+            # more accurate formula
             if super_symmetric_accurate:
+                c1, c2, c3 = -0.06655, -0.9706, 0.124
                 aa = jnp.abs(a)
                 aa3 = jnp.power(aa, 3)
                 epsilon_star = jnp.sign(epsilon) * phi * jnp.where(
@@ -1510,18 +1558,27 @@ class GaussianPGPE(PGPE):
                     jnp.exp(c1 * (aa3 - aa) / jnp.log(aa + 1e-10) + c2 * aa),
                     jnp.exp(aa - c3 * aa * jnp.log(1.0 - aa3 + 1e-10))
                 )
+            
+            # less accurate and simple formula
             else:
                 epsilon_star = jnp.sign(epsilon) * phi * jnp.exp(a)
             return epsilon_star
 
         # implements baseline-free super-symmetric sampling to generate 4 trajectories
+        # this type of sampling removes the need for the baseline completely
         def _jax_wrapped_sample_params(key, mu, sigma):
+
+            # this samples the basic two policy parameters from Gaussian(mean, sigma)
+            # using the control variates
             treedef = jax.tree_util.tree_structure(sigma)
             keys = random.split(key, num=treedef.num_leaves)
             keys_pytree = jax.tree_util.tree_unflatten(treedef=treedef, leaves=keys)
             epsilon = jax.tree_util.tree_map(_jax_wrapped_mu_noise, keys_pytree, sigma)
             p1 = jax.tree_util.tree_map(jnp.add, mu, epsilon)
             p2 = jax.tree_util.tree_map(jnp.subtract, mu, epsilon)
+            
+            # sumer-symmetric sampling removes the need for a baseline but requires
+            # two additional policies to be sampled
             if super_symmetric:
                 epsilon_star = jax.tree_util.tree_map(
                     _jax_wrapped_epsilon_star, sigma, epsilon)     
@@ -1538,6 +1595,8 @@ class GaussianPGPE(PGPE):
 
         # gradient with respect to mean
         def _jax_wrapped_mu_grad(epsilon, epsilon_star, r1, r2, r3, r4, m):
+
+            # for super symmetric sampling
             if super_symmetric:
                 if scale_reward:
                     scale1 = jnp.maximum(min_reward_scale, m - (r1 + r2) / 2)
@@ -1547,6 +1606,8 @@ class GaussianPGPE(PGPE):
                 r_mu1 = (r1 - r2) / (2 * scale1)
                 r_mu2 = (r3 - r4) / (2 * scale2)
                 grad = -(r_mu1 * epsilon + r_mu2 * epsilon_star)
+            
+            # for the basic pgpe
             else:
                 if scale_reward:
                     scale = jnp.maximum(min_reward_scale, m - (r1 + r2) / 2)
@@ -1558,6 +1619,8 @@ class GaussianPGPE(PGPE):
         
         #  gradient with respect to std. deviation
         def _jax_wrapped_sigma_grad(epsilon, epsilon_star, sigma, r1, r2, r3, r4, m, ent):
+
+            # for super symmetric sampling
             if super_symmetric:
                 mask = r1 + r2 >= r3 + r4
                 epsilon_tau = mask * epsilon + (1 - mask) * epsilon_star
@@ -1567,6 +1630,8 @@ class GaussianPGPE(PGPE):
                 else:
                     scale = 1.0
                 r_sigma = ((r1 + r2) - (r3 + r4)) / (4 * scale)
+            
+            # for basic pgpe
             else:
                 s = jnp.square(epsilon) / sigma - sigma
                 if scale_reward:
@@ -1574,30 +1639,41 @@ class GaussianPGPE(PGPE):
                 else:
                     scale = 1.0
                 r_sigma = (r1 + r2) / (2 * scale)
+
             grad = -(r_sigma * s + ent / sigma)
             return grad
             
         # calculate the policy gradients
         def _jax_wrapped_pgpe_grad(key, mu, sigma, r_max, ent,
                                    policy_hyperparams, subs, model_params):
+            
+            # basic pgpe sampling with return estimation
             key, subkey = random.split(key)
             p1, p2, p3, p4, epsilon, epsilon_star = _jax_wrapped_sample_params(
                 key, mu, sigma)
             r1 = -loss_fn(subkey, p1, policy_hyperparams, subs, model_params)[0]
             r2 = -loss_fn(subkey, p2, policy_hyperparams, subs, model_params)[0]
+
+            # do a return normalization for optimizer stability
             r_max = jnp.maximum(r_max, r1)
             r_max = jnp.maximum(r_max, r2)            
+
+            # super symmetric sampling requires two more trajectories and their returns
             if super_symmetric:
                 r3 = -loss_fn(subkey, p3, policy_hyperparams, subs, model_params)[0]
                 r4 = -loss_fn(subkey, p4, policy_hyperparams, subs, model_params)[0]
                 r_max = jnp.maximum(r_max, r3)
                 r_max = jnp.maximum(r_max, r4)       
             else:
-                r3, r4 = r1, r2            
+                r3, r4 = r1, r2     
+
+            # calculate gradient with respect to the mean
             grad_mu = jax.tree_util.tree_map(
                 partial(_jax_wrapped_mu_grad, r1=r1, r2=r2, r3=r3, r4=r4, m=r_max), 
                 epsilon, epsilon_star
             ) 
+
+            # calculate gradient with respect to the sigma
             grad_sigma = jax.tree_util.tree_map(
                 partial(_jax_wrapped_sigma_grad, 
                         r1=r1, r2=r2, r3=r3, r4=r4, m=r_max, ent=ent), 
@@ -1605,21 +1681,31 @@ class GaussianPGPE(PGPE):
             )
             return grad_mu, grad_sigma, r_max
 
+        # calculate the policy gradients with batching on the first dimension
         def _jax_wrapped_pgpe_grad_batched(key, pgpe_params, r_max, ent,
                                            policy_hyperparams, subs, model_params):
             mu, sigma = pgpe_params
+
+            # no batching required
             if batch_size == 1:
                 mu_grad, sigma_grad, new_r_max = _jax_wrapped_pgpe_grad(
                     key, mu, sigma, r_max, ent, policy_hyperparams, subs, model_params)
+            
+            # for batching need to handle how meta-gradients of mean, sigma are aggregated
             else:
+
+                # do the batched calculation of mean and sigma gradients
                 keys = random.split(key, num=batch_size)
                 mu_grads, sigma_grads, r_maxs = jax.vmap(
                     _jax_wrapped_pgpe_grad, 
                     in_axes=(0, None, None, None, None, None, None, None)
                 )(keys, mu, sigma, r_max, ent, policy_hyperparams, subs, model_params)
+
+                # calculate the average gradient for aggregation
                 mu_grad, sigma_grad = jax.tree_util.tree_map(
                     partial(jnp.mean, axis=0), (mu_grads, sigma_grads))
                 new_r_max = jnp.max(r_maxs)
+
             return mu_grad, sigma_grad, new_r_max
         
         # ***********************************************************************
@@ -1646,9 +1732,8 @@ class GaussianPGPE(PGPE):
             return new_mu, new_sigma, new_mu_state, new_sigma_state
 
         def _jax_wrapped_pgpe_update(key, pgpe_params, r_max, progress,
-                                     policy_hyperparams, subs, model_params, 
-                                     pgpe_opt_state):
-            # regular update
+                                     policy_hyperparams, subs, model_params, pgpe_opt_state):
+            # regular update for pgpe
             mu, sigma = pgpe_params
             mu_state, sigma_state = pgpe_opt_state
             ent = start_entropy_coeff * jnp.power(entropy_coeff_decay, progress)
@@ -1669,13 +1754,14 @@ class GaussianPGPE(PGPE):
                 mu_state.hyperparams['learning_rate'] = old_mu_lr * kl_reduction
                 sigma_state.hyperparams['learning_rate'] = old_sigma_lr * kl_reduction
                 new_mu, new_sigma, new_mu_state, new_sigma_state = \
-                _jax_wrapped_pgpe_update_helper(mu, sigma, mu_grad, sigma_grad, 
-                                                mu_state, sigma_state)
+                    _jax_wrapped_pgpe_update_helper(mu, sigma, mu_grad, sigma_grad, 
+                                                    mu_state, sigma_state)
                 new_mu_state.hyperparams['learning_rate'] = old_mu_lr
                 new_sigma_state.hyperparams['learning_rate'] = old_sigma_lr
 
-            # apply projection step and finalize results
+            # apply projection step to the sampled policy
             new_mu, converged = projection(new_mu, policy_hyperparams)
+
             new_pgpe_params = (new_mu, new_sigma)
             new_pgpe_opt_state = (new_mu_state, new_sigma_state)
             policy_params = new_mu
@@ -1684,7 +1770,6 @@ class GaussianPGPE(PGPE):
         if parallel_updates is None:
             self._update = jax.jit(_jax_wrapped_pgpe_update)
         else:
-
             # for parallel policy update
             def _jax_wrapped_pgpe_updates(key, pgpe_params, r_max, progress,
                                           policy_hyperparams, subs, model_params, 
@@ -1781,6 +1866,11 @@ UTILITY_LOOKUP = {
 # - simple gradient descent based planner
 # 
 # ***********************************************************************
+
+
+@jax.jit
+def pytree_at(tree, i):
+    return jax.tree_util.tree_map(lambda x: x[i], tree)
 
 
 class JaxBackpropPlanner:
@@ -1935,6 +2025,7 @@ class JaxBackpropPlanner:
             cpfs_without_grad = set()
         self.cpfs_without_grad = cpfs_without_grad
         self.compile_non_fluent_exact = compile_non_fluent_exact
+
         self.logger = logger
         self.dashboard_viz = dashboard_viz
         
@@ -2066,7 +2157,7 @@ r"""
         self.train_policy = jax.jit(self.plan.train_policy)
         self.test_policy = jax.jit(self.plan.test_policy)
         
-        # roll-outs
+        # training rollouts
         train_rollouts = self.compiled.compile_rollouts(
             policy=self.plan.train_policy,
             n_steps=self.horizon,
@@ -2075,6 +2166,7 @@ r"""
         )
         self.train_rollouts = train_rollouts
         
+        # testing rollouts
         test_rollouts = self.test_compiled.compile_rollouts(
             policy=self.plan.test_policy,
             n_steps=self.horizon,
@@ -2086,8 +2178,10 @@ r"""
         # initialization
         self.initialize, self.init_optimizer = self._jax_init()
         
-        # losses
+        # training loss
         train_loss = self._jax_loss(train_rollouts, use_symlog=self.use_symlog_reward)
+
+        # testing loss
         test_loss = self._jax_loss(test_rollouts, use_symlog=False)
         if self.parallel_updates is None:
             self.test_loss = jax.jit(test_loss)
@@ -2096,8 +2190,6 @@ r"""
         
         # optimization
         self.update = self._jax_update(train_loss)
-        self.pytree_at = jax.jit(
-            lambda tree, i: jax.tree_util.tree_map(lambda x: x[i], tree))
 
         # pgpe option
         if self.use_pgpe:
@@ -2134,6 +2226,8 @@ r"""
         _jax_wrapped_returns = self._jax_return(use_symlog)
         
         # the loss is the average cumulative reward across all roll-outs
+        # but applies a utility function if requested to each return observation:
+        # by default, the utility function is the mean
         def _jax_wrapped_plan_loss(key, policy_params, policy_hyperparams,
                                    subs, model_params):
             log, model_params = rollouts(
@@ -2169,7 +2263,7 @@ r"""
         if num_parallel is None:
             return jax.jit(_jax_wrapped_init_policy), jax.jit(_jax_wrapped_init_opt)
         
-        # for parallel policy update
+        # initialize multiple policies to be optimized in parallel
         def _jax_wrapped_init_policies(key, policy_hyperparams, subs):
             keys = jnp.asarray(random.split(key, num=num_parallel))
             return jax.vmap(_jax_wrapped_init_policy, in_axes=(0, None, None))(
@@ -2197,9 +2291,13 @@ r"""
             
         def _jax_wrapped_plan_update(key, policy_params, policy_hyperparams,
                                      subs, model_params, opt_state, opt_aux):
+            
+            # calculate the gradient of the loss with respect to the policy
             grad_fn = jax.value_and_grad(loss, argnums=1, has_aux=True)
             (loss_val, (log, model_params)), grad = grad_fn(
                 key, policy_params, policy_hyperparams, subs, model_params)
+            
+            # require a slightly different update if line search is used
             if use_ls:
                 updates, opt_state = optimizer.update(
                     grad, opt_state, params=policy_params, 
@@ -2209,8 +2307,11 @@ r"""
             else:
                 updates, opt_state = optimizer.update(
                     grad, opt_state, params=policy_params) 
+
+            # apply optimizer and optional policy projection
             policy_params = optax.apply_updates(policy_params, updates)
             policy_params, converged = projection(policy_params, policy_hyperparams)
+            
             log['grad'] = grad
             log['updates'] = updates
             zero_grads = _jax_wrapped_zero_gradients(grad)
@@ -2220,7 +2321,7 @@ r"""
         if num_parallel is None:
             return jax.jit(_jax_wrapped_plan_update)
 
-        # for parallel policy update
+        # for parallel policy update, just do each policy update in parallel
         def _jax_wrapped_plan_updates(key, policy_params, policy_hyperparams,
                                       subs, model_params, opt_state, opt_aux):
             keys = jnp.asarray(random.split(key, num=num_parallel))
@@ -2235,7 +2336,7 @@ r"""
         if self.parallel_updates is None:
             return None
         
-        # for parallel policy update
+        # for parallel policy update:
         # currently implements a hard replacement where the jaxplan parameter
         # is replaced by the PGPE parameter if the latter is an improvement
         def _jax_wrapped_pgpe_jaxplan_merge(pgpe_mask, pgpe_param, policy_params, 
@@ -2261,6 +2362,8 @@ r"""
         # batched subs
         init_train, init_test = {}, {}
         for (name, value) in subs.items():
+
+            # get the initial fluent values and check validity
             init_value = self.test_compiled.init_values.get(name, None)
             if init_value is None:
                 raise RDDLUndefinedVariableError(
@@ -2268,11 +2371,19 @@ r"""
                     f'valid p-variable, must be one of '
                     f'{set(self.test_compiled.init_values.keys())}.')
             value = np.reshape(value, np.shape(init_value))[np.newaxis, ...]            
+            
+            # for enum types need to convert the string values to integer indices
             if value.dtype.type is np.str_:
                 value = rddl.object_string_to_index_array(rddl.variable_ranges[name], value)
+            
+            # training initial fluent values are repeated along batch dimension
+            # and converted to float as required by JAX
             train_value = np.repeat(value, repeats=n_train, axis=0)
             train_value = np.asarray(train_value, dtype=self.compiled.REAL)
             init_train[name] = train_value
+
+            # testing initial fluent values are repeated along batch dimension
+            # but otherwise unmodified
             init_test[name] = np.repeat(value, repeats=n_test, axis=0)
 
             # safely cast test subs variable to required type in case the type is wrong
@@ -2298,7 +2409,6 @@ r"""
             x = np.broadcast_to(
                 x[np.newaxis, ...], shape=(self.parallel_updates,) + np.shape(x))
             return x
-                
         return jax.tree_util.tree_map(make_batched, pytree)
     
     def as_optimization_problem(
@@ -2359,6 +2469,7 @@ r"""
         # computes the training loss function and its 1D gradient
         loss_fn = self._jax_loss(self.train_rollouts)
         
+        # JAX requires an RNG seed for each evaluation as part of the pure function def
         @jax.jit
         def _loss_with_key(key, params_1d, model_params):
             policy_params = unravel_fn(params_1d)
@@ -2375,6 +2486,8 @@ r"""
             grad_val = jax.flatten_util.ravel_pytree(grad_val)[0]
             return grad_val, model_params 
         
+        # store a global reference to the key on every JAX function call and pass when
+        # required by JAX, then update it upon return
         def _loss_function(params_1d):
             nonlocal key
             nonlocal model_params
@@ -2488,6 +2601,9 @@ r"""
         parameters found so far
         :param tqdm_position: position of tqdm progress bar (for multiprocessing)
         '''
+
+        # start measuring execution time here:
+        # we need to measure time spent outside loop so we can deduct it from total time
         start_time = time.time()
         elapsed_outside_loop = 0
         
@@ -2624,7 +2740,7 @@ r"""
         if self.parallel_updates is None:
             best_params = policy_params
         else:
-            best_params = self.pytree_at(policy_params, 0)
+            best_params = pytree_at(policy_params, 0)
         best_loss, pbest_loss, best_grad = np.inf, np.inf, None
         last_iter_improve = 0
         no_progress_count = 0
@@ -2636,7 +2752,7 @@ r"""
         if stopping_rule is not None:
             stopping_rule.reset()
             
-        # initialize dash board 
+        # initialize dashboard 
         if dashboard is not None:
             dashboard_id = dashboard.register_experiment(
                 dashboard_id, dashboard.get_planner_info(self), 
@@ -2734,8 +2850,8 @@ r"""
             else:
                 best_index = np.argmin(test_loss_smooth)
                 if test_loss_smooth[best_index] < best_loss:
-                    best_params = self.pytree_at(policy_params, best_index)
-                    best_grad = self.pytree_at(train_log['grad'], best_index)
+                    best_params = pytree_at(policy_params, best_index)
+                    best_grad = pytree_at(train_log['grad'], best_index)
                     best_loss = test_loss_smooth[best_index]
                 pbest_loss = np.minimum(pbest_loss, test_loss_smooth)
             
@@ -2870,7 +2986,7 @@ r"""
                     f'{(it + 1) / (elapsed + 1e-6):.2f}it/s', refresh=False)
                 progress_bar.update(progress_percent - progress_bar.n)
             
-            # dash-board
+            # dashboard
             if dashboard is not None:
                 dashboard.update_experiment(dashboard_id, callback)
                         
@@ -3059,7 +3175,8 @@ class JaxOfflineController(BaseAgent):
             with open(params, 'rb') as file:
                 params = pickle.load(file)
 
-        # train the policy
+        # train the policy once before starting to step() through the environment
+        # and then execute this policy in open-loop fashion
         self.step = 0
         self.callback = None
         if not self.train_on_reset and not self.params_given:
@@ -3132,11 +3249,15 @@ class JaxOnlineController(BaseAgent):
         self.reset()
      
     def sample_action(self, state: Dict[str, Any]) -> Dict[str, Any]:
+
+        # we train the policy from the current state every time we step()
         planner = self.planner
         callback = planner.optimize(
             key=self.key, guess=self.guess, subs=state, **self.train_kwargs)
         
         # optimize again if jit compilation takes up the entire time budget
+        # this can be done for several attempts until the optimizer has traced the 
+        # computation graph: we report the callback of the successful attempt (if exists)
         attempts = 0
         while attempts < self.max_attempts and callback['iteration'] <= 1:
             attempts += 1
