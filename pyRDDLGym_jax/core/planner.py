@@ -1799,6 +1799,7 @@ class JaxBackpropPlanner:
                  clip_grad: Optional[float]=None,
                  line_search_kwargs: Optional[Kwargs]=None,
                  noise_kwargs: Optional[Kwargs]=None,
+                 ema_decay: Optional[float]=None,
                  pgpe: Optional[PGPE]=GaussianPGPE(),
                  logic: Logic=FuzzyLogic(),
                  use_symlog_reward: bool=False,
@@ -1834,6 +1835,7 @@ class JaxBackpropPlanner:
         :param line_search_kwargs: parameters to pass to optional line search
         method to scale learning rate
         :param noise_kwargs: parameters of optional gradient noise
+        :param ema_decay: optional exponential moving average of past parameters
         :param pgpe: optional policy gradient to run alongside the planner
         :param logic: a subclass of Logic for mapping exact mathematical
         operations to their differentiable counterparts 
@@ -1877,6 +1879,7 @@ class JaxBackpropPlanner:
         self.clip_grad = clip_grad
         self.line_search_kwargs = line_search_kwargs
         self.noise_kwargs = noise_kwargs
+        self.ema_decay = ema_decay
         self.pgpe = pgpe
         self.use_pgpe = pgpe is not None
         self.print_warnings = print_warnings
@@ -1905,6 +1908,8 @@ class JaxBackpropPlanner:
         pipeline.append(optimizer)
         if line_search_kwargs is not None:
             pipeline.append(optax.scale_by_zoom_linesearch(**line_search_kwargs))
+        if ema_decay is not None:
+            pipeline.append(optax.ema(ema_decay))
         self.optimizer = optax.chain(*pipeline)
         
         # set utility
@@ -2007,6 +2012,7 @@ r"""
                   f'    clip_gradient     ={self.clip_grad}\n'
                   f'    line_search_kwargs={self.line_search_kwargs}\n'
                   f'    noise_kwargs      ={self.noise_kwargs}\n'
+                  f'    ema_decay         ={self.ema_decay}\n'
                   f'    batch_size_train  ={self.batch_size_train}\n'
                   f'    batch_size_test   ={self.batch_size_test}\n'
                   f'    parallel_updates  ={self.parallel_updates}\n'
