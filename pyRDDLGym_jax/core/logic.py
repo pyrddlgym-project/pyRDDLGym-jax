@@ -31,7 +31,7 @@
 
 import traceback
 import termcolor
-from typing import Any, Dict, Optional, Set, Tuple
+from typing import Any, Dict, Optional, Set, Tuple, Union
 
 import numpy as np
 import jax
@@ -270,7 +270,7 @@ class SoftmaxArgmax(JaxRDDLCompilerWithGrad):
         return kwargs
 
     @staticmethod
-    def soft_argmax(x, w, axes):
+    def soft_argmax(x: jnp.ndarray, w: float, axes: Union[int, Tuple[int, ...]]) -> jnp.ndarray:
         literals = enumerate_literals(jnp.shape(x), axis=axes)
         softmax = jax.nn.softmax(w * x, axis=axes)
         sample = jnp.sum(literals * softmax, axis=axes)
@@ -312,7 +312,7 @@ class SoftmaxArgmax(JaxRDDLCompilerWithGrad):
 class ProductNormLogical(JaxRDDLCompilerWithGrad):
     '''Product t-norm given by the expression (x, y) -> x * y.'''
     
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, **kwargs) -> None:
         super(ProductNormLogical, self).__init__(*args, **kwargs)
 
     def get_kwargs(self) -> Dict[str, Any]:
@@ -383,7 +383,7 @@ class ProductNormLogical(JaxRDDLCompilerWithGrad):
 class GodelNormLogical(JaxRDDLCompilerWithGrad):
     '''Godel t-norm given by the expression (x, y) -> min(x, y).'''
     
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, **kwargs) -> None:
         super(GodelNormLogical, self).__init__(*args, **kwargs)
         
     def get_kwargs(self) -> Dict[str, Any]:
@@ -450,7 +450,7 @@ class GodelNormLogical(JaxRDDLCompilerWithGrad):
 class LukasiewiczNormLogical(JaxRDDLCompilerWithGrad):
     '''Lukasiewicz t-norm given by the expression (x, y) -> max(x + y - 1, 0).'''
     
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, **kwargs) -> None:
         super(LukasiewiczNormLogical, self).__init__(*args, **kwargs)
 
     def get_kwargs(self) -> Dict[str, Any]:
@@ -523,7 +523,7 @@ class LukasiewiczNormLogical(JaxRDDLCompilerWithGrad):
 class SafeSqrt(JaxRDDLCompilerWithGrad):
     '''Sqrt operation without negative underflow.'''
 
-    def __init__(self, *args, sqrt_eps: float=1e-14, **kwargs):
+    def __init__(self, *args, sqrt_eps: float=1e-14, **kwargs) -> None:
         super(SafeSqrt, self).__init__(*args, **kwargs)
         self.sqrt_eps = float(sqrt_eps)
 
@@ -552,7 +552,7 @@ class SoftFloor(JaxRDDLCompilerWithGrad):
         return kwargs
 
     @staticmethod
-    def soft_floor(x, w):
+    def soft_floor(x: jnp.ndarray, w: float) -> jnp.ndarray:
         return (
             (jax.nn.sigmoid(w * (x - jnp.floor(x) - 1.0)) - jax.nn.sigmoid(-w / 2.0)) 
             / jnp.tanh(w / 4.0) 
@@ -637,7 +637,7 @@ class SoftRound(JaxRDDLCompilerWithGrad):
 
 class LinearIfElse(JaxRDDLCompilerWithGrad):
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, **kwargs) -> None:
         super(LinearIfElse, self).__init__(*args, **kwargs)
 
     def get_kwargs(self) -> Dict[str, Any]:
@@ -774,7 +774,7 @@ class ReparameterizedGeometric(JaxRDDLCompilerWithGrad):
 
 class DeterminizedGeometric(JaxRDDLCompilerWithGrad):
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, **kwargs) -> None:
         super(DeterminizedGeometric, self).__init__(*args, **kwargs)
 
     def get_kwargs(self) -> Dict[str, Any]:
@@ -892,7 +892,7 @@ class GumbelSoftmaxBernoulli(JaxRDDLCompilerWithGrad):
 
 class DeterminizedBernoulli(JaxRDDLCompilerWithGrad):
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, **kwargs) -> None:
         super(DeterminizedBernoulli, self).__init__(*args, **kwargs)
 
     def get_kwargs(self) -> Dict[str, Any]:
@@ -997,7 +997,7 @@ class GumbelSoftmaxDiscrete(JaxRDDLCompilerWithGrad):
 
 class DeterminizedDiscrete(JaxRDDLCompilerWithGrad):
     
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, **kwargs) -> None:
         super(DeterminizedDiscrete, self).__init__(*args, **kwargs)
 
     def get_kwargs(self) -> Dict[str, Any]:
@@ -1072,7 +1072,8 @@ class GumbelSoftmaxBinomial(JaxRDDLCompilerWithGrad):
 
     # normal approximation to Binomial: Bin(n, p) -> Normal(np, np(1-p))
     @staticmethod
-    def normal_approx_to_binomial(key, trials, prob):
+    def normal_approx_to_binomial(key: random.PRNGKey, 
+                                  trials: jnp.ndarray, prob: jnp.ndarray) -> jnp.ndarray:
         normal = random.normal(key=key, shape=jnp.shape(trials), dtype=prob.dtype)
         mean = trials * prob
         std = jnp.sqrt(trials * prob * (1.0 - prob))
@@ -1080,7 +1081,9 @@ class GumbelSoftmaxBinomial(JaxRDDLCompilerWithGrad):
         return sample
     
     @staticmethod
-    def gumbel_softmax_approx_to_binomial(key, trials, prob, bins, w, eps):
+    def gumbel_softmax_approx_to_binomial(key: random.PRNGKey, 
+                                          trials: jnp.ndarray, prob: jnp.ndarray, 
+                                          bins: int, w: float, eps: float):
         ks = jnp.arange(bins)[(jnp.newaxis,) * jnp.ndim(trials) + (...,)]
         trials = trials[..., jnp.newaxis]
         prob = prob[..., jnp.newaxis]
@@ -1142,7 +1145,7 @@ class GumbelSoftmaxBinomial(JaxRDDLCompilerWithGrad):
 
 class DeterminizedBinomial(JaxRDDLCompilerWithGrad):
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, **kwargs) -> None:
         super(DeterminizedBinomial, self).__init__(*args, **kwargs)
 
     def get_kwargs(self) -> Dict[str, Any]:
@@ -1201,7 +1204,8 @@ class ExponentialPoisson(JaxRDDLCompilerWithGrad):
         return kwargs
 
     @staticmethod
-    def exponential_approx_to_poisson(key, rate, bins, w):
+    def exponential_approx_to_poisson(key: random.PRNGKey, rate: jnp.ndarray, 
+                                      bins: int, w: float) -> jnp.ndarray:
         Exp1 = random.exponential(
             key=key,  shape=(bins,) + jnp.shape(rate), dtype=rate.dtype)
         delta_t = Exp1 / rate[jnp.newaxis, ...]
@@ -1211,7 +1215,8 @@ class ExponentialPoisson(JaxRDDLCompilerWithGrad):
         return sample
 
     @staticmethod
-    def branched_approx_to_poisson(key, rate, bins, w, min_cdf):
+    def branched_approx_to_poisson(key: random.PRNGKey, rate: jnp.ndarray, 
+                                   bins: int, w: float, min_cdf: float) -> jnp.ndarray:
         cuml_prob = scipy.stats.poisson.cdf(bins, rate)
         small_rate = jax.lax.stop_gradient(cuml_prob >= min_cdf)
         small_sample = ExponentialPoisson.exponential_approx_to_poisson(key, rate, bins, w)
@@ -1305,7 +1310,8 @@ class GumbelSoftmaxPoisson(JaxRDDLCompilerWithGrad):
         return kwargs
 
     @staticmethod
-    def gumbel_softmax_poisson(key, rate, bins, w, eps):
+    def gumbel_softmax_poisson(key: random.PRNGKey, rate: jnp.ndarray, 
+                               bins: int, w: float, eps: float) -> jnp.ndarray:
         ks = jnp.arange(bins)[(jnp.newaxis,) * jnp.ndim(rate) + (...,)]
         rate = rate[..., jnp.newaxis]
         log_prob = ks * jnp.log(rate + eps) - rate - scipy.special.gammaln(ks + 1)
@@ -1315,7 +1321,8 @@ class GumbelSoftmaxPoisson(JaxRDDLCompilerWithGrad):
         return sample
     
     @staticmethod
-    def branched_approx_to_poisson(key, rate, bins, w, min_cdf, eps):
+    def branched_approx_to_poisson(key: random.PRNGKey, rate: jnp.ndarray, 
+                                   bins: int, w: float, min_cdf: float, eps: float) -> jnp.ndarray:
         cuml_prob = scipy.stats.poisson.cdf(bins, rate)
         small_rate = jax.lax.stop_gradient(cuml_prob >= min_cdf)
         small_sample = GumbelSoftmaxPoisson.gumbel_softmax_poisson(key, rate, bins, w, eps)
@@ -1392,7 +1399,7 @@ class GumbelSoftmaxPoisson(JaxRDDLCompilerWithGrad):
 
 class DeterminizedPoisson(JaxRDDLCompilerWithGrad):
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, **kwargs) -> None:
         super(DeterminizedPoisson, self).__init__(*args, **kwargs)
 
     def get_kwargs(self) -> Dict[str, Any]:
@@ -1459,7 +1466,7 @@ class DefaultJaxRDDLCompilerWithGrad(SigmoidRelational, SoftmaxArgmax,
                                      GumbelSoftmaxDiscrete, GumbelSoftmaxBinomial,
                                      ExponentialPoisson):
     
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, **kwargs) -> None:
         super(DefaultJaxRDDLCompilerWithGrad, self).__init__(*args, **kwargs)
    
     def get_kwargs(self) -> Dict[str, Any]:
