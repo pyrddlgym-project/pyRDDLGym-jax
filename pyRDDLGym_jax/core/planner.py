@@ -70,9 +70,9 @@ from pyRDDLGym.core.debug.exception import (
 from pyRDDLGym.core.policy import BaseAgent
 
 from pyRDDLGym_jax import __version__
-from pyRDDLGym_jax.core import logic
 from pyRDDLGym_jax.core.compiler import JaxRDDLCompiler
-from pyRDDLGym_jax.core.logic import Logic, FuzzyLogic
+from pyRDDLGym_jax.core import logic
+from pyRDDLGym_jax.core.logic import JaxRDDLCompilerWithGrad, DefaultJaxRDDLCompilerWithGrad
 
 # try to load the dash board
 try:
@@ -128,33 +128,15 @@ def _getattr_any(packages, item):
 
 
 def _load_config(config, args):
-    model_args = {k: args['Model'][k] for (k, _) in config.items('Model')}
-    planner_args = {k: args['Optimizer'][k] for (k, _) in config.items('Optimizer')}
-    train_args = {k: args['Training'][k] for (k, _) in config.items('Training')}    
+    compiler_kwargs = {k: args['Compiler'][k] for (k, _) in config.items('Compiler')}
+    planner_args = {k: args['Planner'][k] for (k, _) in config.items('Planner')}
+    train_args = {k: args['Optimize'][k] for (k, _) in config.items('Optimize')}    
     
-    # read the model settings
-    logic_name = model_args.get('logic', 'FuzzyLogic')
-    logic_kwargs = model_args.get('logic_kwargs', {})
-    if logic_name == 'FuzzyLogic':
-        tnorm_name = model_args.get('tnorm', 'ProductTNorm')
-        tnorm_kwargs = model_args.get('tnorm_kwargs', {})
-        comp_name = model_args.get('complement', 'StandardComplement')
-        comp_kwargs = model_args.get('complement_kwargs', {})
-        compare_name = model_args.get('comparison', 'SigmoidComparison')
-        compare_kwargs = model_args.get('comparison_kwargs', {})
-        sampling_name = model_args.get('sampling', 'SoftRandomSampling')
-        sampling_kwargs = model_args.get('sampling_kwargs', {})
-        rounding_name = model_args.get('rounding', 'SoftRounding')
-        rounding_kwargs = model_args.get('rounding_kwargs', {})
-        control_name = model_args.get('control', 'SoftControlFlow')
-        control_kwargs = model_args.get('control_kwargs', {})
-        logic_kwargs['tnorm'] = getattr(logic, tnorm_name)(**tnorm_kwargs)
-        logic_kwargs['complement'] = getattr(logic, comp_name)(**comp_kwargs)
-        logic_kwargs['comparison'] = getattr(logic, compare_name)(**compare_kwargs)
-        logic_kwargs['sampling'] = getattr(logic, sampling_name)(**sampling_kwargs)
-        logic_kwargs['rounding'] = getattr(logic, rounding_name)(**rounding_kwargs)
-        logic_kwargs['control'] = getattr(logic, control_name)(**control_kwargs)
-    
+    # read the compiler settings
+    compiler_name = compiler_kwargs.pop('method', 'DefaultJaxRDDLCompilerWithGrad')
+    planner_args['compiler'] = getattr(logic, compiler_name)
+    planner_args['compiler_kwargs'] = compiler_kwargs
+
     # read the policy settings
     plan_method = planner_args.pop('method')
     plan_kwargs = planner_args.pop('method_kwargs', {})  
@@ -183,7 +165,6 @@ def _load_config(config, args):
             plan_kwargs['activation'] = activation
     
     # read the planner settings
-    planner_args['logic'] = getattr(logic, logic_name)(**logic_kwargs)
     planner_args['plan'] = getattr(sys.modules[__name__], plan_method)(**plan_kwargs)
     
     # planner optimizer
@@ -253,102 +234,6 @@ def load_config_from_string(value: str) -> Tuple[Kwargs, ...]:
     config, args = _parse_config_string(value)
     return _load_config(config, args)
     
-    
-# ***********************************************************************
-# MODEL RELAXATIONS
-# 
-# - replace discrete ops in state dynamics/reward with differentiable ones
-#
-# ***********************************************************************
-
-
-class JaxRDDLCompilerWithGrad(JaxRDDLCompiler):
-    '''Compiles a RDDL AST representation to an equivalent JAX representation. 
-    Unlike its parent class, this class treats all fluents as real-valued, and
-    replaces all mathematical operations by equivalent ones with a well defined 
-    (e.g. non-zero) gradient where appropriate. 
-    '''
-    
-    def __init__(self, *args,
-                 logic: Logic=FuzzyLogic(),
-                 cpfs_without_grad: Optional[Set[str]]=None,
-                 print_warnings: bool=True,
-                 **kwargs) -> None:
-        '''Creates a new RDDL to Jax compiler, where operations that are not
-        differentiable are converted to approximate forms that have defined gradients.
-        
-        :param *args: arguments to pass to base compiler
-        :param logic: Fuzzy logic object that specifies how exact operations
-        are converted to their approximate forms: this class may be subclassed
-        to customize these operations
-        :param cpfs_without_grad: which CPFs do not have gradients (use straight
-        through gradient trick)
-        :param print_warnings: whether to print warnings
-        :param *kwargs: keyword arguments to pass to base compiler
-        '''
-        super(JaxRDDLCompilerWithGrad, self).__init__(*args, **kwargs)
-        
-        self.logic = logic
-        self.logic.set_use64bit(self.use64bit)
-        if cpfs_without_grad is None:
-            cpfs_without_grad = set()
-        self.cpfs_without_grad = cpfs_without_grad
-        self.print_warnings = print_warnings
-        
-        # actions and CPFs must be continuous
-        pvars_cast = set()
-        for (var, values) in self.init_values.items():
-            self.init_values[var] = np.asarray(values, dtype=self.REAL) 
-            if not np.issubdtype(np.result_type(values), np.floating):
-                pvars_cast.add(var)
-        if self.print_warnings and pvars_cast:
-            message = termcolor.colored(
-                f'[INFO] JAX gradient compiler will cast p-vars {pvars_cast} to float.', 
-                'green')
-            print(message)
-        
-        # overwrite basic operations with fuzzy ones
-        self.OPS = logic.get_operator_dicts()
-        
-    def _jax_stop_grad(self, jax_expr):        
-        def _jax_wrapped_stop_grad(x, params, key):
-            sample, key, error, params = jax_expr(x, params, key)
-            sample = jax.lax.stop_gradient(sample)
-            return sample, key, error, params
-        return _jax_wrapped_stop_grad
-        
-    def _compile_cpfs(self, init_params):
-
-        # cpfs will all be cast to float
-        cpfs_cast = set()   
-        jax_cpfs = {}
-        for (_, cpfs) in self.levels.items():
-            for cpf in cpfs:
-                _, expr = self.rddl.cpfs[cpf]
-                jax_cpfs[cpf] = self._jax(expr, init_params, dtype=self.REAL)
-                if self.rddl.variable_ranges[cpf] != 'real':
-                    cpfs_cast.add(cpf)
-                if cpf in self.cpfs_without_grad:
-                    jax_cpfs[cpf] = self._jax_stop_grad(jax_cpfs[cpf])
-                    
-        if self.print_warnings and cpfs_cast:
-            message = termcolor.colored(
-                f'[INFO] JAX gradient compiler will cast CPFs {cpfs_cast} to float.', 
-                'green') 
-            print(message)
-        if self.print_warnings and self.cpfs_without_grad:
-            message = termcolor.colored(
-                f'[INFO] Gradients will not flow through CPFs {self.cpfs_without_grad}.', 
-                'green')    
-            print(message)
- 
-        return jax_cpfs
-    
-    def _jax_kron(self, expr, init_params):       
-        arg, = expr.args
-        arg = self._jax(arg, init_params)
-        return arg
-
 
 # ***********************************************************************
 # ALL VERSIONS OF STATE PREPROCESSING FOR DRP
@@ -1882,7 +1767,6 @@ class JaxBackpropPlanner:
                  batch_size_train: int=32,
                  batch_size_test: Optional[int]=None,
                  rollout_horizon: Optional[int]=None,
-                 use64bit: bool=False,
                  action_bounds: Optional[Bounds]=None,
                  optimizer: Callable[..., optax.GradientTransformation]=optax.rmsprop,
                  optimizer_kwargs: Optional[Kwargs]=None,
@@ -1891,22 +1775,20 @@ class JaxBackpropPlanner:
                  noise_kwargs: Optional[Kwargs]=None,
                  ema_decay: Optional[float]=None,
                  pgpe: Optional[PGPE]=GaussianPGPE(),
-                 logic: Logic=FuzzyLogic(),
+                 compiler: JaxRDDLCompilerWithGrad=DefaultJaxRDDLCompilerWithGrad,
+                 compiler_kwargs: Optional[Kwargs]=None,
                  use_symlog_reward: bool=False,
                  utility: Union[Callable[[jnp.ndarray], float], str]='mean',
                  utility_kwargs: Optional[Kwargs]=None,
-                 cpfs_without_grad: Optional[Set[str]]=None,
-                 compile_non_fluent_exact: bool=True,
                  logger: Optional[Logger]=None,
                  dashboard_viz: Optional[Any]=None,
-                 print_warnings: bool=True,
                  parallel_updates: Optional[int]=None,
                  preprocessor: Optional[Preprocessor]=None,
                  python_functions: Optional[Dict[str, Callable]]=None) -> None:
         '''Creates a new gradient-based algorithm for optimizing action sequences
         (plan) in the given RDDL. Some operations will be converted to their
         differentiable counterparts; the specific operations can be customized
-        by providing a subclass of FuzzyLogic.
+        by providing a tailored compiler instance.
         
         :param rddl: the RDDL domain to optimize
         :param plan: the policy/plan representation to optimize
@@ -1914,9 +1796,7 @@ class JaxBackpropPlanner:
         step
         :param batch_size_test: how many rollouts to use to test the plan at each
         optimization step
-        :param rollout_horizon: lookahead planning horizon: None uses the
-        :param use64bit: whether to perform arithmetic in 64 bit
-        horizon parameter in the RDDL instance
+        :param rollout_horizon: lookahead planning horizon: None uses the env horizon
         :param action_bounds: box constraints on actions
         :param optimizer: a factory for an optax SGD algorithm
         :param optimizer_kwargs: a dictionary of parameters to pass to the SGD
@@ -1927,8 +1807,8 @@ class JaxBackpropPlanner:
         :param noise_kwargs: parameters of optional gradient noise
         :param ema_decay: optional exponential moving average of past parameters
         :param pgpe: optional policy gradient to run alongside the planner
-        :param logic: a subclass of Logic for mapping exact mathematical
-        operations to their differentiable counterparts 
+        :param compiler: compiler instance to use for planning
+        :param compiler_kwargs: compiler instances kwargs for initialization
         :param use_symlog_reward: whether to use the symlog transform on the 
         reward as a form of normalization
         :param utility: how to aggregate return observations to compute utility
@@ -1936,14 +1816,9 @@ class JaxBackpropPlanner:
         scalar, or a a string identifying the utility function by name
         :param utility_kwargs: additional keyword arguments to pass hyper-
         parameters to the utility function call
-        :param cpfs_without_grad: which CPFs do not have gradients (use straight
-        through gradient trick)
-        :param compile_non_fluent_exact: whether non-fluent expressions 
-        are always compiled using exact JAX expressions
         :param logger: to log information about compilation to file
         :param dashboard_viz: optional visualizer object from the environment
         to pass to the dashboard to visualize the policy
-        :param print_warnings: whether to print warnings
         :param parallel_updates: how many optimizers to run independently in parallel
         :param preprocessor: optional preprocessor for state inputs to plan
         :param python_functions: dictionary of external Python functions to call from RDDL
@@ -1961,7 +1836,6 @@ class JaxBackpropPlanner:
         if action_bounds is None:
             action_bounds = {}
         self._action_bounds = action_bounds
-        self.use64bit = use64bit
         self.optimizer_name = optimizer
         if optimizer_kwargs is None:
             optimizer_kwargs = {'learning_rate': 0.1}
@@ -1972,7 +1846,6 @@ class JaxBackpropPlanner:
         self.ema_decay = ema_decay
         self.pgpe = pgpe
         self.use_pgpe = pgpe is not None
-        self.print_warnings = print_warnings
         self.preprocessor = preprocessor
         if python_functions is None:
             python_functions = {}
@@ -2018,13 +1891,11 @@ class JaxBackpropPlanner:
             utility_kwargs = {}
         self.utility_kwargs = utility_kwargs    
         
-        self.logic = logic
-        self.logic.set_use64bit(self.use64bit)
+        if compiler_kwargs is None:
+            compiler_kwargs = {}
+        self.compiler_type = compiler
+        self.compiler_kwargs = compiler_kwargs
         self.use_symlog_reward = use_symlog_reward
-        if cpfs_without_grad is None:
-            cpfs_without_grad = set()
-        self.cpfs_without_grad = cpfs_without_grad
-        self.compile_non_fluent_exact = compile_non_fluent_exact
 
         self.logger = logger
         self.dashboard_viz = dashboard_viz
@@ -2069,18 +1940,14 @@ r"""
         and their relaxations.
         '''
         result = ''
-        if self.compiled.model_params:
+        overriden_ops_info = self.compiled.overriden_ops_info()
+        if overriden_ops_info:
             result += ('Some RDDL operations are non-differentiable '
                        'and will be approximated as follows:' + '\n')
-            exprs_by_rddl_op, values_by_rddl_op = {}, {}
-            for info in self.compiled.model_parameter_info().values():
-                rddl_op = info['rddl_op']
-                exprs_by_rddl_op.setdefault(rddl_op, []).append(info['id'])
-                values_by_rddl_op.setdefault(rddl_op, []).append(info['init_value'])
-            for rddl_op in sorted(exprs_by_rddl_op.keys()):
-                result += (f'    {rddl_op}:\n'
-                           f'        addresses  ={exprs_by_rddl_op[rddl_op]}\n'
-                           f'        init_values={values_by_rddl_op[rddl_op]}\n')
+            for (class_, op_to_ids_dict) in overriden_ops_info.items():
+                result += f'    {class_}:\n'
+                for (op, ids) in op_to_ids_dict.items():
+                    result += f'        {op} [{len(ids)} occurences]\n'
         return result
         
     def summarize_hyperparameters(self) -> str:
@@ -2093,11 +1960,7 @@ r"""
                   f'    use_symlog        ={self.use_symlog_reward}\n'
                   f'    lookahead         ={self.horizon}\n'
                   f'    user_action_bounds={self._action_bounds}\n'
-                  f'    fuzzy logic type  ={type(self.logic).__name__}\n'
-                  f'    non_fluents exact ={self.compile_non_fluent_exact}\n'
-                  f'    cpfs_no_gradient  ={self.cpfs_without_grad}\n'
                   f'optimizer hyper-parameters:\n'
-                  f'    use_64_bit        ={self.use64bit}\n'
                   f'    optimizer         ={self.optimizer_name}\n'
                   f'    optimizer args    ={self.optimizer_kwargs}\n'
                   f'    clip_gradient     ={self.clip_grad}\n'
@@ -2111,7 +1974,12 @@ r"""
         result += str(self.plan)
         if self.use_pgpe:
             result += str(self.pgpe)
-        result += str(self.logic)
+        result += 'test compiler:\n'
+        for k, v in self.test_compiled.get_kwargs().items():
+            result += f'    {k}={v}\n'
+        result += 'train compiler:\n'
+        for k, v in self.compiled.get_kwargs().items():
+            result += f'    {k}={v}\n'
         return result
         
     # ===========================================================================
@@ -2122,23 +1990,21 @@ r"""
         rddl = self.rddl
         
         # Jax compilation of the differentiable RDDL for training
-        self.compiled = JaxRDDLCompilerWithGrad(
+        self.compiled = self.compiler_type(
             rddl=rddl,
-            logic=self.logic,
             logger=self.logger,
-            use64bit=self.use64bit,
-            cpfs_without_grad=self.cpfs_without_grad,
-            compile_non_fluent_exact=self.compile_non_fluent_exact,
-            print_warnings=self.print_warnings,
-            python_functions=self.python_functions
+            python_functions=self.python_functions,
+            **self.compiler_kwargs
         )
+        self.print_warnings = self.compiled.print_warnings
         self.compiled.compile(log_jax_expr=True, heading='RELAXED MODEL')
         
         # Jax compilation of the exact RDDL for testing
         self.test_compiled = JaxRDDLCompiler(
             rddl=rddl,
+            allow_synchronous_state=True,
             logger=self.logger,
-            use64bit=self.use64bit,
+            use64bit=self.compiled.use64bit,
             python_functions=self.python_functions
         )
         self.test_compiled.compile(log_jax_expr=True, heading='EXACT MODEL')
@@ -2670,7 +2536,7 @@ r"""
             print(self.summarize_relaxations())
         if print_hyperparams:
             print(self.summarize_hyperparameters())
-            print(f'optimize() call hyper-parameters:\n'
+            print(f'optimize call hyper-parameters:\n'
                   f'    PRNG key           ={key}\n'
                   f'    max_iterations     ={epochs}\n'
                   f'    max_seconds        ={train_seconds}\n'
@@ -2847,12 +2713,14 @@ r"""
                     best_params, best_loss, best_grad = \
                         policy_params, test_loss_smooth, train_log['grad']
                     pbest_loss = best_loss
+                    last_iter_improve = it
             else:
                 best_index = np.argmin(test_loss_smooth)
                 if test_loss_smooth[best_index] < best_loss:
                     best_params = pytree_at(policy_params, best_index)
                     best_grad = pytree_at(train_log['grad'], best_index)
                     best_loss = test_loss_smooth[best_index]
+                    last_iter_improve = it
                 pbest_loss = np.minimum(pbest_loss, test_loss_smooth)
             
             # ==================================================================
@@ -2901,8 +2769,8 @@ r"""
                         message = termcolor.colored(
                             f'[FAIL] Compiler encountered the following '
                             f'error(s) in the training model:\n    {messages}', 'red')
-                    progress_bar.write(message)  
-                    jax_train_msg_shown = True
+                        progress_bar.write(message)  
+                        jax_train_msg_shown = True
 
                 # test model
                 if not jax_test_msg_shown:
