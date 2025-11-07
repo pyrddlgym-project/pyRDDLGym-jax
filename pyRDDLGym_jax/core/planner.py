@@ -2401,8 +2401,6 @@ r"""
         :param print_progress: whether to print the progress bar during training
         :param print_hyperparams: whether to print list of hyper-parameter settings
         :param stopping_rule: stopping criterion
-        :param restart_epochs: restart the optimizer from a random policy configuration
-        if there is no progress for this many consecutive iterations
         :param test_rolling_window: the test return is averaged on a rolling 
         window of the past test_rolling_window returns when updating the best
         parameters found so far
@@ -2437,7 +2435,6 @@ r"""
                            print_progress: bool=True,
                            print_hyperparams: bool=False,
                            stopping_rule: Optional[JaxPlannerStoppingRule]=None,
-                           restart_epochs: int=999999,
                            test_rolling_window: int=10,
                            tqdm_position: Optional[int]=None) -> Generator[Dict[str, Any], None, None]:
         '''Returns a generator for computing an optimal policy or plan. 
@@ -2460,8 +2457,6 @@ r"""
         :param print_progress: whether to print the progress bar during training
         :param print_hyperparams: whether to print list of hyper-parameter settings
         :param stopping_rule: stopping criterion
-        :param restart_epochs: restart the optimizer from a random policy configuration
-        if there is no progress for this many consecutive iterations
         :param test_rolling_window: the test return is averaged on a rolling 
         window of the past test_rolling_window returns when updating the best
         parameters found so far
@@ -2480,34 +2475,38 @@ r"""
         # cannot run dashboard with parallel updates
         if dashboard is not None and self.parallel_updates is not None:
             if self.print_warnings:
-                message = termcolor.colored(
+                print(termcolor.colored(
                     '[WARN] Dashboard is unavailable if parallel_updates is not None: '
-                    'setting dashboard to None.', 'yellow')
-                print(message)
+                    'setting dashboard to None.', 'yellow'
+                ))
             dashboard = None
 
         # if PRNG key is not provided
         if key is None:
             key = random.PRNGKey(round(time.time() * 1000))
+            if self.print_warnings:
+                print(termcolor.colored(
+                    '[WARN] PRNG key is not set, setting from clock.', 'yellow'
+                ))
         dash_key = key[1].item()
             
         # if policy_hyperparams is not provided
         if policy_hyperparams is None:
             if self.print_warnings:
-                message = termcolor.colored(
+                print(termcolor.colored(
                     '[WARN] policy_hyperparams is not set, setting 1.0 for '
-                    'all action-fluents which could be suboptimal.', 'yellow')
-                print(message)
+                    'all action-fluents which could be suboptimal.', 'yellow'
+                ))
             policy_hyperparams = {action: 1.0 
                                   for action in self.rddl.action_fluents}
         
         # if policy_hyperparams is a scalar
         elif isinstance(policy_hyperparams, (int, float, np.number)):
             if self.print_warnings:
-                message = termcolor.colored(
+                print(termcolor.colored(
                     f'[INFO] policy_hyperparams is {policy_hyperparams}, '
-                    f'setting this value for all action-fluents.', 'green')
-                print(message)
+                    f'setting this value for all action-fluents.', 'green'
+                ))
             hyperparam_value = float(policy_hyperparams)
             policy_hyperparams = {action: hyperparam_value
                                   for action in self.rddl.action_fluents}
@@ -2517,11 +2516,11 @@ r"""
             for action in self.rddl.action_fluents:
                 if action not in policy_hyperparams:
                     if self.print_warnings:
-                        message = termcolor.colored(
+                        print(termcolor.colored(
                             f'[WARN] policy_hyperparams[{action}] is not set, '
                             f'setting 1.0 for missing action-fluents '
-                            f'which could be suboptimal.', 'yellow')
-                        print(message)
+                            f'which could be suboptimal.', 'yellow'
+                        ))
                     policy_hyperparams[action] = 1.0
         
         # initialize preprocessor
@@ -2549,8 +2548,7 @@ r"""
                   f'    dashboard_id       ={dashboard_id}\n'
                   f'    print_summary      ={print_summary}\n'
                   f'    print_progress     ={print_progress}\n'
-                  f'    stopping_rule      ={stopping_rule}\n'
-                  f'    restart_epochs     ={restart_epochs}\n')
+                  f'    stopping_rule      ={stopping_rule}\n')
         
         # ======================================================================
         # INITIALIZATION OF STATE AND POLICY
@@ -2568,10 +2566,10 @@ r"""
                     subs[var] = value
                     added_pvars_to_subs.append(var)
             if self.print_warnings and added_pvars_to_subs:
-                message = termcolor.colored(
+                print(termcolor.colored(
                     f'[INFO] p-variables {added_pvars_to_subs} is not in '
-                    f'provided subs, using their initial values.', 'green')
-                print(message)
+                    f'provided subs, using their initial values.', 'green'
+                ))
         train_subs, test_subs = self._batched_init_subs(subs)
         
         # initialize model parameters
@@ -2609,7 +2607,6 @@ r"""
             best_params = pytree_at(policy_params, 0)
         best_loss, pbest_loss, best_grad = np.inf, np.inf, None
         last_iter_improve = 0
-        no_progress_count = 0
         rolling_test_loss = RollingMean(test_rolling_window)
         status = JaxPlannerStatus.NORMAL
         progress_percent = 0
@@ -2622,7 +2619,8 @@ r"""
         if dashboard is not None:
             dashboard_id = dashboard.register_experiment(
                 dashboard_id, dashboard.get_planner_info(self), 
-                key=dash_key, viz=self.dashboard_viz)
+                key=dash_key, viz=self.dashboard_viz
+            )
         
         # progress bar
         if print_progress:
@@ -2654,16 +2652,19 @@ r"""
             (policy_params, converged, opt_state, opt_aux, train_loss, train_log, 
              model_params, zero_grads) = self.update(
                  subkey, policy_params, policy_hyperparams, train_subs, model_params, 
-                 opt_state, opt_aux)
+                 opt_state, opt_aux
+            )
             
             # update the preprocessor
             if self.preprocessor is not None:                
                 policy_hyperparams[preproc_key] = self.preprocessor.update(
-                    train_log['fluents'], policy_hyperparams[preproc_key])
+                    train_log['fluents'], policy_hyperparams[preproc_key]
+                )
 
             # evaluate
             test_loss, (test_log, model_params_test) = self.test_loss(
-                subkey, policy_params, policy_hyperparams, test_subs, model_params_test)
+                subkey, policy_params, policy_hyperparams, test_subs, model_params_test
+            )
             if self.parallel_updates:
                 train_loss = np.asarray(train_loss)
                 test_loss = np.asarray(test_loss)
@@ -2674,13 +2675,15 @@ r"""
             if self.use_pgpe:
                 key, subkey = random.split(key)
                 pgpe_params, r_max, pgpe_opt_state, pgpe_param, pgpe_converged = \
-                    self.pgpe.update(subkey, pgpe_params, r_max, progress_percent, 
-                                     policy_hyperparams, test_subs, model_params_test, 
-                                     pgpe_opt_state)
+                    self.pgpe.update(
+                        subkey, pgpe_params, r_max, progress_percent, 
+                        policy_hyperparams, test_subs, model_params_test, pgpe_opt_state
+                    )
                 
                 # evaluate
                 pgpe_loss, _ = self.test_loss(
-                    subkey, pgpe_param, policy_hyperparams, test_subs, model_params_test)
+                    subkey, pgpe_param, policy_hyperparams, test_subs, model_params_test
+                )
                 if self.parallel_updates:
                     pgpe_loss = np.asarray(pgpe_loss)
                 pgpe_loss_smooth = rolling_pgpe_loss.update(pgpe_loss)
@@ -2698,10 +2701,11 @@ r"""
                     pgpe_mask = (pgpe_loss_smooth < pbest_loss) | ~np.isfinite(train_loss)
                     if np.any(pgpe_mask):
                         policy_params, test_loss, test_loss_smooth, converged = \
-                            self.merge_pgpe(pgpe_mask, pgpe_param, policy_params, 
-                                            pgpe_loss, test_loss, 
-                                            pgpe_loss_smooth, test_loss_smooth, 
-                                            pgpe_converged, converged)
+                            self.merge_pgpe(
+                                pgpe_mask, pgpe_param, policy_params, 
+                                pgpe_loss, test_loss, pgpe_loss_smooth, test_loss_smooth, 
+                                pgpe_converged, converged
+                            )
                         pgpe_improve = True
                         total_pgpe_it += 1                        
             else:
@@ -2735,25 +2739,22 @@ r"""
             # constraint satisfaction problem
             if not np.all(converged):                
                 if progress_bar is not None and not policy_constraint_msg_shown:
-                    message = termcolor.colored(
-                        '[FAIL] Policy update failed to satisfy action constraints.',
-                        'red')
-                    progress_bar.write(message)
+                    progress_bar.write(termcolor.colored(
+                        '[FAIL] Policy update failed to satisfy action constraints.', 'red'
+                    ))
                     policy_constraint_msg_shown = True
                 status = JaxPlannerStatus.PRECONDITION_POSSIBLY_UNSATISFIED
             
             # numerical error
+            invalid_loss = not np.any(np.isfinite(train_loss))
             if self.use_pgpe:
-                invalid_loss = not (np.any(np.isfinite(train_loss)) or 
-                                    np.any(np.isfinite(pgpe_loss)))
-            else:
-                invalid_loss = not np.any(np.isfinite(train_loss))
+                invalid_loss = invalid_loss and not np.any(np.isfinite(pgpe_loss))
             if invalid_loss:
                 if progress_bar is not None:
-                    message = termcolor.colored(
+                    progress_bar.write(termcolor.colored(
                         f'[FAIL] Planner aborted due to invalid train loss {train_loss}.', 
-                        'red')
-                    progress_bar.write(message)
+                        'red'
+                    ))
                 status = JaxPlannerStatus.INVALID_GRADIENT
               
             # problem in the model compilation
@@ -2766,10 +2767,10 @@ r"""
                         messages.update(JaxRDDLCompiler.get_error_messages(error_code))
                     if messages:
                         messages = '\n    '.join(messages)
-                        message = termcolor.colored(
+                        progress_bar.write(termcolor.colored(
                             f'[FAIL] Compiler encountered the following '
-                            f'error(s) in the training model:\n    {messages}', 'red')
-                        progress_bar.write(message)  
+                            f'error(s) in the training model:\n    {messages}', 'red'
+                        ))  
                         jax_train_msg_shown = True
 
                 # test model
@@ -2779,10 +2780,10 @@ r"""
                         messages.update(JaxRDDLCompiler.get_error_messages(error_code))
                     if messages:
                         messages = '\n    '.join(messages)
-                        message = termcolor.colored(
+                        progress_bar.write(termcolor.colored(
                             f'[FAIL] Compiler encountered the following '
-                            f'error(s) in the testing model:\n    {messages}', 'red')
-                        progress_bar.write(message)    
+                            f'error(s) in the testing model:\n    {messages}', 'red'
+                        ))    
                         jax_test_msg_shown = True      
         
             # reached computation budget
@@ -2819,28 +2820,12 @@ r"""
                 **test_log
             }
 
-            # hard restart
-            if guess is None and no_progress_flag:
-                no_progress_count += 1
-                if no_progress_count > restart_epochs:
-                    key, subkey = random.split(key)
-                    policy_params, opt_state, opt_aux = self.initialize(
-                        subkey, policy_hyperparams, train_subs)
-                    no_progress_count = 0
-                    if self.print_warnings and progress_bar is not None:
-                        message = termcolor.colored(
-                            f'[INFO] Optimizer restarted at iteration {it} '
-                            f'due to lack of progress.', 'green')
-                        progress_bar.write(message)
-            else:
-                no_progress_count = 0
-
             # stopping condition reached
             if stopping_rule is not None and stopping_rule.monitor(callback):
                 if self.print_warnings and progress_bar is not None:
-                    message = termcolor.colored(
-                        '[SUCC] Stopping rule has been reached.', 'green')
-                    progress_bar.write(message)
+                    progress_bar.write(termcolor.colored(
+                        '[SUCC] Stopping rule has been reached.', 'green'
+                    ))
                 callback['status'] = status = JaxPlannerStatus.STOPPING_RULE_REACHED  
             
             # if the progress bar is used
@@ -2849,7 +2834,8 @@ r"""
                     f'{position_str} {it:6} it / {-np.min(train_loss):14.5f} train / '
                     f'{-np.min(test_loss_smooth):14.5f} test / {-best_loss:14.5f} best / '
                     f'{status.value} status / {total_pgpe_it:6} pgpe',
-                    refresh=False)
+                    refresh=False
+                )
                 progress_bar.set_postfix_str(
                     f'{(it + 1) / (elapsed + 1e-6):.2f}it/s', refresh=False)
                 progress_bar.update(progress_percent - progress_bar.n)
@@ -2878,11 +2864,11 @@ r"""
         
         # summarize and test for convergence
         if print_summary:
-            grad_norm = jax.tree_util.tree_map(
-                lambda x: np.linalg.norm(x).item(), best_grad)
+            grad_norm = jax.tree_util.tree_map(lambda x: np.linalg.norm(x).item(), best_grad)
             diagnosis = self._perform_diagnosis(
                 last_iter_improve, -np.min(train_loss), -np.min(test_loss_smooth), 
-                -best_loss, grad_norm)
+                -best_loss, grad_norm
+            )
             print(f'Summary of optimization:\n'
                   f'    status        ={status}\n'
                   f'    time          ={elapsed:.3f} sec.\n'
@@ -2909,13 +2895,15 @@ r"""
                 return termcolor.colored(
                     f'[FAIL] No progress was made '
                     f'and max grad norm {max_grad_norm:.6f} was zero: '
-                    f'solver likely stuck in a plateau.', 'red')
+                    f'solver likely stuck in a plateau.', 'red'
+                )
             else:
                 return termcolor.colored(
                     f'[FAIL] No progress was made '
                     f'but max grad norm {max_grad_norm:.6f} was non-zero: '
                     f'learning rate or other hyper-parameters could be suboptimal.', 
-                    'red')
+                    'red'
+                )
         
         # model is likely poor IF:
         # 1. the train and test return disagree
@@ -2926,7 +2914,8 @@ r"""
                 f'[WARN] Progress was made '
                 f'but relative train-test error {validation_error:.6f} was high: '
                 f'poor model relaxation around solution or batch size too small.', 
-                'yellow')
+                'yellow'
+            )
         
         # model likely did not converge IF:
         # 1. the max grad relative to the return is high
@@ -2937,12 +2926,14 @@ r"""
                     f'[WARN] Progress was made '
                     f'but max grad norm {max_grad_norm:.6f} was high: '
                     f'solution locally suboptimal, relaxed model nonsmooth around solution, '
-                    f'or batch size too small.', 'yellow')
+                    f'or batch size too small.', 'yellow'
+                )
         
         # likely successful
         return termcolor.colored(
             '[SUCC] Planner converged successfully '
-            '(note: not all problems can be ruled out).', 'green')
+            '(note: not all problems can be ruled out).', 'green'
+        )
         
     def get_action(self, key: random.PRNGKey,
                    params: Pytree,
@@ -2983,7 +2974,8 @@ r"""
                     else:               
                         raise ValueError(
                             f'Values {values} assigned to p-variable <{var}> are '
-                            f'non-numeric of type {dtype}.')
+                            f'non-numeric of type {dtype}.'
+                        )
             
         # cast device arrays to numpy
         actions = self.test_policy(key, params, policy_hyperparams, step, subs)
@@ -3130,11 +3122,11 @@ class JaxOnlineController(BaseAgent):
         while attempts < self.max_attempts and callback['iteration'] <= 1:
             attempts += 1
             if self.planner.print_warnings:
-                message = termcolor.colored(
+                print(termcolor.colored(
                     f'[WARN] JIT compilation dominated the execution time: '
                     f'executing the optimizer again on the traced model '
-                    f'[attempt {attempts}].', 'yellow')
-                print(message)
+                    f'[attempt {attempts}].', 'yellow'
+                ))
             callback = planner.optimize(
                 key=self.key, guess=self.guess, subs=state, **self.train_kwargs)    
         self.callback = callback
