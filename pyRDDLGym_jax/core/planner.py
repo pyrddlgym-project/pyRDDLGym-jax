@@ -2201,8 +2201,18 @@ r"""
         return jax.jit(_jax_wrapped_plan_updates)
             
     def _jax_merge_pgpe_jaxplan(self):
+
+        # no parallel updates, everything is scalar
         if self.parallel_updates is None:
-            return None
+            def _jax_wrapped_pgpe_jaxplan_merge(pgpe_mask, pgpe_param, policy_params, 
+                                                pgpe_loss, test_loss, 
+                                                pgpe_loss_smooth, test_loss_smooth, 
+                                                pgpe_converged, converged):
+                policy_params = pgpe_param
+                test_loss, test_loss_smooth = pgpe_loss, pgpe_loss_smooth
+                converged = pgpe_converged
+                return policy_params, test_loss, test_loss_smooth, converged
+            return _jax_wrapped_pgpe_jaxplan_merge
         
         # for parallel policy update:
         # currently implements a hard replacement where the jaxplan parameter
@@ -2220,7 +2230,6 @@ r"""
             expanded_mask = pgpe_mask[(...,) + (jnp.newaxis,) * (jnp.ndim(converged) - 1)]
             converged = jnp.where(expanded_mask, pgpe_converged, converged)
             return policy_params, test_loss, test_loss_smooth, converged
-
         return jax.jit(_jax_wrapped_pgpe_jaxplan_merge)
 
     def _batched_init_subs(self, subs): 
@@ -2465,8 +2474,7 @@ r"""
         :param tqdm_position: position of tqdm progress bar (for multiprocessing)
         '''
 
-        # start measuring execution time here:
-        # we need to measure time spent outside loop so we can deduct it from total time
+        # start measuring execution time here, including time spent outside optimize loop
         start_time = time.time()
         elapsed_outside_loop = 0
         
@@ -2499,8 +2507,7 @@ r"""
                     '[WARN] policy_hyperparams is not set, setting 1.0 for '
                     'all action-fluents which could be suboptimal.', 'yellow'
                 ))
-            policy_hyperparams = {action: 1.0 
-                                  for action in self.rddl.action_fluents}
+            policy_hyperparams = {action: 1. for action in self.rddl.action_fluents}
         
         # if policy_hyperparams is a scalar
         elif isinstance(policy_hyperparams, (int, float, np.number)):
@@ -2509,8 +2516,7 @@ r"""
                     f'[INFO] policy_hyperparams is {policy_hyperparams}, '
                     f'setting this value for all action-fluents.', 'green'
                 ))
-            hyperparam_value = float(policy_hyperparams)
-            policy_hyperparams = {action: hyperparam_value
+            policy_hyperparams = {action: float(policy_hyperparams) 
                                   for action in self.rddl.action_fluents}
         
         # fill in missing entries
@@ -2523,7 +2529,7 @@ r"""
                             f'setting 1.0 for missing action-fluents '
                             f'which could be suboptimal.', 'yellow'
                         ))
-                    policy_hyperparams[action] = 1.0
+                    policy_hyperparams[action] = 1.
         
         # initialize preprocessor
         preproc_key = None
@@ -2594,8 +2600,7 @@ r"""
             pgpe_params, pgpe_opt_state, r_max = self.pgpe.initialize(key, policy_params)
             rolling_pgpe_loss = RollingMean(test_rolling_window)
         else:
-            pgpe_params, pgpe_opt_state, r_max = None, None, None
-            rolling_pgpe_loss = None
+            pgpe_params = pgpe_opt_state = r_max = rolling_pgpe_loss = None
         total_pgpe_it = 0
 
         # ======================================================================
@@ -2620,8 +2625,10 @@ r"""
         # initialize dashboard 
         if dashboard is not None:
             dashboard_id = dashboard.register_experiment(
-                dashboard_id, dashboard.get_planner_info(self), 
-                key=dash_key, viz=self.dashboard_viz
+                dashboard_id, 
+                dashboard.get_planner_info(self), 
+                key=dash_key, 
+                viz=self.dashboard_viz
             )
         
         # progress bar
@@ -2644,7 +2651,7 @@ r"""
         for it in range(epochs):
             
             # ==================================================================
-            # NEXT GRADIENT DESCENT STEP
+            # JAXPLAN GRADIENT DESCENT STEP
             # ==================================================================
             
             status = JaxPlannerStatus.NORMAL
@@ -2672,9 +2679,14 @@ r"""
                 test_loss = np.asarray(test_loss)
             test_loss_smooth = rolling_test_loss.update(test_loss)
 
-            # pgpe update of the plan
+            # ==================================================================
+            # PGPE GRADIENT DESCENT STEP
+            # ==================================================================
+            
             pgpe_improve = False
             if self.use_pgpe:
+
+                # pgpe update of the plan
                 key, subkey = random.split(key)
                 pgpe_params, r_max, pgpe_opt_state, pgpe_param, pgpe_converged = \
                     self.pgpe.update(
@@ -2693,25 +2705,24 @@ r"""
 
                 # replace JaxPlan with PGPE if new minimum reached or train loss invalid
                 if self.parallel_updates is None:
-                    if pgpe_loss_smooth < best_loss or not np.isfinite(train_loss):
-                        policy_params = pgpe_param
-                        test_loss, test_loss_smooth = pgpe_loss, pgpe_loss_smooth
-                        converged = pgpe_converged
-                        pgpe_improve = True
-                        total_pgpe_it += 1
-                else:
                     pgpe_mask = (pgpe_loss_smooth < pbest_loss) | ~np.isfinite(train_loss)
-                    if np.any(pgpe_mask):
-                        policy_params, test_loss, test_loss_smooth, converged = \
-                            self.merge_pgpe(
-                                pgpe_mask, pgpe_param, policy_params, 
-                                pgpe_loss, test_loss, pgpe_loss_smooth, test_loss_smooth, 
-                                pgpe_converged, converged
-                            )
-                        pgpe_improve = True
-                        total_pgpe_it += 1                        
+                else:
+                    pgpe_mask = (pgpe_loss_smooth < best_loss) or not np.isfinite(train_loss)
+                if np.any(pgpe_mask):
+                    policy_params, test_loss, test_loss_smooth, converged = \
+                        self.merge_pgpe(
+                            pgpe_mask, pgpe_param, policy_params, 
+                            pgpe_loss, test_loss, pgpe_loss_smooth, test_loss_smooth, 
+                            pgpe_converged, converged
+                        )
+                    pgpe_improve = True
+                    total_pgpe_it += 1  
             else:
-                pgpe_loss, pgpe_loss_smooth, pgpe_return = None, None, None
+                pgpe_loss = pgpe_loss_smooth = pgpe_return = None
+
+            # ==================================================================
+            # STATUS CHECKS AND LOGGING
+            # ==================================================================
 
             # evaluate test losses and record best parameters so far
             if self.parallel_updates is None:
@@ -2728,14 +2739,9 @@ r"""
                     best_loss = test_loss_smooth[best_index]
                     last_iter_improve = it
                 pbest_loss = np.minimum(pbest_loss, test_loss_smooth)
-            
-            # ==================================================================
-            # STATUS CHECKS AND LOGGING
-            # ==================================================================
-            
+                        
             # no progress
-            no_progress_flag = (not pgpe_improve) and np.all(zero_grads)
-            if no_progress_flag:
+            if (not pgpe_improve) and np.all(zero_grads):
                 status = JaxPlannerStatus.NO_PROGRESS
             
             # constraint satisfaction problem
@@ -2754,8 +2760,7 @@ r"""
             if invalid_loss:
                 if progress_bar is not None:
                     progress_bar.write(termcolor.colored(
-                        f'[FAIL] Planner aborted due to invalid train loss {train_loss}.', 
-                        'red'
+                        f'[FAIL] Planner aborted with nan/inf train loss {train_loss}.', 'red'
                     ))
                 status = JaxPlannerStatus.INVALID_GRADIENT
               
@@ -2833,13 +2838,15 @@ r"""
             # if the progress bar is used
             if print_progress:
                 progress_bar.set_description(
-                    f'{position_str} {it:6} it / {-np.min(train_loss):14.5f} train / '
-                    f'{-np.min(test_loss_smooth):14.5f} test / {-best_loss:14.5f} best / '
-                    f'{status.value} status / {total_pgpe_it:6} pgpe',
+                    f'{position_str} {it} it | {-np.min(train_loss):13.5f} train | '
+                    f'{-np.min(test_loss_smooth):13.5f} test | '
+                    f'{-best_loss:13.5f} best | '
+                    f'{total_pgpe_it} pgpe | {status.value} status', 
                     refresh=False
                 )
                 progress_bar.set_postfix_str(
-                    f'{(it + 1) / (elapsed + 1e-6):.2f}it/s', refresh=False)
+                    f'{(it + 1) / (elapsed + 1e-6):.2f}it/s', refresh=False
+                )
                 progress_bar.update(progress_percent - progress_bar.n)
             
             # dashboard
