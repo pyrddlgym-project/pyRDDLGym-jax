@@ -688,7 +688,8 @@ class JaxStraightLinePlan(JaxPlan):
             if 1 < allowed_actions < bool_action_count:
                 raise RDDLNotImplementedError(
                     f'SLPs with wrap_softmax currently '
-                    f'do not support max-nondef-actions {allowed_actions} > 1.')
+                    f'do not support max-nondef-actions {allowed_actions} > 1.'
+                )
                 
             # potentially apply projection but to non-bool actions only
             self.projection = _jax_wrapped_slp_project_to_box
@@ -941,7 +942,8 @@ class JaxDeepReactivePolicy(JaxPlan):
         bool_action_count, allowed_actions = self._count_bool_actions(rddl)
         if 1 < allowed_actions < bool_action_count:
             raise RDDLNotImplementedError(
-                f'DRPs currently do not support max-nondef-actions {allowed_actions} > 1.')
+                f'DRPs currently do not support max-nondef-actions {allowed_actions} > 1.'
+            )
         use_constraint_satisfaction = allowed_actions < bool_action_count
         
         # get the noop action values
@@ -2246,7 +2248,8 @@ r"""
                 raise RDDLUndefinedVariableError(
                     f'Variable <{name}> in subs argument is not a '
                     f'valid p-variable, must be one of '
-                    f'{set(self.test_compiled.init_values.keys())}.')
+                    f'{set(self.test_compiled.init_values.keys())}.'
+                )
             value = np.reshape(value, np.shape(init_value))[np.newaxis, ...]            
             
             # for enum types need to convert the string values to integer indices
@@ -2335,8 +2338,7 @@ r"""
                     '[WARN] policy_hyperparams is not set, setting 1.0 for '
                     'all action-fluents which could be suboptimal.', 'yellow'
                 ))
-            policy_hyperparams = {action: 1.0 
-                                  for action in self.rddl.action_fluents}
+            policy_hyperparams = {action: 1. for action in self.rddl.action_fluents}
                 
         # initialize the policy parameters
         params_guess, *_ = self.initialize(key, policy_hyperparams, train_subs)
@@ -2708,6 +2710,7 @@ r"""
                     pgpe_mask = (pgpe_loss_smooth < pbest_loss) | ~np.isfinite(train_loss)
                 else:
                     pgpe_mask = (pgpe_loss_smooth < best_loss) or not np.isfinite(train_loss)
+
                 if np.any(pgpe_mask):
                     policy_params, test_loss, test_loss_smooth, converged = \
                         self.merge_pgpe(
@@ -2748,7 +2751,7 @@ r"""
             if not np.all(converged):                
                 if progress_bar is not None and not policy_constraint_msg_shown:
                     progress_bar.write(termcolor.colored(
-                        '[FAIL] Policy update failed to satisfy action constraints.', 'red'
+                        '[FAIL] Policy update violated action constraints.', 'red'
                     ))
                     policy_constraint_msg_shown = True
                 status = JaxPlannerStatus.PRECONDITION_POSSIBLY_UNSATISFIED
@@ -2760,7 +2763,7 @@ r"""
             if invalid_loss:
                 if progress_bar is not None:
                     progress_bar.write(termcolor.colored(
-                        f'[FAIL] Planner aborted with nan/inf train loss {train_loss}.', 'red'
+                        f'[FAIL] Planner aborted early with train loss {train_loss}.', 'red'
                     ))
                 status = JaxPlannerStatus.INVALID_GRADIENT
               
@@ -2794,27 +2797,26 @@ r"""
             progress_percent = 100 * min(
                 1, max(0, elapsed / train_seconds, it / (epochs - 1)))
             callback = {
-                'status': status,
                 'iteration': it,
+                'elapsed_time': elapsed,
+                'progress': progress_percent,
+                'status': status,
+                'key': key,
                 'train_return':-train_loss,
                 'test_return':-test_loss_smooth,
                 'best_return':-best_loss,
                 'pgpe_return': pgpe_return,
+                'last_iteration_improved': last_iter_improve,
+                'pgpe_improved': pgpe_improve,
                 'params': policy_params,
                 'best_params': best_params,
                 'pgpe_params': pgpe_params,
-                'last_iteration_improved': last_iter_improve,
-                'pgpe_improved': pgpe_improve,
+                'model_params': model_params,
+                'policy_hyperparams': policy_hyperparams,
                 'grad': train_log['grad'],
                 'best_grad': best_grad,
-                'updates': train_log['updates'],
-                'elapsed_time': elapsed,
-                'key': key,
-                'model_params': model_params,
-                'progress': progress_percent,
                 'train_log': train_log,
-                'policy_hyperparams': policy_hyperparams,
-                **test_log
+                'test_log': test_log
             }
 
             # stopping condition reached
@@ -2900,8 +2902,7 @@ r"""
                 return termcolor.colored(
                     f'[FAIL] No progress was made '
                     f'but max grad norm {max_grad_norm:.6f} was non-zero: '
-                    f'learning rate or other hyper-parameters could be suboptimal.', 
-                    'red'
+                    f'learning rate or other hyper-parameters could be suboptimal.', 'red'
                 )
         
         # model is likely poor IF:
@@ -2912,8 +2913,7 @@ r"""
             return termcolor.colored(
                 f'[WARN] Progress was made '
                 f'but relative train-test error {validation_error:.6f} was high: '
-                f'poor model relaxation around solution or batch size too small.', 
-                'yellow'
+                f'poor model relaxation around solution or batch size too small.', 'yellow'
             )
         
         # model likely did not converge IF:
