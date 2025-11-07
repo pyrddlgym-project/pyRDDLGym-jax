@@ -407,7 +407,8 @@ class JaxPlan(metaclass=ABCMeta):
                 keys = list(compiled.JAX_TYPES.keys()) + list(compiled.rddl.enum_types)
                 raise RDDLTypeError(
                     f'Invalid range <{prange}> of action-fluent <{name}>, '
-                    f'must be one of {keys}.')
+                    f'must be one of {keys}.'
+                )
                 
             # clip boolean to (0, 1), otherwise use the RDDL action bounds
             # or the user defined action bounds if provided
@@ -442,10 +443,10 @@ class JaxPlan(metaclass=ABCMeta):
             bounds[name] = (lower, upper)
 
             if compiled.print_warnings:
-                message = termcolor.colored(
+                print(termcolor.colored(
                     f'[INFO] Bounds of action-fluent <{name}> set to {bounds[name]}.', 
-                    'green')
-                print(message)
+                    'green'
+                ))
 
         return shapes, bounds, bounds_safe, cond_lists
     
@@ -529,11 +530,11 @@ class JaxStraightLinePlan(JaxPlan):
         bool_action_count, allowed_actions = self._count_bool_actions(rddl)
         use_constraint_satisfaction = allowed_actions < bool_action_count        
         if compiled.print_warnings and use_constraint_satisfaction: 
-            message = termcolor.colored(
+            print(termcolor.colored(
                 f'[INFO] SLP will use projected gradient to satisfy '
                 f'max_nondef_actions since total boolean actions '
-                f'{bool_action_count} > max_nondef_actions {allowed_actions}.', 'green')
-            print(message)
+                f'{bool_action_count} > max_nondef_actions {allowed_actions}.', 'green'
+            ))
         
         # get the noop action values
         noop = {var: (values[0] if isinstance(values, list) else values)
@@ -980,18 +981,18 @@ class JaxDeepReactivePolicy(JaxPlan):
                     value_size = np.size(values)
                     if normalize_per_layer and value_size == 1:
                         if compiled.print_warnings:
-                            message = termcolor.colored(
+                            print(termcolor.colored(
                                 f'[WARN] Cannot apply layer norm to state-fluent <{var}> '
-                                f'of size 1: setting normalize_per_layer = False.', 'yellow')
-                            print(message)
+                                f'of size 1: setting normalize_per_layer = False.', 'yellow'
+                            ))
                         normalize_per_layer = False
                     non_bool_dims += value_size
             if not normalize_per_layer and non_bool_dims == 1:
                 if compiled.print_warnings:
-                    message = termcolor.colored(
+                    print(termcolor.colored(
                         '[WARN] Cannot apply layer norm to state-fluents of total size 1: '
-                        'setting normalize = False.', 'yellow')
-                    print(message)
+                        'setting normalize = False.', 'yellow'
+                    ))
                 normalize = False
         
         # convert subs dictionary into a state vector to feed to the MLP
@@ -1340,11 +1341,11 @@ class GaussianPGPE(PGPE):
             mu_optimizer = optax.inject_hyperparams(optimizer)(**optimizer_kwargs_mu)
             sigma_optimizer = optax.inject_hyperparams(optimizer)(**optimizer_kwargs_sigma)
         except Exception as _:
-            message = termcolor.colored(
+            print(termcolor.colored(
                 '[FAIL] Failed to inject hyperparameters into PGPE optimizer, '
                 'rolling back to safer method: '
-                'kl-divergence constraint will be disabled.', 'red')
-            print(message)
+                'kl-divergence constraint will be disabled.', 'red'
+            ))
             mu_optimizer = optimizer(**optimizer_kwargs_mu)   
             sigma_optimizer = optimizer(**optimizer_kwargs_sigma) 
             max_kl_update = None
@@ -1855,11 +1856,11 @@ class JaxBackpropPlanner:
         try:
             optimizer = optax.inject_hyperparams(optimizer)(**optimizer_kwargs)
         except Exception as _:
-            message = termcolor.colored(
+            print(termcolor.colored(
                 '[FAIL] Failed to inject hyperparameters into JaxPlan optimizer, '
                 'rolling back to safer method: please note that runtime modification of '
-                'hyperparameters will be disabled.', 'red')
-            print(message)
+                'hyperparameters will be disabled.', 'red'
+            ))
             optimizer = optimizer(**optimizer_kwargs)   
         
         # apply optimizer chain of transformations
@@ -1882,7 +1883,8 @@ class JaxBackpropPlanner:
             if utility_fn is None:
                 raise RDDLNotImplementedError(
                     f'Utility function <{utility}> is not supported, '
-                    f'must be one of {list(UTILITY_LOOKUP.keys())}.')
+                    f'must be one of {list(UTILITY_LOOKUP.keys())}.'
+                )
         else:
             utility_fn = utility
         self.utility = utility_fn
@@ -2320,10 +2322,10 @@ r"""
         model_params = self.compiled.model_params
         if policy_hyperparams is None:
             if self.print_warnings:
-                message = termcolor.colored(
+                print(termcolor.colored(
                     '[WARN] policy_hyperparams is not set, setting 1.0 for '
-                    'all action-fluents which could be suboptimal.', 'yellow')
-                print(message)
+                    'all action-fluents which could be suboptimal.', 'yellow'
+                ))
             policy_hyperparams = {action: 1.0 
                                   for action in self.rddl.action_fluents}
                 
