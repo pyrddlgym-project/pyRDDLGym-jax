@@ -14,12 +14,14 @@
 
 
 from functools import partial
+import termcolor
 import traceback
 from typing import Any, Callable, Dict, List, Optional
 
 import jax
 import jax.numpy as jnp
 import jax.random as random
+import jax.scipy as scipy 
 
 from pyRDDLGym.core.compiler.initializer import RDDLValueInitializer
 from pyRDDLGym.core.compiler.levels import RDDLLevelAnalysis
@@ -36,8 +38,6 @@ from pyRDDLGym.core.debug.exception import (
 from pyRDDLGym.core.debug.logger import Logger
 from pyRDDLGym.core.simulator import RDDLSimulatorPrecompiled
 
-from pyRDDLGym_jax.core.logic import ExactLogic
-
 # more robust approach - if user does not have this or broken try to continue
 try:
     from tensorflow_probability.substrates import jax as tfp
@@ -53,12 +53,12 @@ class JaxRDDLCompiler:
     All operations are identical to their numpy equivalents.
     '''
     
-    def __init__(self, rddl: RDDLLiftedModel,
+    def __init__(self, *args, rddl: RDDLLiftedModel,
                  allow_synchronous_state: bool=True,
                  logger: Optional[Logger]=None,
                  use64bit: bool=False,
-                 compile_non_fluent_exact: bool=True,
-                 python_functions: Optional[Dict[str, Callable]]=None) -> None:
+                 python_functions: Optional[Dict[str, Callable]]=None,
+                 **kwargs) -> None:
         '''Creates a new RDDL to Jax compiler.
         
         :param rddl: the RDDL model to compile into Jax
@@ -66,10 +66,19 @@ class JaxRDDLCompiler:
         on each other
         :param logger: to log information about compilation to file
         :param use64bit: whether to use 64 bit arithmetic
-        :param compile_non_fluent_exact: whether non-fluent expressions 
-        are always compiled using exact JAX expressions
         :param python_functions: dictionary of external Python functions to call from RDDL
         '''
+
+        # warn about unused parameters
+        if args:
+            message = termcolor.colored(
+                f'[WARN] JaxRDDLCompiler received invalid args {args}.',  'yellow')
+            print(message)
+        if kwargs:
+            message = termcolor.colored(
+                f'[WARN] JaxRDDLCompiler received invalid kwargs {kwargs}.',  'yellow')
+            print(message)
+
         self.rddl = rddl
         self.logger = logger
         # jax.config.update('jax_log_compiles', True) # for testing ONLY
@@ -94,6 +103,7 @@ class JaxRDDLCompiler:
         self.init_values = initializer.initialize()
         
         # compute dependency graph for CPFs and sort them by evaluation order
+        self.allow_synchronous_state = allow_synchronous_state
         sorter = RDDLLevelAnalysis(rddl, allow_synchronous_state=allow_synchronous_state)
         self.levels = sorter.compute_levels()        
         
@@ -101,10 +111,12 @@ class JaxRDDLCompiler:
         tracer = RDDLObjectsTracer(rddl, cpf_levels=self.levels)
         self.traced = tracer.trace()
         
-        # extract the box constraints on actions
+        # external python functions
         if python_functions is None:
             python_functions = {}
         self.python_functions = python_functions
+
+        # extract the box constraints on actions
         simulator = RDDLSimulatorPrecompiled(
             rddl=self.rddl,
             init_values=self.init_values,
@@ -112,15 +124,15 @@ class JaxRDDLCompiler:
             trace_info=self.traced,
             python_functions=python_functions
         )  
-        constraints = RDDLConstraints(simulator, vectorized=True)
-        self.constraints = constraints
-        
-        # basic operations - these can be override in subclasses
-        self.compile_non_fluent_exact = compile_non_fluent_exact
-        self.AGGREGATION_BOOL = {'forall', 'exists'}
-        self.EXACT_OPS = ExactLogic(use64bit=self.use64bit).get_operator_dicts()
-        self.OPS = self.EXACT_OPS
-        
+        self.constraints = RDDLConstraints(simulator, vectorized=True)
+    
+    def get_kwargs(self) -> Dict[str, Any]:
+        return {
+            'allow_synchronous_state': self.allow_synchronous_state,
+            'use64bit': self.use64bit,
+            'python_functions': self.python_functions
+        }
+
     # ===========================================================================
     # main compilation subroutines
     # ===========================================================================
@@ -133,6 +145,7 @@ class JaxRDDLCompiler:
         :param heading: the heading to print before compilation information
         '''
         init_params = {}
+        self.overriden_ops = {}
         self.invariants = self._compile_constraints(self.rddl.invariants, init_params)
         self.preconditions = self._compile_constraints(self.rddl.preconditions, init_params)
         self.terminations = self._compile_constraints(self.rddl.terminations, init_params)
@@ -218,12 +231,11 @@ class JaxRDDLCompiler:
                         if not self.constraints.is_box_preconditions[i]]
         
         # compile them to JAX and write as h(s, a) <= 0
-        jax_op = ExactLogic.exact_binary_function(jnp.subtract)    
         jax_inequalities = []
         for (left, right) in inequalities:
             jax_lhs = self._jax(left, init_params)
             jax_rhs = self._jax(right, init_params)
-            jax_constr = self._jax_binary(jax_lhs, jax_rhs, jax_op, at_least_int=True)
+            jax_constr = self._jax_binary(jax_lhs, jax_rhs, jnp.subtract, at_least_int=True)
             jax_inequalities.append(jax_constr)
         
         # extract the non-box equality constraints on actions
@@ -237,7 +249,7 @@ class JaxRDDLCompiler:
         for (left, right) in equalities:
             jax_lhs = self._jax(left, init_params)
             jax_rhs = self._jax(right, init_params)
-            jax_constr = self._jax_binary(jax_lhs, jax_rhs, jax_op, at_least_int=True)
+            jax_constr = self._jax_binary(jax_lhs, jax_rhs, jnp.subtract, at_least_int=True)
             jax_equalities.append(jax_constr)
             
         return jax_inequalities, jax_equalities
@@ -490,20 +502,28 @@ class JaxRDDLCompiler:
         '''Returns a dictionary of additional information about model parameters.'''
         result = {}
         for (id, value) in self.model_params.items():
-            expr_id = int(str(id).split('_')[0])
-            expr = self.traced.lookup(expr_id)
+            expr = self.traced.lookup(int(id))
             result[id] = {
-                'id': expr_id, 
+                'id': int(id), 
                 'rddl_op': ' '.join(expr.etype), 
                 'init_value': value
             }
         return result
         
+    def overriden_ops_info(self) -> Dict[str, Dict[str, List[int]]]:
+        '''Returns a dictionary of operations overriden by another class.'''
+        result = {}
+        for (id, class_) in self.overriden_ops.items():
+            expr = self.traced.lookup(id)
+            rddl_op = ' '.join(expr.etype)
+            result.setdefault(class_, {}).setdefault(rddl_op, []).append(id)
+        return result
+
     @staticmethod
     def _check_valid_op(expr, valid_ops):
         etype, op = expr.etype
         if op not in valid_ops:
-            valid_op_str = ','.join(valid_ops.keys())
+            valid_op_str = ','.join(valid_ops)
             raise RDDLNotImplementedError(
                 f'{etype} operator {op} is not supported: '
                 f'must be in {valid_op_str}.\n' + print_stack_trace(expr))
@@ -515,6 +535,15 @@ class JaxRDDLCompiler:
             etype, op = expr.etype
             raise RDDLInvalidNumberOfArgumentsError(
                 f'{etype} operator {op} requires {required_args} arguments, '
+                f'got {actual_args}.\n' + print_stack_trace(expr))
+    
+    @staticmethod
+    def _check_num_args_min(expr, required_args):
+        actual_args = len(expr.args)
+        if actual_args < required_args:
+            etype, op = expr.etype
+            raise RDDLInvalidNumberOfArgumentsError(
+                f'{etype} operator {op} requires at least {required_args} arguments, '
                 f'got {actual_args}.\n' + print_stack_trace(expr))
         
     ERROR_CODES = {
@@ -611,7 +640,7 @@ class JaxRDDLCompiler:
         elif etype == 'aggregation':
             jax_expr = self._jax_aggregation(expr, init_params)
         elif etype == 'func':
-            jax_expr = self._jax_functional(expr, init_params)
+            jax_expr = self._jax_function(expr, init_params)
         elif etype == 'pyfunc':
             jax_expr = self._jax_pyfunc(expr, init_params)
         elif etype == 'control':
@@ -756,7 +785,7 @@ class JaxRDDLCompiler:
                 return _jax_wrapped_pvar_tensor_non_nested
     
     # ===========================================================================
-    # mathematical
+    # boilerplate helper functions
     # ===========================================================================
     
     def _jax_unary(self, jax_expr, jax_op, at_least_int=False, check_dtype=None):
@@ -766,10 +795,10 @@ class JaxRDDLCompiler:
             sample, key, err, params = jax_expr(x, params, key)
             if at_least_int:
                 sample = self.ONE * sample
-            sample, params = jax_op(sample, params)
             if check_dtype is not None:
                 invalid_cast = jnp.logical_not(jnp.can_cast(sample, check_dtype))
                 err |= (invalid_cast * ERR)
+            sample = jax_op(sample)
             return sample, key, err, params
         
         return _jax_wrapped_unary_op
@@ -783,7 +812,7 @@ class JaxRDDLCompiler:
             if at_least_int:
                 sample1 = self.ONE * sample1
                 sample2 = self.ONE * sample2
-            sample, params = jax_op(sample1, sample2, params)
+            sample = jax_op(sample1, sample2)
             err = err1 | err2
             if check_dtype is not None:
                 invalid_cast = jnp.logical_not(jnp.logical_and(
@@ -795,145 +824,368 @@ class JaxRDDLCompiler:
         
         return _jax_wrapped_binary_op
     
-    def _jax_arithmetic(self, expr, init_params):
-        _, op = expr.etype
-        
-        # if expression is non-fluent, always use the exact operation
-        if self.compile_non_fluent_exact and not self.traced.cached_is_fluent(expr):
-            valid_ops = self.EXACT_OPS['arithmetic']
-            negative_op = self.EXACT_OPS['negative']
-        else:
-            valid_ops = self.OPS['arithmetic']
-            negative_op = self.OPS['negative']            
-        JaxRDDLCompiler._check_valid_op(expr, valid_ops)
-        
-        # recursively compile arguments
-        args = expr.args
-        n = len(args)
-        if n == 1 and op == '-':
-            arg, = args
-            jax_expr = self._jax(arg, init_params)
-            jax_op = negative_op(expr.id, init_params)
-            return self._jax_unary(jax_expr, jax_op, at_least_int=True)
-                    
-        elif n == 2 or (n >= 2 and op in {'*', '+'}):
-            jax_exprs = [self._jax(arg, init_params) for arg in args]
-            result = jax_exprs[0]
-            for (i, jax_rhs) in enumerate(jax_exprs[1:]):
-                jax_op = valid_ops[op](f'{expr.id}_{op}{i}', init_params)
-                result = self._jax_binary(result, jax_rhs, jax_op, at_least_int=True)
-            return result
-        
-        JaxRDDLCompiler._check_num_args(expr, 2)
-    
-    def _jax_relational(self, expr, init_params):
-        _, op = expr.etype
-        
-        # if expression is non-fluent, always use the exact operation
-        if self.compile_non_fluent_exact and not self.traced.cached_is_fluent(expr):
-            valid_ops = self.EXACT_OPS['relational']
-        else:
-            valid_ops = self.OPS['relational']
-        JaxRDDLCompiler._check_valid_op(expr, valid_ops)
-        
-        # recursively compile arguments
+    def _jax_unary_helper(self, expr, init_params, jax_op, at_least_int=False, check_dtype=None):
+        JaxRDDLCompiler._check_num_args(expr, 1)
+        arg, = expr.args
+        jax_expr = self._jax(arg, init_params)
+        return self._jax_unary(
+            jax_expr, jax_op, at_least_int=at_least_int, check_dtype=check_dtype)
+
+    def _jax_binary_helper(self, expr, init_params, jax_op, at_least_int=False, check_dtype=None):
         JaxRDDLCompiler._check_num_args(expr, 2)
         lhs, rhs = expr.args
         jax_lhs = self._jax(lhs, init_params)
         jax_rhs = self._jax(rhs, init_params)
-        jax_op = valid_ops[op](expr.id, init_params)
-        return self._jax_binary(jax_lhs, jax_rhs, jax_op, at_least_int=True)
-           
-    def _jax_logical(self, expr, init_params):
-        _, op = expr.etype
-        
-        # if expression is non-fluent, always use the exact operation
-        if self.compile_non_fluent_exact and not self.traced.cached_is_fluent(expr):
-            valid_ops = self.EXACT_OPS['logical']  
-            logical_not_op = self.EXACT_OPS['logical_not']
-        else:
-            valid_ops = self.OPS['logical']
-            logical_not_op = self.OPS['logical_not'] 
-        JaxRDDLCompiler._check_valid_op(expr, valid_ops)
-                
-        # recursively compile arguments
+        return self._jax_binary(
+            jax_lhs, jax_rhs, jax_op, at_least_int=at_least_int, check_dtype=check_dtype)
+    
+    def _jax_nary_helper(self, expr, init_params, jax_op, at_least_int=False, check_dtype=None):
+        JaxRDDLCompiler._check_num_args_min(expr, 2)
         args = expr.args
-        n = len(args)        
-        if n == 1 and op == '~':
-            arg, = args
-            jax_expr = self._jax(arg, init_params)
-            jax_op = logical_not_op(expr.id, init_params)
-            return self._jax_unary(jax_expr, jax_op, check_dtype=bool)
+        jax_exprs = [self._jax(arg, init_params) for arg in args]
+        result = jax_exprs[0]
+        for jax_rhs in jax_exprs[1:]:
+            result = self._jax_binary(
+                result, jax_rhs, jax_op, at_least_int=at_least_int, check_dtype=check_dtype)
+        return result
+    
+    # ===========================================================================
+    # arithmetic
+    # ===========================================================================
+    
+    def _jax_arithmetic(self, expr, init_params):
+        JaxRDDLCompiler._check_valid_op(expr, {'-', '+', '*', '/'})
+        _, op = expr.etype
+
+        if op == '-':
+            if len(expr.args) == 1:
+                return self._jax_negate(expr, init_params)
+            else:
+                return self._jax_subtract(expr, init_params)
+        elif op == '/':
+            return self._jax_divide(expr, init_params)
+        elif op == '+':
+            return self._jax_add(expr, init_params)
+        elif op == '*':
+            return self._jax_multiply(expr, init_params)
+    
+    def _jax_negate(self, expr, init_params):
+        return self._jax_unary_helper(expr, init_params, jnp.negative, at_least_int=True)
+    
+    def _jax_add(self, expr, init_params):
+        return self._jax_nary_helper(expr, init_params, jnp.add, at_least_int=True)
+    
+    def _jax_subtract(self, expr, init_params):
+        return self._jax_binary_helper(expr, init_params, jnp.subtract, at_least_int=True)
+    
+    def _jax_multiply(self, expr, init_params):
+        return self._jax_nary_helper(expr, init_params, jnp.multiply, at_least_int=True)
+    
+    def _jax_divide(self, expr, init_params):
+        return self._jax_binary_helper(expr, init_params, jnp.divide, at_least_int=True)
+    
+    # ===========================================================================
+    # relational
+    # ===========================================================================
+    
+    def _jax_relational(self, expr, init_params):
+        JaxRDDLCompiler._check_valid_op(expr, {'>=', '<=', '>', '<', '==', '~='})
+        _, op = expr.etype
+        if op == '>=':
+            return self._jax_greater_equal(expr, init_params)
+        elif op == '<=':
+            return self._jax_less_equal(expr, init_params)
+        elif op == '>':
+            return self._jax_greater(expr, init_params)
+        elif op == '<':
+            return self._jax_less(expr, init_params)
+        elif op == '==':
+            return self._jax_equal(expr, init_params)
+        elif op == '~=':
+            return self._jax_not_equal(expr, init_params)
+
+    def _jax_greater_equal(self, expr, init_params):
+        return self._jax_binary_helper(expr, init_params, jnp.greater_equal, at_least_int=True)
         
-        elif n == 2 or (n >= 2 and op in {'^', '&', '|'}):
-            jax_exprs = [self._jax(arg, init_params) for arg in args]
-            result = jax_exprs[0]
-            for i, jax_rhs in enumerate(jax_exprs[1:]):
-                jax_op = valid_ops[op](f'{expr.id}_{op}{i}', init_params)
-                result = self._jax_binary(result, jax_rhs, jax_op, check_dtype=bool)
-            return result
-        
-        JaxRDDLCompiler._check_num_args(expr, 2)
+    def _jax_less_equal(self, expr, init_params):
+        return self._jax_binary_helper(expr, init_params, jnp.less_equal, at_least_int=True)
+
+    def _jax_greater(self, expr, init_params):
+        return self._jax_binary_helper(expr, init_params, jnp.greater, at_least_int=True)
+    
+    def _jax_less(self, expr, init_params):
+        return self._jax_binary_helper(expr, init_params, jnp.less, at_least_int=True)
+    
+    def _jax_equal(self, expr, init_params):
+        return self._jax_binary_helper(expr, init_params, jnp.equal, at_least_int=True)
+    
+    def _jax_not_equal(self, expr, init_params):
+        return self._jax_binary_helper(expr, init_params, jnp.not_equal, at_least_int=True)
+    
+    # ===========================================================================
+    # logical
+    # ===========================================================================
+
+    def _jax_logical(self, expr, init_params):
+        JaxRDDLCompiler._check_valid_op(expr, {'^', '&', '|', '~', '=>', '<=>'})
+        _, op = expr.etype
+
+        if op == '~':
+            if len(expr.args) == 1:
+                return self._jax_not(expr, init_params)
+            else:
+                return self._jax_xor(expr, init_params)
+        elif op == '^' or op == '&':
+            return self._jax_and(expr, init_params)
+        elif op == '|':
+            return self._jax_or(expr, init_params)
+        elif op == '=>':
+            return self._jax_implies(expr, init_params)
+        elif op == '<=>':
+            return self._jax_equiv(expr, init_params)        
+    
+    def _jax_not(self, expr, init_params):
+        return self._jax_unary_helper(expr, init_params, jnp.logical_not, check_dtype=bool)
+    
+    def _jax_and(self, expr, init_params):
+        return self._jax_nary_helper(expr, init_params, jnp.logical_and, check_dtype=bool)
+    
+    def _jax_or(self, expr, init_params):
+        return self._jax_nary_helper(expr, init_params, jnp.logical_or, check_dtype=bool)
+    
+    def _jax_xor(self, expr, init_params):
+        return self._jax_binary_helper(expr, init_params, jnp.logical_xor, check_dtype=bool)
+    
+    def _jax_implies(self, expr, init_params):
+        def implies_op(x, y):
+            return jnp.logical_or(jnp.logical_not(x), y)
+        return self._jax_binary_helper(expr, init_params, implies_op, check_dtype=bool)
+    
+    def _jax_equiv(self, expr, init_params):
+        return self._jax_binary_helper(expr, init_params, jnp.equal, check_dtype=bool)
+    
+    # ===========================================================================
+    # aggregation
+    # ===========================================================================
     
     def _jax_aggregation(self, expr, init_params):
-        ERR = JaxRDDLCompiler.ERROR_CODES['INVALID_CAST']
+        JaxRDDLCompiler._check_valid_op(expr, {'sum', 'avg', 'prod', 'minimum', 'maximum', 
+                                               'forall', 'exists', 'argmin', 'argmax'})
         _, op = expr.etype
+        if op == 'sum':
+            return self._jax_sum(expr, init_params)
+        elif op == 'avg':
+            return self._jax_avg(expr, init_params)
+        elif op == 'prod':
+            return self._jax_prod(expr, init_params)
+        elif op == 'minimum':
+            return self._jax_minimum(expr, init_params)
+        elif op == 'maximum':
+            return self._jax_maximum(expr, init_params)
+        elif op == 'forall':
+            return self._jax_forall(expr, init_params)
+        elif op == 'exists':
+            return self._jax_exists(expr, init_params)
+        elif op == 'argmin':
+            return self._jax_argmin(expr, init_params)
+        elif op == 'argmax':
+            return self._jax_argmax(expr, init_params)
         
-        # if expression is non-fluent, always use the exact operation
-        if self.compile_non_fluent_exact and not self.traced.cached_is_fluent(expr):
-            valid_ops = self.EXACT_OPS['aggregation']   
-        else:
-            valid_ops = self.OPS['aggregation']   
-        JaxRDDLCompiler._check_valid_op(expr, valid_ops) 
-        is_floating = op not in self.AGGREGATION_BOOL
-        
-        # recursively compile arguments
-        * _, arg = expr.args  
-        _, axes = self.traced.cached_sim_info(expr)        
-        jax_expr = self._jax(arg, init_params)
-        jax_op = valid_ops[op](expr.id, init_params)
-        
-        def _jax_wrapped_aggregation(x, params, key):
-            sample, key, err, params = jax_expr(x, params, key)
-            if is_floating:
-                sample = self.ONE * sample
-            else:
-                invalid_cast = jnp.logical_not(jnp.can_cast(sample, bool))
-                err |= (invalid_cast * ERR)
-            sample, params = jax_op(sample, axis=axes, params=params)
-            return sample, key, err, params
-        
-        return _jax_wrapped_aggregation
-               
-    def _jax_functional(self, expr, init_params):
+    def _jax_aggregation_helper(self, expr, init_params, jax_op, is_bool=False):
+        * _, arg = expr.args
+        _, axes = self.traced.cached_sim_info(expr)   
+        jax_expr = self._jax(arg, init_params) 
+        return self._jax_unary(
+            jax_expr, 
+            jax_op=lambda x: jax_op(x, axis=axes), 
+            at_least_int=not is_bool, 
+            check_dtype=bool if is_bool else None
+        )
+
+    def _jax_sum(self, expr, init_params):
+        return self._jax_aggregation_helper(expr, init_params, jnp.sum)
+    
+    def _jax_avg(self, expr, init_params):
+        return self._jax_aggregation_helper(expr, init_params, jnp.mean)
+    
+    def _jax_prod(self, expr, init_params):
+        return self._jax_aggregation_helper(expr, init_params, jnp.prod)
+    
+    def _jax_minimum(self, expr, init_params):
+        return self._jax_aggregation_helper(expr, init_params, jnp.min)
+    
+    def _jax_maximum(self, expr, init_params):
+        return self._jax_aggregation_helper(expr, init_params, jnp.max)
+    
+    def _jax_forall(self, expr, init_params):
+        return self._jax_aggregation_helper(expr, init_params, jnp.all, is_bool=True)
+    
+    def _jax_exists(self, expr, init_params):
+        return self._jax_aggregation_helper(expr, init_params, jnp.any, is_bool=True)
+    
+    def _jax_argmin(self, expr, init_params):
+        return self._jax_aggregation_helper(expr, init_params, jnp.argmin)
+    
+    def _jax_argmax(self, expr, init_params):
+        return self._jax_aggregation_helper(expr, init_params, jnp.argmax)
+    
+    # ===========================================================================
+    # function
+    # ===========================================================================
+    
+    def _jax_function(self, expr, init_params):
+        JaxRDDLCompiler._check_valid_op(expr, {'abs', 'sgn', 'round', 'floor', 'ceil', 
+                                               'cos', 'sin', 'tan', 'acos', 'asin', 'atan',
+                                               'cosh', 'sinh', 'tanh', 'exp', 'ln', 'sqrt',
+                                               'lngamma', 'gamma',
+                                               'div', 'mod', 'fmod', 'min', 'max', 
+                                               'pow', 'log', 'hypot'})
         _, op = expr.etype
+
+        # unary functions
+        if op == 'abs':
+            return self._jax_abs(expr, init_params)
+        elif op == 'sgn':
+            return self._jax_sgn(expr, init_params)
+        elif op == 'round':
+            return self._jax_round(expr, init_params)
+        elif op == 'floor':
+            return self._jax_floor(expr, init_params)
+        elif op == 'ceil':
+            return self._jax_ceil(expr, init_params)
+        elif op == 'cos':
+            return self._jax_cos(expr, init_params)
+        elif op == 'sin':
+            return self._jax_sin(expr, init_params)
+        elif op == 'tan':
+            return self._jax_tan(expr, init_params)
+        elif op == 'acos':
+            return self._jax_acos(expr, init_params)
+        elif op == 'asin':
+            return self._jax_asin(expr, init_params)
+        elif op == 'atan':
+            return self._jax_atan(expr, init_params)
+        elif op == 'cosh':
+            return self._jax_cosh(expr, init_params)
+        elif op == 'sinh':
+            return self._jax_sinh(expr, init_params)
+        elif op == 'tanh':
+            return self._jax_tanh(expr, init_params)
+        elif op == 'exp':
+            return self._jax_exp(expr, init_params)
+        elif op == 'ln':
+            return self._jax_ln(expr, init_params)
+        elif op == 'sqrt':
+            return self._jax_sqrt(expr, init_params)
+        elif op == 'lngamma':
+            return self._jax_lngamma(expr, init_params)
+        elif op == 'gamma':
+            return self._jax_gamma(expr, init_params)
         
-        # if expression is non-fluent, always use the exact operation
-        if self.compile_non_fluent_exact and not self.traced.cached_is_fluent(expr):            
-            unary_ops = self.EXACT_OPS['unary']
-            binary_ops = self.EXACT_OPS['binary']
-        else:
-            unary_ops = self.OPS['unary']
-            binary_ops = self.OPS['binary']
+        # binary functions
+        elif op == 'div':
+            return self._jax_div(expr, init_params)
+        elif op == 'mod':
+            return self._jax_mod(expr, init_params)
+        elif op == 'fmod':
+            return self._jax_fmod(expr, init_params)
+        elif op == 'min':
+            return self._jax_min(expr, init_params)
+        elif op == 'max':
+            return self._jax_max(expr, init_params)
+        elif op == 'pow':
+            return self._jax_pow(expr, init_params)
+        elif op == 'log':
+            return self._jax_log(expr, init_params)
+        elif op == 'hypot':
+            return self._jax_hypot(expr, init_params)
         
-        # recursively compile arguments
-        if op in unary_ops:
-            JaxRDDLCompiler._check_num_args(expr, 1)                            
-            arg, = expr.args
-            jax_expr = self._jax(arg, init_params)
-            jax_op = unary_ops[op](expr.id, init_params)
-            return self._jax_unary(jax_expr, jax_op, at_least_int=True)
-            
-        elif op in binary_ops:
-            JaxRDDLCompiler._check_num_args(expr, 2)                
-            lhs, rhs = expr.args
-            jax_lhs = self._jax(lhs, init_params)
-            jax_rhs = self._jax(rhs, init_params)
-            jax_op = binary_ops[op](expr.id, init_params)
-            return self._jax_binary(jax_lhs, jax_rhs, jax_op, at_least_int=True)
-        
-        raise RDDLNotImplementedError(
-            f'Function {op} is not supported.\n' + print_stack_trace(expr))   
+    def _jax_abs(self, expr, init_params):
+        return self._jax_unary_helper(expr, init_params, jnp.abs, at_least_int=True)
+    
+    def _jax_sgn(self, expr, init_params):
+        return self._jax_unary_helper(expr, init_params, jnp.sgn, at_least_int=True)
+    
+    def _jax_round(self, expr, init_params):
+        return self._jax_unary_helper(expr, init_params, jnp.round, at_least_int=True)
+    
+    def _jax_floor(self, expr, init_params):
+        return self._jax_unary_helper(expr, init_params, jnp.floor, at_least_int=True)
+    
+    def _jax_ceil(self, expr, init_params):
+        return self._jax_unary_helper(expr, init_params, jnp.ceil, at_least_int=True)
+    
+    def _jax_cos(self, expr, init_params):
+        return self._jax_unary_helper(expr, init_params, jnp.cos, at_least_int=True)
+    
+    def _jax_sin(self, expr, init_params):
+        return self._jax_unary_helper(expr, init_params, jnp.sin, at_least_int=True)
+    
+    def _jax_tan(self, expr, init_params):
+        return self._jax_unary_helper(expr, init_params, jnp.tan, at_least_int=True)
+    
+    def _jax_acos(self, expr, init_params):
+        return self._jax_unary_helper(expr, init_params, jnp.arccos, at_least_int=True)
+    
+    def _jax_asin(self, expr, init_params):
+        return self._jax_unary_helper(expr, init_params, jnp.arcsin, at_least_int=True)
+    
+    def _jax_atan(self, expr, init_params):
+        return self._jax_unary_helper(expr, init_params, jnp.arctan, at_least_int=True)
+    
+    def _jax_cosh(self, expr, init_params):
+        return self._jax_unary_helper(expr, init_params, jnp.cosh, at_least_int=True)
+    
+    def _jax_sinh(self, expr, init_params):
+        return self._jax_unary_helper(expr, init_params, jnp.sinh, at_least_int=True)
+    
+    def _jax_tanh(self, expr, init_params):
+        return self._jax_unary_helper(expr, init_params, jnp.tanh, at_least_int=True)
+    
+    def _jax_exp(self, expr, init_params):
+        return self._jax_unary_helper(expr, init_params, jnp.exp, at_least_int=True)
+    
+    def _jax_ln(self, expr, init_params):
+        return self._jax_unary_helper(expr, init_params, jnp.ln, at_least_int=True)
+    
+    def _jax_sqrt(self, expr, init_params):
+        return self._jax_unary_helper(expr, init_params, jnp.sqrt, at_least_int=True)
+    
+    def _jax_lngamma(self, expr, init_params):
+        return self._jax_unary_helper(expr, init_params, scipy.special.gammaln, at_least_int=True)
+    
+    def _jax_gamma(self, expr, init_params):
+        return self._jax_unary_helper(expr, init_params, scipy.special.gamma, at_least_int=True)
+
+    def _jax_div(self, expr, init_params):
+        return self._jax_binary_helper(expr, init_params, jnp.floor_divide, at_least_int=True)
+    
+    def _jax_mod(self, expr, init_params):
+        return self._jax_binary_helper(expr, init_params, jnp.mod, at_least_int=True)
+    
+    def _jax_fmod(self, expr, init_params):
+        return self._jax_binary_helper(expr, init_params, jnp.mod, at_least_int=True)
+    
+    def _jax_min(self, expr, init_params):
+        return self._jax_binary_helper(expr, init_params, jnp.minimum, at_least_int=True)
+    
+    def _jax_max(self, expr, init_params):
+        return self._jax_binary_helper(expr, init_params, jnp.maximum, at_least_int=True)
+    
+    def _jax_pow(self, expr, init_params):
+        return self._jax_binary_helper(expr, init_params, jnp.power, at_least_int=True)
+    
+    def _jax_log(self, expr, init_params):
+        def log_op(x, y):
+            return jnp.log(x) / jnp.log(y)
+        return self._jax_binary_helper(expr, init_params, log_op, at_least_int=True)
+    
+    def _jax_hypot(self, expr, init_params):
+        return self._jax_binary_helper(expr, init_params, jnp.hypot, at_least_int=True)
+    
+    # ===========================================================================
+    # external function
+    # ===========================================================================
     
     def _jax_pyfunc(self, expr, init_params):
         NORMAL = JaxRDDLCompiler.ERROR_CODES['NORMAL']
@@ -1032,13 +1284,6 @@ class JaxRDDLCompiler:
         JaxRDDLCompiler._check_num_args(expr, 3)
         pred, if_true, if_false = expr.args     
         
-        # if predicate is non-fluent, always use the exact operation
-        if self.compile_non_fluent_exact and not self.traced.cached_is_fluent(pred):
-            if_op = self.EXACT_OPS['control']['if']
-        else:
-            if_op = self.OPS['control']['if']
-        jax_op = if_op(expr.id, init_params)
-        
         # recursively compile arguments   
         jax_pred = self._jax(pred, init_params)
         jax_true = self._jax(if_true, init_params)
@@ -1048,7 +1293,7 @@ class JaxRDDLCompiler:
             sample1, key, err1, params = jax_pred(x, params, key)
             sample2, key, err2, params = jax_true(x, params, key)
             sample3, key, err3, params = jax_false(x, params, key)
-            sample, params = jax_op(sample1, sample2, sample3, params)
+            sample = jnp.where(sample1 > 0.5, sample2, sample3)
             err = err1 | err2 | err3
             invalid_cast = jnp.logical_not(jnp.can_cast(sample1, bool))
             err |= (invalid_cast * ERR)
@@ -1058,15 +1303,7 @@ class JaxRDDLCompiler:
     
     def _jax_switch(self, expr, init_params):
         pred, *_ = expr.args
-             
-        # if predicate is non-fluent, always use the exact operation
-        # case conditions are currently only literals so they are non-fluent
-        if self.compile_non_fluent_exact and not self.traced.cached_is_fluent(pred):
-            switch_op = self.EXACT_OPS['control']['switch']
-        else:
-            switch_op = self.OPS['control']['switch']
-        jax_op = switch_op(expr.id, init_params)
-        
+
         # recursively compile predicate
         jax_pred = self._jax(pred, init_params)
         
@@ -1090,7 +1327,10 @@ class JaxRDDLCompiler:
             sample_cases = jnp.asarray(sample_cases, dtype=self._fix_dtype(sample_cases))
             
             # predicate (enum) is an integer - use it to extract from case array
-            sample, params = jax_op(sample_pred, sample_cases, params)
+            sample_pred = jnp.asarray(sample_pred[jnp.newaxis, ...], dtype=self.INT)
+            sample = jnp.take_along_axis(sample_cases, sample_pred, axis=0)
+            assert sample.shape[0] == 1
+            sample = sample[0, ...]
             return sample, key, err, params
         
         return _jax_wrapped_switch
@@ -1297,20 +1537,13 @@ class JaxRDDLCompiler:
         JaxRDDLCompiler._check_num_args(expr, 1)
         arg_prob, = expr.args
         
-        # if probability is non-fluent, always use the exact operation
-        if self.compile_non_fluent_exact and not self.traced.cached_is_fluent(arg_prob):
-            bern_op = self.EXACT_OPS['sampling']['Bernoulli']
-        else:
-            bern_op = self.OPS['sampling']['Bernoulli']
-        jax_op = bern_op(expr.id, init_params)
-        
         # recursively compile arguments
         jax_prob = self._jax(arg_prob, init_params)
         
         def _jax_wrapped_distribution_bernoulli(x, params, key):
             prob, key, err, params = jax_prob(x, params, key)
             key, subkey = random.split(key)
-            sample, params = jax_op(subkey, prob, params)
+            sample = random.bernoulli(subkey, prob)
             out_of_bounds = jnp.logical_not(jnp.all((prob >= 0) & (prob <= 1)))
             err |= (out_of_bounds * ERR)
             return sample, key, err, params
@@ -1322,13 +1555,6 @@ class JaxRDDLCompiler:
         JaxRDDLCompiler._check_num_args(expr, 1)
         arg_rate, = expr.args
         
-        # if rate is non-fluent, always use the exact operation
-        if self.compile_non_fluent_exact and not self.traced.cached_is_fluent(arg_rate):
-            poisson_op = self.EXACT_OPS['sampling']['Poisson']
-        else:
-            poisson_op = self.OPS['sampling']['Poisson']
-        jax_op = poisson_op(expr.id, init_params)
-        
         # recursively compile arguments
         jax_rate = self._jax(arg_rate, init_params)
         
@@ -1336,7 +1562,7 @@ class JaxRDDLCompiler:
         def _jax_wrapped_distribution_poisson(x, params, key):
             rate, key, err, params = jax_rate(x, params, key)
             key, subkey = random.split(key)
-            sample, params = jax_op(subkey, rate, params)
+            sample = random.poisson(key=subkey, lam=rate, dtype=self.INT)
             out_of_bounds = jnp.logical_not(jnp.all(rate >= 0))
             err |= (out_of_bounds * ERR)
             return sample, key, err, params
@@ -1370,15 +1596,6 @@ class JaxRDDLCompiler:
         JaxRDDLCompiler._check_num_args(expr, 2)
         arg_trials, arg_prob = expr.args
 
-        # if prob is non-fluent, always use the exact operation
-        if self.compile_non_fluent_exact \
-        and not self.traced.cached_is_fluent(arg_trials) \
-        and not self.traced.cached_is_fluent(arg_prob):
-            bin_op = self.EXACT_OPS['sampling']['Binomial']
-        else:
-            bin_op = self.OPS['sampling']['Binomial']
-        jax_op = bin_op(expr.id, init_params)
-
         jax_trials = self._jax(arg_trials, init_params)
         jax_prob = self._jax(arg_prob, init_params)
 
@@ -1387,7 +1604,10 @@ class JaxRDDLCompiler:
             trials, key, err2, params = jax_trials(x, params, key)       
             prob, key, err1, params = jax_prob(x, params, key)
             key, subkey = random.split(key)
-            sample, params = jax_op(subkey, trials, prob, params)
+            trials = jnp.asarray(trials, dtype=self.REAL)
+            prob = jnp.asarray(prob, dtype=self.REAL)
+            sample = random.binomial(key=subkey, n=trials, p=prob, dtype=self.REAL)
+            sample = jnp.asarray(sample, dtype=self.INT)
             out_of_bounds = jnp.logical_not(jnp.all(
                 (prob >= 0) & (prob <= 1) & (trials >= 0)))
             err = err1 | err2 | (out_of_bounds * ERR)
@@ -1400,15 +1620,6 @@ class JaxRDDLCompiler:
         JaxRDDLCompiler._check_num_args(expr, 2)
         arg_trials, arg_prob = expr.args
 
-        # if prob is non-fluent, always use the exact operation
-        if self.compile_non_fluent_exact \
-        and not self.traced.cached_is_fluent(arg_trials) \
-        and not self.traced.cached_is_fluent(arg_prob):
-            negbin_op = self.EXACT_OPS['sampling']['NegativeBinomial']
-        else:
-            negbin_op = self.OPS['sampling']['NegativeBinomial']
-        jax_op = negbin_op(expr.id, init_params)
-
         jax_trials = self._jax(arg_trials, init_params)
         jax_prob = self._jax(arg_prob, init_params)
         
@@ -1417,7 +1628,10 @@ class JaxRDDLCompiler:
             trials, key, err2, params = jax_trials(x, params, key)       
             prob, key, err1, params = jax_prob(x, params, key)
             key, subkey = random.split(key)
-            sample, params = jax_op(subkey, trials, prob, params)
+            trials = jnp.asarray(trials, dtype=self.REAL)
+            prob = jnp.asarray(prob, dtype=self.REAL)
+            dist = tfp.distributions.NegativeBinomial(total_count=trials, probs=1. - prob)
+            sample = jnp.asarray(dist.sample(seed=subkey), dtype=self.INT)
             out_of_bounds = jnp.logical_not(jnp.all(
                 (prob >= 0) & (prob <= 1) & (trials > 0)))
             err = err1 | err2 | (out_of_bounds * ERR)
@@ -1450,20 +1664,13 @@ class JaxRDDLCompiler:
         JaxRDDLCompiler._check_num_args(expr, 1)        
         arg_prob, = expr.args
         
-        # if prob is non-fluent, always use the exact operation
-        if self.compile_non_fluent_exact and not self.traced.cached_is_fluent(arg_prob):
-            geom_op = self.EXACT_OPS['sampling']['Geometric']
-        else:
-            geom_op = self.OPS['sampling']['Geometric']
-        jax_op = geom_op(expr.id, init_params)
-        
         # recursively compile arguments        
         jax_prob = self._jax(arg_prob, init_params)
         
         def _jax_wrapped_distribution_geometric(x, params, key):
             prob, key, err, params = jax_prob(x, params, key)
             key, subkey = random.split(key)
-            sample, params = jax_op(subkey, prob, params)
+            sample = random.geometric(key=subkey, p=prob, dtype=self.INT)
             out_of_bounds = jnp.logical_not(jnp.all((prob >= 0) & (prob <= 1)))
             err |= (out_of_bounds * ERR)
             return sample, key, err, params
@@ -1638,80 +1845,70 @@ class JaxRDDLCompiler:
     # random variables with enum support
     # ===========================================================================
     
-    def _jax_discrete(self, expr, init_params, unnorm):
-        NORMAL = JaxRDDLCompiler.ERROR_CODES['NORMAL']
+    @staticmethod
+    def _jax_update_discrete_oob_error(err, prob):
         ERR = JaxRDDLCompiler.ERROR_CODES['INVALID_PARAM_DISCRETE']
-        ordered_args = self.traced.cached_sim_info(expr)
-        
-        # if all probabilities are non-fluent, then always sample exact
-        has_fluent_arg = any(self.traced.cached_is_fluent(arg) 
-                             for arg in ordered_args)
-        if self.compile_non_fluent_exact and not has_fluent_arg:
-            discrete_op = self.EXACT_OPS['sampling']['Discrete']
-        else:
-            discrete_op = self.OPS['sampling']['Discrete']
-        jax_op = discrete_op(expr.id, init_params)
-        
-        # compile probability expressions
-        jax_probs = [self._jax(arg, init_params) for arg in ordered_args]
-        
-        def _jax_wrapped_distribution_discrete(x, params, key):
-            
-            # sample case probabilities and normalize as needed
-            error = NORMAL
+        out_of_bounds = jnp.logical_not(jnp.logical_and(
+            jnp.all(prob >= 0),
+            jnp.allclose(jnp.sum(prob, axis=-1), 1.0)
+        ))
+        error = err | (out_of_bounds * ERR)
+        return error
+    
+    def _jax_discrete_prob(self, jax_probs, unnormalized):
+        def _jax_wrapped_calc_discrete_prob(x, key):
+
+            # calculate probability expressions
+            error = JaxRDDLCompiler.ERROR_CODES['NORMAL']
             prob = [None] * len(jax_probs)
             for (i, jax_prob) in enumerate(jax_probs):
                 prob[i], key, error_pdf, params = jax_prob(x, params, key)
                 error |= error_pdf
             prob = jnp.stack(prob, axis=-1)
-            if unnorm:
+
+            # normalize them if required
+            if unnormalized:
                 normalizer = jnp.sum(prob, axis=-1, keepdims=True)
                 prob = prob / normalizer
-            
-            # dispatch to sampling subroutine
+            return prob, error, key
+        return _jax_wrapped_calc_discrete_prob
+    
+    def _jax_discrete(self, expr, init_params, unnorm):
+        ordered_args = self.traced.cached_sim_info(expr)
+        jax_probs = [self._jax(arg, init_params) for arg in ordered_args]
+        prob_fn = self._jax_discrete_prob(jax_probs, unnorm)
+        
+        def _jax_wrapped_distribution_discrete(x, params, key):
+            prob, error, key = prob_fn(x, key)
             key, subkey = random.split(key)
-            sample, params = jax_op(subkey, prob, params)
-            out_of_bounds = jnp.logical_not(jnp.logical_and(
-                jnp.all(prob >= 0),
-                jnp.allclose(jnp.sum(prob, axis=-1), 1.0)
-            ))
-            error |= (out_of_bounds * ERR)
+            sample = random.categorical(key=subkey, logits=jnp.log(prob), axis=-1)
+            error = JaxRDDLCompiler._jax_update_discrete_oob_error(error, prob)
             return sample, key, error, params
         
         return _jax_wrapped_distribution_discrete
-    
+
+    @staticmethod
+    def _jax_discrete_pvar_prob(jax_probs, unnormalized):
+        def _jax_wrapped_calc_discrete_prob(x, key):
+            prob, key, error, params = jax_probs(x, params, key)
+            if unnormalized:
+                normalizer = jnp.sum(prob, axis=-1, keepdims=True)
+                prob = prob / normalizer
+            return prob, error, key
+        return _jax_wrapped_calc_discrete_prob
+
     def _jax_discrete_pvar(self, expr, init_params, unnorm):
-        ERR = JaxRDDLCompiler.ERROR_CODES['INVALID_PARAM_DISCRETE']
         JaxRDDLCompiler._check_num_args(expr, 2)
         _, args = expr.args
         arg, = args
-        
-        # if probabilities are non-fluent, then always sample exact
-        if self.compile_non_fluent_exact and not self.traced.cached_is_fluent(arg):
-            discrete_op = self.EXACT_OPS['sampling']['Discrete']
-        else:
-            discrete_op = self.OPS['sampling']['Discrete']
-        jax_op = discrete_op(expr.id, init_params)
-        
-        # compile probability function
         jax_probs = self._jax(arg, init_params)
+        prob_fn = self._jax_discrete_pvar_prob(jax_probs, unnorm)
 
         def _jax_wrapped_distribution_discrete_pvar(x, params, key):
-            
-            # sample probabilities
-            prob, key, error, params = jax_probs(x, params, key)
-            if unnorm:
-                normalizer = jnp.sum(prob, axis=-1, keepdims=True)
-                prob = prob / normalizer
-            
-            # dispatch to sampling subroutine
+            prob, error, key = prob_fn(x, key)
             key, subkey = random.split(key)
-            sample, params = jax_op(subkey, prob, params)
-            out_of_bounds = jnp.logical_not(jnp.logical_and(
-                jnp.all(prob >= 0),
-                jnp.allclose(jnp.sum(prob, axis=-1), 1.0)
-            ))
-            error |= (out_of_bounds * ERR)
+            sample = random.categorical(key=subkey, logits=jnp.log(prob), axis=-1)
+            error = JaxRDDLCompiler._jax_update_discrete_oob_error(error, prob)
             return sample, key, error, params
         
         return _jax_wrapped_distribution_discrete_pvar
@@ -1869,8 +2066,7 @@ class JaxRDDLCompiler:
             return self._jax_matrix_cholesky(expr, init_params)
         else:
             raise RDDLNotImplementedError(
-                f'Matrix operation {op} is not supported.\n' + 
-                print_stack_trace(expr))
+                f'Matrix operation {op} is not supported.\n' + print_stack_trace(expr))
     
     def _jax_matrix_det(self, expr, init_params):
         * _, arg = expr.args

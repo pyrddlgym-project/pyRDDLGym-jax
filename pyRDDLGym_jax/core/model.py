@@ -16,8 +16,7 @@ import optax
 
 from pyRDDLGym.core.compiler.model import RDDLLiftedModel
 
-from pyRDDLGym_jax.core.logic import Logic, ExactLogic
-from pyRDDLGym_jax.core.planner import JaxRDDLCompilerWithGrad
+from pyRDDLGym_jax.core.logic import JaxRDDLCompilerWithGrad
 
 Kwargs = Dict[str, Any]
 State = Dict[str, np.ndarray]
@@ -96,11 +95,11 @@ class JaxModelLearner:
                  optimizer_kwargs: Optional[Kwargs]=None,
                  initializer: initializers.Initializer = initializers.normal(),
                  wrap_non_bool: bool=True,
-                 use64bit: bool=False,
                  bool_fluent_loss: LossFunction=binary_cross_entropy(),
                  real_fluent_loss: LossFunction=mean_squared_error(),
                  int_fluent_loss: LossFunction=mean_squared_error(),
-                 logic: Logic=ExactLogic(),
+                 compiler: JaxRDDLCompilerWithGrad=JaxRDDLCompilerWithGrad,
+                 compiler_kwargs: Optional[Kwargs]=None,
                  model_params_reduction: Callable=lambda x: x[0]) -> None:
         '''Creates a new gradient-based algorithm for inferring unknown non-fluents
         in a RDDL domain from a data set or stream coming from the real environment.
@@ -117,12 +116,11 @@ class JaxModelLearner:
         :param initializer: how to initialize non-fluents
         :param wrap_non_bool: whether to wrap non-boolean trainable parameters to satisfy
         required ranges as specified in param_ranges (use a projected gradient otherwise)
-        :param use64bit: whether to perform arithmetic in 64 bit
         :param bool_fluent_loss: loss function to optimize for bool-valued fluents
         :param real_fluent_loss: loss function to optimize for real-valued fluents
         :param int_fluent_loss: loss function to optimize for int-valued fluents
-        :param logic: a subclass of Logic for mapping exact mathematical
-        operations to their differentiable counterparts 
+        :param compiler: compiler instance to use for planning
+        :param compiler_kwargs: compiler instances kwargs for initialization
         :param model_params_reduction: how to aggregate updated model_params across runs
         in the batch (defaults to selecting the first element's parameters in the batch)
         '''
@@ -135,11 +133,9 @@ class JaxModelLearner:
         self.optimizer_kwargs = optimizer_kwargs
         self.initializer = initializer
         self.wrap_non_bool = wrap_non_bool
-        self.use64bit = use64bit
         self.bool_fluent_loss = bool_fluent_loss
         self.real_fluent_loss = real_fluent_loss
         self.int_fluent_loss = int_fluent_loss
-        self.logic = logic
         self.model_params_reduction = model_params_reduction
 
         # validate param_ranges
@@ -166,6 +162,11 @@ class JaxModelLearner:
         self.optimizer = optax.chain(*pipeline)
 
         # build the computation graph
+        if compiler_kwargs is None:
+            compiler_kwargs = {}
+        self.compiler_kwargs = compiler_kwargs
+        self.compiler_type = compiler
+
         self.step_fn = self._jax_compile_rddl()
         self.map_fn = self._jax_map()
         self.loss_fn = self._jax_loss(map_fn=self.map_fn, step_fn=self.step_fn)
@@ -179,12 +180,9 @@ class JaxModelLearner:
     def _jax_compile_rddl(self):
 
         # compile the RDDL model
-        self.compiled = JaxRDDLCompilerWithGrad(
+        self.compiled = self.compiler_type(
             rddl=self.rddl,
-            logic=self.logic,
-            use64bit=self.use64bit,
-            compile_non_fluent_exact=False,
-            print_warnings=True
+            **self.compiler_kwargs
         )
         self.compiled.compile(log_jax_expr=True, heading='RELAXED MODEL')
 
