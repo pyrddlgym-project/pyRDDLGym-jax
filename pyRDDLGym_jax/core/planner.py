@@ -2641,8 +2641,8 @@ r"""
 
         # error handlers (to avoid spam messaging)
         policy_constraint_msg_shown = False
-        jax_train_msg_shown = False
-        jax_test_msg_shown = False
+        jax_train_msg_shown = set()
+        jax_test_msg_shown = set()
         
         # ======================================================================
         # MAIN TRAINING LOOP BEGINS
@@ -2768,30 +2768,20 @@ r"""
             if progress_bar is not None:
 
                 # train model
-                if not jax_train_msg_shown:
-                    messages = set()
-                    for error_code in np.unique(train_log['error']):
-                        messages.update(JaxRDDLCompiler.get_error_messages(error_code))
-                    if messages:
-                        messages = '\n    '.join(messages)
-                        progress_bar.write(termcolor.colored(
-                            f'[FAIL] Compiler encountered the following '
-                            f'error(s) in the training model:\n    {messages}', 'red'
-                        ))  
-                        jax_train_msg_shown = True
+                for error_code in np.unique(train_log['error']):
+                    if error_code not in jax_train_msg_shown:
+                        jax_train_msg_shown.add(error_code)
+                        for message in JaxRDDLCompiler.get_error_messages(error_code):
+                            progress_bar.write(termcolor.colored(
+                                '[FAIL] Training model: ' + message, 'red'))
 
                 # test model
-                if not jax_test_msg_shown:
-                    messages = set()
-                    for error_code in np.unique(test_log['error']):
-                        messages.update(JaxRDDLCompiler.get_error_messages(error_code))
-                    if messages:
-                        messages = '\n    '.join(messages)
-                        progress_bar.write(termcolor.colored(
-                            f'[FAIL] Compiler encountered the following '
-                            f'error(s) in the testing model:\n    {messages}', 'red'
-                        ))    
-                        jax_test_msg_shown = True      
+                for error_code in np.unique(test_log['error']):
+                    if error_code not in jax_test_msg_shown:
+                        jax_test_msg_shown.add(error_code)
+                        for message in JaxRDDLCompiler.get_error_messages(error_code):
+                            progress_bar.write(termcolor.colored(
+                                '[FAIL] Testing model: ' + message, 'red'))
         
             # reached computation budget
             elapsed = time.time() - start_time - elapsed_outside_loop
