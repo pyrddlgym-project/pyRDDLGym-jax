@@ -29,7 +29,6 @@
 #
 # ***********************************************************************
 
-import traceback
 import termcolor
 from typing import Any, Dict, Optional, Set, Tuple, Union
 
@@ -39,18 +38,7 @@ import jax.numpy as jnp
 import jax.random as random
 import jax.scipy as scipy 
 
-from pyRDDLGym.core.debug.exception import raise_warning
-
 from pyRDDLGym_jax.core.compiler import JaxRDDLCompiler
-
-# more robust approach - if user does not have this or broken try to continue
-try:
-    from tensorflow_probability.substrates import jax as tfp
-except Exception:
-    raise_warning('Failed to import tensorflow-probability: '
-                  'compilation of some probability distributions will fail.', 'red')
-    traceback.print_exc()
-    tfp = None
 
 
 def enumerate_literals(shape: Tuple[int, ...], axis: int, dtype: type=jnp.int32) -> jnp.ndarray:
@@ -95,10 +83,10 @@ class JaxRDDLCompilerWithGrad(JaxRDDLCompiler):
             if not np.issubdtype(np.result_type(values), np.floating):
                 pvars_cast.add(var)
         if self.print_warnings and pvars_cast:
-            message = termcolor.colored(
-                f'[INFO] JAX gradient compiler will cast p-vars {pvars_cast} to float.', 
-                'green')
-            print(message)
+            print(termcolor.colored(
+                f'[INFO] JAX gradient compiler will cast pvars {pvars_cast} to float.', 
+                'dark_grey'
+            ))
         
     def get_kwargs(self) -> Dict[str, Any]:
         kwargs = super().get_kwargs()
@@ -128,15 +116,15 @@ class JaxRDDLCompilerWithGrad(JaxRDDLCompiler):
                     jax_cpfs[cpf] = self._jax_stop_grad(jax_cpfs[cpf])
                     
         if self.print_warnings and cpfs_cast:
-            message = termcolor.colored(
+            print(termcolor.colored(
                 f'[INFO] JAX gradient compiler will cast CPFs {cpfs_cast} to float.', 
-                'green') 
-            print(message)
+                'dark_grey'
+            ))
         if self.print_warnings and self.cpfs_without_grad:
-            message = termcolor.colored(
+            print(termcolor.colored(
                 f'[INFO] Gradients will not flow through CPFs {self.cpfs_without_grad}.', 
-                'green')    
-            print(message)
+                'dark_grey'
+            ))
  
         return jax_cpfs
     
@@ -636,6 +624,7 @@ class SoftRound(JaxRDDLCompilerWithGrad):
 # ===============================================================================
 
 class LinearIfElse(JaxRDDLCompilerWithGrad):
+    '''Approximate if else statement as a linear combination.'''
 
     def __init__(self, *args, **kwargs) -> None:
         super(LinearIfElse, self).__init__(*args, **kwargs)
@@ -722,7 +711,6 @@ class SoftmaxSwitch(JaxRDDLCompilerWithGrad):
             softcase = jax.nn.softmax(params[id_] * proximity, axis=0)
             sample = jnp.sum(sample_cases * softcase, axis=0)
             return sample, key, err, params
-        
         return _jax_wrapped_switch_softmax
     
     
@@ -768,7 +756,6 @@ class ReparameterizedGeometric(JaxRDDLCompilerWithGrad):
             out_of_bounds = jnp.logical_not(jnp.all((prob >= 0) & (prob <= 1)))
             err |= (out_of_bounds * ERR)
             return sample, key, err, params
-        
         return _jax_wrapped_distribution_geometric_reparam
 
 
@@ -800,7 +787,6 @@ class DeterminizedGeometric(JaxRDDLCompilerWithGrad):
             out_of_bounds = jnp.logical_not(jnp.all((prob >= 0) & (prob <= 1)))
             err |= (out_of_bounds * ERR)
             return sample, key, err, params
-        
         return _jax_wrapped_distribution_geometric_determinized
 
 
@@ -842,7 +828,6 @@ class ReparameterizedSigmoidBernoulli(JaxRDDLCompilerWithGrad):
             out_of_bounds = jnp.logical_not(jnp.all((prob >= 0) & (prob <= 1)))
             err |= (out_of_bounds * ERR)
             return sample, key, err, params
-        
         return _jax_wrapped_distribution_bernoulli_reparam
 
 
@@ -886,7 +871,6 @@ class GumbelSoftmaxBernoulli(JaxRDDLCompilerWithGrad):
             out_of_bounds = jnp.logical_not(jnp.all((prob >= 0) & (prob <= 1)))
             err |= (out_of_bounds * ERR)
             return sample, key, err, params
-        
         return _jax_wrapped_distribution_bernoulli_gumbel_softmax
     
 
@@ -963,7 +947,6 @@ class GumbelSoftmaxDiscrete(JaxRDDLCompilerWithGrad):
             sample = SoftmaxArgmax.soft_argmax(sample, w=w, axes=-1)
             err = JaxRDDLCompilerWithGrad._jax_update_discrete_oob_error(err, prob)
             return sample, key, err, params
-        
         return _jax_wrapped_distribution_discrete_gumbel_softmax
     
     def _jax_discrete_pvar(self, expr, init_params, unnorm):
@@ -991,7 +974,6 @@ class GumbelSoftmaxDiscrete(JaxRDDLCompilerWithGrad):
             sample = SoftmaxArgmax.soft_argmax(sample, w=w, axes=-1)
             err = JaxRDDLCompilerWithGrad._jax_update_discrete_oob_error(err, prob)
             return sample, key, err, params
-        
         return _jax_wrapped_distribution_discrete_pvar_gumbel_softmax
 
 
@@ -1022,7 +1004,6 @@ class DeterminizedDiscrete(JaxRDDLCompilerWithGrad):
             sample = jnp.sum(literals * prob, axis=-1)
             err = JaxRDDLCompilerWithGrad._jax_update_discrete_oob_error(err, prob)
             return sample, key, err, params
-        
         return _jax_wrapped_distribution_discrete_determinized
     
     def _jax_discrete_pvar(self, expr, init_params, unnorm):
@@ -1045,7 +1026,6 @@ class DeterminizedDiscrete(JaxRDDLCompilerWithGrad):
             sample = jnp.sum(literals * prob, axis=-1)
             err = JaxRDDLCompilerWithGrad._jax_update_discrete_oob_error(err, prob)
             return sample, key, err, params
-        
         return _jax_wrapped_distribution_discrete_pvar_determinized
 
 
@@ -1139,7 +1119,6 @@ class GumbelSoftmaxBinomial(JaxRDDLCompilerWithGrad):
                 (prob >= 0) & (prob <= 1) & (trials >= 0)))
             err = err1 | err2 | (out_of_bounds * ERR)
             return sample, key, err, params
-        
         return _jax_wrapped_distribution_binomial_gumbel_softmax
     
 
@@ -1177,7 +1156,6 @@ class DeterminizedBinomial(JaxRDDLCompilerWithGrad):
                 (prob >= 0) & (prob <= 1) & (trials >= 0)))
             err = err1 | err2 | (out_of_bounds * ERR)
             return sample, key, err, params
-        
         return _jax_wrapped_distribution_binomial_determinized    
 
 
@@ -1250,7 +1228,6 @@ class ExponentialPoisson(JaxRDDLCompilerWithGrad):
             out_of_bounds = jnp.logical_not(jnp.all(rate >= 0))
             err |= (out_of_bounds * ERR)
             return sample, key, err, params
-        
         return _jax_wrapped_distribution_poisson_exponential
 
     def _jax_negative_binomial(self, expr, init_params):
@@ -1285,7 +1262,6 @@ class ExponentialPoisson(JaxRDDLCompilerWithGrad):
                 (prob >= 0) & (prob <= 1) & (trials > 0)))
             err = err1 | err2 | (out_of_bounds * ERR)
             return sample, key, err, params
-        
         return _jax_wrapped_distribution_negative_binomial_exponential 
 
 
@@ -1357,7 +1333,6 @@ class GumbelSoftmaxPoisson(JaxRDDLCompilerWithGrad):
             out_of_bounds = jnp.logical_not(jnp.all(rate >= 0))
             err |= (out_of_bounds * ERR)
             return sample, key, err, params
-        
         return _jax_wrapped_distribution_poisson_gumbel_softmax
     
     def _jax_negative_binomial(self, expr, init_params):
@@ -1393,7 +1368,6 @@ class GumbelSoftmaxPoisson(JaxRDDLCompilerWithGrad):
                 (prob >= 0) & (prob <= 1) & (trials > 0)))
             err = err1 | err2 | (out_of_bounds * ERR)
             return sample, key, err, params
-        
         return _jax_wrapped_distribution_negative_binomial_gumbel_softmax 
 
 
@@ -1425,7 +1399,6 @@ class DeterminizedPoisson(JaxRDDLCompilerWithGrad):
             out_of_bounds = jnp.logical_not(jnp.all(rate >= 0))
             err |= (out_of_bounds * ERR)
             return sample, key, err, params
-        
         return _jax_wrapped_distribution_poisson_determinized
     
     def _jax_negative_binomial(self, expr, init_params):
@@ -1453,7 +1426,6 @@ class DeterminizedPoisson(JaxRDDLCompilerWithGrad):
                 (prob >= 0) & (prob <= 1) & (trials > 0)))
             err = err1 | err2 | (out_of_bounds * ERR)
             return sample, key, err, params
-        
         return _jax_wrapped_distribution_negative_binomial_determinized    
         
 
