@@ -1090,7 +1090,7 @@ class JaxRDDLCompiler:
         return self._jax_unary_helper(expr, init_params, jnp.abs, at_least_int=True)
     
     def _jax_sgn(self, expr, init_params):
-        return self._jax_unary_helper(expr, init_params, jnp.sgn, at_least_int=True)
+        return self._jax_unary_helper(expr, init_params, jnp.sign, at_least_int=True)
     
     def _jax_round(self, expr, init_params):
         return self._jax_unary_helper(expr, init_params, jnp.round, at_least_int=True)
