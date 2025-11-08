@@ -79,7 +79,7 @@ try:
     from pyRDDLGym_jax.core.visualization import JaxPlannerDashboard
 except Exception:
     raise_warning('Failed to load the dashboard visualization tool: '
-                  'please make sure you have installed the required packages.', 'red')
+                  'ensure all prerequisite packages are installed.', 'red')
     traceback.print_exc()
     JaxPlannerDashboard = None
 
@@ -445,7 +445,7 @@ class JaxPlan(metaclass=ABCMeta):
             if compiled.print_warnings:
                 print(termcolor.colored(
                     f'[INFO] Bounds of action-fluent <{name}> set to {bounds[name]}.', 
-                    'green'
+                    'dark_grey'
                 ))
 
         return shapes, bounds, bounds_safe, cond_lists
@@ -502,7 +502,7 @@ class JaxStraightLinePlan(JaxPlan):
     def __str__(self) -> str:
         bounds = '\n        '.join(
             map(lambda kv: f'{kv[0]}: {kv[1]}', self.bounds.items()))
-        return (f'policy hyper-parameters:\n'
+        return (f'[INFO] policy hyper-parameters:\n'
                 f'    initializer={self._initializer_base}\n'
                 f'    constraint-sat strategy (simple):\n'
                 f'        parsed_action_bounds =\n        {bounds}\n'
@@ -531,9 +531,9 @@ class JaxStraightLinePlan(JaxPlan):
         use_constraint_satisfaction = allowed_actions < bool_action_count        
         if compiled.print_warnings and use_constraint_satisfaction: 
             print(termcolor.colored(
-                f'[INFO] SLP will use projected gradient to satisfy '
-                f'max_nondef_actions since total boolean actions '
-                f'{bool_action_count} > max_nondef_actions {allowed_actions}.', 'green'
+                f'[INFO] Number of boolean actions {bool_action_count} '
+                f'> max_nondef_actions {allowed_actions}: enabling projected gradient to '
+                f'satisfy constraints on action-fluents.', 'dark_grey'
             ))
         
         # get the noop action values
@@ -911,7 +911,7 @@ class JaxDeepReactivePolicy(JaxPlan):
     def __str__(self) -> str:
         bounds = '\n        '.join(
             map(lambda kv: f'{kv[0]}: {kv[1]}', self.bounds.items()))
-        return (f'policy hyper-parameters:\n'
+        return (f'[INFO] policy hyper-parameters:\n'
                 f'    topology     ={self._topology}\n'
                 f'    activation_fn={self._activations[0].__name__}\n'
                 f'    initializer  ={type(self._initializer_base).__name__}\n'
@@ -1344,9 +1344,8 @@ class GaussianPGPE(PGPE):
             sigma_optimizer = optax.inject_hyperparams(optimizer)(**optimizer_kwargs_sigma)
         except Exception as _:
             print(termcolor.colored(
-                '[FAIL] Failed to inject hyperparameters into PGPE optimizer, '
-                'rolling back to safer method: '
-                'kl-divergence constraint will be disabled.', 'red'
+                '[WARN] Could not inject hyperparameters into PGPE optimizer: '
+                'kl-divergence constraint will be disabled.', 'yellow'
             ))
             mu_optimizer = optimizer(**optimizer_kwargs_mu)   
             sigma_optimizer = optimizer(**optimizer_kwargs_sigma) 
@@ -1355,7 +1354,7 @@ class GaussianPGPE(PGPE):
         self.max_kl = max_kl_update
     
     def __str__(self) -> str:
-        return (f'PGPE hyper-parameters:\n'
+        return (f'[INFO] PGPE hyper-parameters:\n'
                 f'    method             ={self.__class__.__name__}\n'
                 f'    batch_size         ={self.batch_size}\n'
                 f'    init_sigma         ={self.init_sigma}\n'
@@ -1859,9 +1858,8 @@ class JaxBackpropPlanner:
             optimizer = optax.inject_hyperparams(optimizer)(**optimizer_kwargs)
         except Exception as _:
             print(termcolor.colored(
-                '[FAIL] Failed to inject hyperparameters into JaxPlan optimizer, '
-                'rolling back to safer method: please note that runtime modification of '
-                'hyperparameters will be disabled.', 'red'
+                '[WARN] Could not inject hyperparameters into JaxPlan optimizer: '
+                'runtime modification of hyperparameters will be disabled.', 'yellow'
             ))
             optimizer = optimizer(**optimizer_kwargs)   
         
@@ -1911,33 +1909,18 @@ class JaxBackpropPlanner:
     def summarize_system() -> str:
         '''Returns a string containing information about the system, Python version 
         and jax-related packages that are relevant to the current planner.
-        '''
-        try:
-            jaxlib_version = jax._src.lib.version_str
-        except Exception as _:
-            jaxlib_version = 'N/A'
-        try:
-            devices_short = ', '.join(
-                map(str, jax._src.xla_bridge.devices())).replace('\n', '')
-        except Exception as _:
-            devices_short = 'N/A'
-        LOGO = \
-r"""
-   __   ______   __  __   ______  __       ______   __   __    
-  /\ \ /\  __ \ /\_\_\_\ /\  == \/\ \     /\  __ \ /\ "-.\ \   
- _\_\ \\ \  __ \\/_/\_\/_\ \  _-/\ \ \____\ \  __ \\ \ \-.  \  
-/\_____\\ \_\ \_\ /\_\/\_\\ \_\   \ \_____\\ \_\ \_\\ \_\\"\_\ 
-\/_____/ \/_/\/_/ \/_/\/_/ \/_/    \/_____/ \/_/\/_/ \/_/ \/_/ 
-"""
-                   
-        return (f'\n'
-                f'{LOGO}\n'
-                f'Version {__version__}\n' 
-                f'Python {sys.version}\n'
-                f'jax {jax.version.__version__}, jaxlib {jaxlib_version}, '
-                f'optax {optax.__version__}, haiku {hk.__version__}, '
-                f'numpy {np.__version__}\n'
-                f'devices: {devices_short}\n')
+        '''         
+        devices = jax.devices()
+        if devices:
+            default_device = devices[0]
+        else:
+            default_device = 'n/a'
+
+        return termcolor.colored(
+            '\n'
+            f'Starting JaxPlan v{__version__} '
+            f'on device {default_device.platform}{default_device.id}\n', attrs=['bold']
+        )
     
     def summarize_relaxations(self) -> str:
         '''Returns a summary table containing all non-differentiable operators
@@ -1946,25 +1929,28 @@ r"""
         result = ''
         overriden_ops_info = self.compiled.overriden_ops_info()
         if overriden_ops_info:
-            result += ('Some RDDL operations are non-differentiable '
+            result += ('[INFO] Some RDDL operations are non-differentiable '
                        'and will be approximated as follows:' + '\n')
             for (class_, op_to_ids_dict) in overriden_ops_info.items():
                 result += f'    {class_}:\n'
                 for (op, ids) in op_to_ids_dict.items():
-                    result += f'        {op} [{len(ids)} occurences]\n'
+                    result += (
+                        f'        {op} ' + 
+                        termcolor.colored(f'[{len(ids)} occurences]\n', 'dark_grey')
+                    )
         return result
         
     def summarize_hyperparameters(self) -> str:
         '''Returns a string summarizing the hyper-parameters of the current planner 
         instance.
         '''
-        result = (f'objective hyper-parameters:\n'
+        result = (f'[INFO] objective hyper-parameters:\n'
                   f'    utility_fn        ={self.utility.__name__}\n'
                   f'    utility args      ={self.utility_kwargs}\n'
                   f'    use_symlog        ={self.use_symlog_reward}\n'
                   f'    lookahead         ={self.horizon}\n'
                   f'    user_action_bounds={self._action_bounds}\n'
-                  f'optimizer hyper-parameters:\n'
+                  f'[INFO] optimizer hyper-parameters:\n'
                   f'    optimizer         ={self.optimizer_name}\n'
                   f'    optimizer args    ={self.optimizer_kwargs}\n'
                   f'    clip_gradient     ={self.clip_grad}\n'
@@ -2335,8 +2321,8 @@ r"""
         if policy_hyperparams is None:
             if self.print_warnings:
                 print(termcolor.colored(
-                    '[WARN] policy_hyperparams is not set, setting 1.0 for '
-                    'all action-fluents which could be suboptimal.', 'yellow'
+                    '[WARN] policy_hyperparams is not set: setting values to 1.0 for '
+                    'all action-fluents, which could be suboptimal.', 'yellow'
                 ))
             policy_hyperparams = {action: 1. for action in self.rddl.action_fluents}
                 
@@ -2489,7 +2475,7 @@ r"""
             if self.print_warnings:
                 print(termcolor.colored(
                     '[WARN] Dashboard is unavailable if parallel_updates is not None: '
-                    'setting dashboard to None.', 'yellow'
+                    'disabling dashboard.', 'yellow'
                 ))
             dashboard = None
 
@@ -2498,7 +2484,7 @@ r"""
             key = random.PRNGKey(round(time.time() * 1000))
             if self.print_warnings:
                 print(termcolor.colored(
-                    '[WARN] PRNG key is not set, setting from clock.', 'yellow'
+                    '[WARN] PRNG key is not set: setting from clock.', 'yellow'
                 ))
         dash_key = key[1].item()
             
@@ -2506,18 +2492,13 @@ r"""
         if policy_hyperparams is None:
             if self.print_warnings:
                 print(termcolor.colored(
-                    '[WARN] policy_hyperparams is not set, setting 1.0 for '
-                    'all action-fluents which could be suboptimal.', 'yellow'
+                    '[WARN] policy_hyperparams is not set: setting values to 1.0 for '
+                    'all action-fluents, which could be suboptimal.', 'yellow'
                 ))
             policy_hyperparams = {action: 1. for action in self.rddl.action_fluents}
         
         # if policy_hyperparams is a scalar
         elif isinstance(policy_hyperparams, (int, float, np.number)):
-            if self.print_warnings:
-                print(termcolor.colored(
-                    f'[INFO] policy_hyperparams is {policy_hyperparams}, '
-                    f'setting this value for all action-fluents.', 'green'
-                ))
             policy_hyperparams = {action: float(policy_hyperparams) 
                                   for action in self.rddl.action_fluents}
         
@@ -2527,8 +2508,8 @@ r"""
                 if action not in policy_hyperparams:
                     if self.print_warnings:
                         print(termcolor.colored(
-                            f'[WARN] policy_hyperparams[{action}] is not set, '
-                            f'setting 1.0 for missing action-fluents '
+                            f'[WARN] policy_hyperparams[{action}] is not set: '
+                            f'setting values to 1.0 for missing action-fluents, '
                             f'which could be suboptimal.', 'yellow'
                         ))
                     policy_hyperparams[action] = 1.
@@ -2545,20 +2526,22 @@ r"""
             print(self.summarize_relaxations())
         if print_hyperparams:
             print(self.summarize_hyperparameters())
-            print(f'optimize call hyper-parameters:\n'
-                  f'    PRNG key           ={key}\n'
-                  f'    max_iterations     ={epochs}\n'
-                  f'    max_seconds        ={train_seconds}\n'
-                  f'    model_params       ={model_params}\n'
-                  f'    policy_hyper_params={policy_hyperparams}\n'
-                  f'    override_subs_dict ={subs is not None}\n'
-                  f'    provide_param_guess={guess is not None}\n'
-                  f'    test_rolling_window={test_rolling_window}\n' 
-                  f'    dashboard          ={dashboard is not None}\n'
-                  f'    dashboard_id       ={dashboard_id}\n'
-                  f'    print_summary      ={print_summary}\n'
-                  f'    print_progress     ={print_progress}\n'
-                  f'    stopping_rule      ={stopping_rule}\n')
+            print(
+                f'[INFO] optimize call hyper-parameters:\n'
+                f'    PRNG key           ={key}\n'
+                f'    max_iterations     ={epochs}\n'
+                f'    max_seconds        ={train_seconds}\n'
+                f'    model_params       ={model_params}\n'
+                f'    policy_hyper_params={policy_hyperparams}\n'
+                f'    override_subs_dict ={subs is not None}\n'
+                f'    provide_param_guess={guess is not None}\n'
+                f'    test_rolling_window={test_rolling_window}\n' 
+                f'    dashboard          ={dashboard is not None}\n'
+                f'    dashboard_id       ={dashboard_id}\n'
+                f'    print_summary      ={print_summary}\n'
+                f'    print_progress     ={print_progress}\n'
+                f'    stopping_rule      ={stopping_rule}\n'
+            )
         
         # ======================================================================
         # INITIALIZATION OF STATE AND POLICY
@@ -2577,8 +2560,8 @@ r"""
                     added_pvars_to_subs.append(var)
             if self.print_warnings and added_pvars_to_subs:
                 print(termcolor.colored(
-                    f'[INFO] p-variables {added_pvars_to_subs} is not in '
-                    f'provided subs, using their initial values.', 'green'
+                    f'[INFO] p-variable(s) {added_pvars_to_subs} are not in '
+                    f'provided subs: using their initial values.', 'dark_grey'
                 ))
         train_subs, test_subs = self._batched_init_subs(subs)
         
@@ -2861,7 +2844,6 @@ r"""
         # release resources
         if print_progress:
             progress_bar.close()
-            print()
         
         # summarize and test for convergence
         if print_summary:
@@ -2870,13 +2852,15 @@ r"""
                 last_iter_improve, -np.min(train_loss), -np.min(test_loss_smooth), 
                 -best_loss, grad_norm
             )
-            print(f'Summary of optimization:\n'
-                  f'    status        ={status}\n'
-                  f'    time          ={elapsed:.3f} sec.\n'
-                  f'    iterations    ={it}\n'
-                  f'    best objective={-best_loss:.6f}\n'
-                  f'    best grad norm={grad_norm}\n'
-                  f'diagnosis: {diagnosis}\n')
+            print(
+                f'[INFO] Summary of optimization:\n'
+                f'    status        ={status}\n'
+                f'    time          ={elapsed:.2f} seconds\n'
+                f'    iterations    ={it}\n'
+                f'    best objective={-best_loss:.6f}\n'
+                f'    best grad norm={grad_norm}\n'
+                f'diagnosis: {diagnosis}\n'
+            )
     
     def _perform_diagnosis(self, last_iter_improve,
                            train_return, test_return, best_return, grad_norm):
@@ -2944,7 +2928,7 @@ r"""
         :param key: the JAX PRNG key
         :param params: the trainable parameter PyTree of the policy
         :param step: the time step at which decision is made
-        :param subs: the dict of pvariables
+        :param subs: the dict of p-variables
         :param policy_hyperparams: hyper-parameters for the policy/plan, such as
         weights for sigmoid wrapping boolean actions (optional)
         '''
@@ -3122,12 +3106,19 @@ class JaxOnlineController(BaseAgent):
             attempts += 1
             if self.planner.print_warnings:
                 print(termcolor.colored(
-                    f'[WARN] JIT compilation dominated the execution time: '
+                    f'[INFO] JIT compilation dominated the execution time: '
                     f'executing the optimizer again on the traced model '
-                    f'[attempt {attempts}].', 'yellow'
+                    f'[attempt {attempts}].', 'dark_grey'
                 ))
             callback = planner.optimize(
-                key=self.key, guess=self.guess, subs=state, **self.train_kwargs)    
+                key=self.key, guess=self.guess, subs=state, **self.train_kwargs)   
+        if callback['iteration'] <= 1 and self.planner.print_warnings:
+            print(termcolor.colored(
+                f'[FAIL] JIT compilation dominated the execution time and '
+                f'ran out of attempts: increase max_attempts or the training time.', 'red'
+            )) 
+        
+        # use the last callback obtained
         self.callback = callback
         params = callback['best_params']
         if not self.hyperparams_given:
