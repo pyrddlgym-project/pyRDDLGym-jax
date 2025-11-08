@@ -80,7 +80,8 @@ def stable_tanh(x):
 def stable_tanh_jvp(primals, tangents):
     (x,), (x_dot,) = primals, tangents
     t = stable_tanh(x)
-    return t, x_dot * (1.0 - t * t)
+    tangent_out = x_dot * (1.0 - t * t)
+    return t, tangent_out
 
 
 # it seems JAX uses the stability trick already
