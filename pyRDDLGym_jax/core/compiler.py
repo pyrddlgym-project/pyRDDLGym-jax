@@ -1324,29 +1324,6 @@ class JaxRDDLCompiler:
     # random variables
     # ===========================================================================
     
-    # distributions with complete reparameterization support:
-    # KronDelta: complete
-    # DiracDelta: complete
-    # Uniform: complete
-    # Bernoulli: complete (subclass uses Gumbel-softmax)
-    # Normal: complete
-    # Exponential: complete
-    # Geometric: complete
-    # Weibull: complete
-    # Pareto: complete
-    # Gumbel: complete
-    # Laplace: complete
-    # Cauchy: complete
-    # Gompertz: complete
-    # Kumaraswamy: complete
-    # Discrete: complete (subclass uses Gumbel-softmax)
-    # UnnormDiscrete: complete (subclass uses Gumbel-softmax)
-    # Discrete(p): complete (subclass uses Gumbel-softmax)
-    # UnnormDiscrete(p): complete (subclass uses Gumbel-softmax)
-    # Poisson (subclass uses Gumbel-softmax or Poisson process trick)
-    # Binomial (subclass uses Gumbel-softmax or Normal approximation)
-    # NegativeBinomial (subclass uses Poisson-Gamma mixture)
-    
     # distributions which seem to support backpropagation (need more testing):
     # Beta
     # Student
@@ -1821,7 +1798,7 @@ class JaxRDDLCompiler:
         return error
     
     def _jax_discrete_prob(self, jax_probs, unnormalized):
-        def _jax_wrapped_calc_discrete_prob(x, key):
+        def _jax_wrapped_calc_discrete_prob(x, params, key):
 
             # calculate probability expressions
             error = JaxRDDLCompiler.ERROR_CODES['NORMAL']
@@ -1835,7 +1812,7 @@ class JaxRDDLCompiler:
             if unnormalized:
                 normalizer = jnp.sum(prob, axis=-1, keepdims=True)
                 prob = prob / normalizer
-            return prob, error, key
+            return prob, key, error, params
         return _jax_wrapped_calc_discrete_prob
     
     def _jax_discrete(self, expr, init_params, unnorm):
@@ -1844,7 +1821,7 @@ class JaxRDDLCompiler:
         prob_fn = self._jax_discrete_prob(jax_probs, unnorm)
         
         def _jax_wrapped_distribution_discrete(x, params, key):
-            prob, error, key = prob_fn(x, key)
+            prob, key, error, params = prob_fn(x, params, key)
             key, subkey = random.split(key)
             sample = random.categorical(key=subkey, logits=jnp.log(prob), axis=-1)
             error = JaxRDDLCompiler._jax_update_discrete_oob_error(error, prob)
@@ -1853,12 +1830,12 @@ class JaxRDDLCompiler:
 
     @staticmethod
     def _jax_discrete_pvar_prob(jax_probs, unnormalized):
-        def _jax_wrapped_calc_discrete_prob(x, key):
+        def _jax_wrapped_calc_discrete_prob(x, params, key):
             prob, key, error, params = jax_probs(x, params, key)
             if unnormalized:
                 normalizer = jnp.sum(prob, axis=-1, keepdims=True)
                 prob = prob / normalizer
-            return prob, error, key
+            return prob, key, error, params
         return _jax_wrapped_calc_discrete_prob
 
     def _jax_discrete_pvar(self, expr, init_params, unnorm):
@@ -1869,7 +1846,7 @@ class JaxRDDLCompiler:
         prob_fn = self._jax_discrete_pvar_prob(jax_probs, unnorm)
 
         def _jax_wrapped_distribution_discrete_pvar(x, params, key):
-            prob, error, key = prob_fn(x, key)
+            prob, key, error, params = prob_fn(x, params, key)
             key, subkey = random.split(key)
             sample = random.categorical(key=subkey, logits=jnp.log(prob), axis=-1)
             error = JaxRDDLCompiler._jax_update_discrete_oob_error(error, prob)

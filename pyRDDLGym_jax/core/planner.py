@@ -72,7 +72,9 @@ from pyRDDLGym.core.policy import BaseAgent
 from pyRDDLGym_jax import __version__
 from pyRDDLGym_jax.core.compiler import JaxRDDLCompiler
 from pyRDDLGym_jax.core import logic
-from pyRDDLGym_jax.core.logic import JaxRDDLCompilerWithGrad, DefaultJaxRDDLCompilerWithGrad
+from pyRDDLGym_jax.core.logic import (
+    JaxRDDLCompilerWithGrad, DefaultJaxRDDLCompilerWithGrad, stable_sigmoid
+)
 
 # try to load the dash board
 try:
@@ -557,7 +559,7 @@ class JaxStraightLinePlan(JaxPlan):
         def _jax_bool_param_to_action(var, param, hyperparams):
             if wrap_sigmoid:
                 weight = hyperparams[var]
-                return jax.nn.sigmoid(weight * param)
+                return stable_sigmoid(weight * param)
             else:
                 return param 
         
@@ -579,7 +581,7 @@ class JaxStraightLinePlan(JaxPlan):
                 mb, ml, mu, mn = [jnp.asarray(mask, dtype=compiled.REAL) 
                                   for mask in cond_lists[var]]       
                 action = (
-                    mb * (lower + (upper - lower) * jax.nn.sigmoid(param)) + 
+                    mb * (lower + (upper - lower) * stable_sigmoid(param)) + 
                     ml * (lower + (jax.nn.elu(param) + 1.0)) + 
                     mu * (upper - (jax.nn.elu(-param) + 1.0)) + 
                     mn * param
@@ -1063,14 +1065,14 @@ class JaxDeepReactivePolicy(JaxPlan):
                 # project action output to valid box constraints following Bueno et. al.
                 if ranges[var] == 'bool':
                     if not use_constraint_satisfaction:
-                        actions[var] = jax.nn.sigmoid(output)
+                        actions[var] = stable_sigmoid(output)
                 else:
                     if wrap_non_bool:
                         lower, upper = bounds_safe[var]
                         mb, ml, mu, mn = [jnp.asarray(mask, dtype=compiled.REAL) 
                                           for mask in cond_lists[var]]       
                         action = (
-                            mb * (lower + (upper - lower) * jax.nn.sigmoid(output)) + 
+                            mb * (lower + (upper - lower) * stable_sigmoid(output)) + 
                             ml * (lower + (jax.nn.elu(output) + 1.0)) + 
                             mu * (upper - (jax.nn.elu(-output) + 1.0)) + 
                             mn * output
@@ -2759,7 +2761,7 @@ class JaxBackpropPlanner:
                         jax_train_msg_shown.add(error_code)
                         for message in JaxRDDLCompiler.get_error_messages(error_code):
                             progress_bar.write(termcolor.colored(
-                                '[FAIL] Training model: ' + message, 'red'))
+                                '[FAIL] Training model error: ' + message, 'red'))
 
                 # test model
                 for error_code in np.unique(test_log['error']):
@@ -2767,7 +2769,7 @@ class JaxBackpropPlanner:
                         jax_test_msg_shown.add(error_code)
                         for message in JaxRDDLCompiler.get_error_messages(error_code):
                             progress_bar.write(termcolor.colored(
-                                '[FAIL] Testing model: ' + message, 'red'))
+                                '[FAIL] Testing model error: ' + message, 'red'))
         
             # reached computation budget
             elapsed = time.time() - start_time - elapsed_outside_loop

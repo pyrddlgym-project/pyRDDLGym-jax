@@ -49,6 +49,46 @@ def enumerate_literals(shape: Tuple[int, ...], axis: int, dtype: type=jnp.int32)
     return literals
 
 
+# branching sigmoid to help reduce numerical issues
+@jax.custom_jvp
+def stable_sigmoid(x):
+    return jnp.where(x >= 0, 1.0 / (1.0 + jnp.exp(-x)), jnp.exp(x) / (1.0 + jnp.exp(x)))
+
+
+@stable_sigmoid.defjvp
+def stable_sigmoid_jvp(primals, tangents):
+    (x,), (x_dot,) = primals, tangents
+    s = stable_sigmoid(x)
+    primal_out = s
+    tangent_out = x_dot * s * (1.0 - s)
+    return primal_out, tangent_out
+
+
+# branching tanh to help reduce numerical issues
+@jax.custom_jvp
+def stable_tanh(x):
+    ax = jnp.abs(x)
+    small = jnp.where(
+        ax < 20.0,
+        jnp.expm1(2.0 * ax) / (jnp.expm1(2.0 * ax) + 2.0),
+        1.0 - 2.0 * jnp.exp(-2.0 * ax)
+    )
+    return jnp.sign(x) * small
+
+
+@stable_tanh.defjvp
+def stable_tanh_jvp(primals, tangents):
+    (x,), (x_dot,) = primals, tangents
+    t = stable_tanh(x)
+    return t, x_dot * (1.0 - t * t)
+
+
+# it seems JAX uses the stability trick already
+def stable_softmax_weight_sum(logits, values, axis):
+    probs = jax.nn.softmax(logits)
+    return jnp.sum(values * probs, axis=axis)
+
+
 class JaxRDDLCompilerWithGrad(JaxRDDLCompiler):
     '''Compiles a RDDL AST representation to an equivalent JAX representation. 
     Unlike its parent class, this class treats all fluents as real-valued, and
@@ -190,7 +230,7 @@ class SigmoidRelational(JaxRDDLCompilerWithGrad):
         init_params[id_] = self.sigmoid_weight
         self.overriden_ops[expr.id] = __class__.__name__
         def greater_op(x, y, params):
-            sample = jax.nn.sigmoid(params[id_] * (x - y))
+            sample = stable_sigmoid(params[id_] * (x - y))
             return sample, params
         return self._jax_binary_helper_with_param(expr, init_params, greater_op)
     
@@ -204,7 +244,7 @@ class SigmoidRelational(JaxRDDLCompilerWithGrad):
         init_params[id_] = self.sigmoid_weight
         self.overriden_ops[expr.id] = __class__.__name__
         def less_op(x, y, params):
-            sample = jax.nn.sigmoid(params[id_] * (y - x))
+            sample = stable_sigmoid(params[id_] * (y - x))
             return sample, params
         return self._jax_binary_helper_with_param(expr, init_params, less_op)
     
@@ -218,7 +258,7 @@ class SigmoidRelational(JaxRDDLCompilerWithGrad):
         init_params[id_] = self.sigmoid_weight
         self.overriden_ops[expr.id] = __class__.__name__
         def equal_op(x, y, params):
-            sample = 1. - jnp.square(jnp.tanh(params[id_] * (y - x)))
+            sample = 1. - jnp.square(stable_tanh(params[id_] * (y - x)))
             return sample, params
         return self._jax_binary_helper_with_param(expr, init_params, equal_op)
     
@@ -229,7 +269,7 @@ class SigmoidRelational(JaxRDDLCompilerWithGrad):
         init_params[id_] = self.sigmoid_weight
         self.overriden_ops[expr.id] = __class__.__name__
         def not_equal_op(x, y, params):
-            sample = jnp.square(jnp.tanh(params[id_] * (y - x)))
+            sample = jnp.square(stable_tanh(params[id_] * (y - x)))
             return sample, params
         return self._jax_binary_helper_with_param(expr, init_params, not_equal_op)
     
@@ -240,7 +280,7 @@ class SigmoidRelational(JaxRDDLCompilerWithGrad):
         init_params[id_] = self.sigmoid_weight
         self.overriden_ops[expr.id] = __class__.__name__
         def sgn_op(x, params):
-            sample = jnp.tanh(params[id_] * x)
+            sample = stable_tanh(params[id_] * x)
             return sample, params
         return self._jax_unary_helper_with_param(expr, init_params, sgn_op)
     
@@ -260,8 +300,7 @@ class SoftmaxArgmax(JaxRDDLCompilerWithGrad):
     @staticmethod
     def soft_argmax(x: jnp.ndarray, w: float, axes: Union[int, Tuple[int, ...]]) -> jnp.ndarray:
         literals = enumerate_literals(jnp.shape(x), axis=axes)
-        softmax = jax.nn.softmax(w * x, axis=axes)
-        sample = jnp.sum(literals * softmax, axis=axes)
+        sample = stable_softmax_weight_sum(w * x, literals, axis=axes)
         return sample
 
     def _jax_argmax(self, expr, init_params):
@@ -542,8 +581,8 @@ class SoftFloor(JaxRDDLCompilerWithGrad):
     @staticmethod
     def soft_floor(x: jnp.ndarray, w: float) -> jnp.ndarray:
         return (
-            (jax.nn.sigmoid(w * (x - jnp.floor(x) - 1.0)) - jax.nn.sigmoid(-w / 2.0)) 
-            / jnp.tanh(w / 4.0) 
+            (stable_sigmoid(w * (x - jnp.floor(x) - 1.0)) - stable_sigmoid(-w / 2.0)) 
+            / stable_tanh(w / 4.0) 
             + jnp.floor(x)
         )
 
@@ -614,7 +653,7 @@ class SoftRound(JaxRDDLCompilerWithGrad):
         def round_op(x, params):
             param = params[id_]
             m = jnp.floor(x) + 0.5
-            sample = m + 0.5 * jnp.tanh(param * (x - m)) / jnp.tanh(param / 2.)
+            sample = m + 0.5 * stable_tanh(param * (x - m)) / stable_tanh(param / 2.)
             return sample, params
         return self._jax_unary_helper_with_param(expr, init_params, round_op)
 
@@ -708,8 +747,8 @@ class SoftmaxSwitch(JaxRDDLCompilerWithGrad):
                 sample_pred[jnp.newaxis, ...], shape=jnp.shape(sample_cases))
             literals = enumerate_literals(jnp.shape(sample_cases), axis=0)
             proximity = -jnp.square(sample_pred - literals)
-            softcase = jax.nn.softmax(params[id_] * proximity, axis=0)
-            sample = jnp.sum(sample_cases * softcase, axis=0)
+            logits = params[id_] * proximity
+            sample = stable_softmax_weight_sum(logits, sample_cases, axis=0)
             return sample, key, err, params
         return _jax_wrapped_switch_softmax
     
@@ -824,7 +863,7 @@ class ReparameterizedSigmoidBernoulli(JaxRDDLCompilerWithGrad):
             prob, key, err, params = jax_prob(x, params, key)
             key, subkey = random.split(key)
             U = random.uniform(key=subkey, shape=jnp.shape(prob), dtype=self.REAL)
-            sample = jax.nn.sigmoid(params[id_] * (prob - U))
+            sample = stable_sigmoid(params[id_] * (prob - U))
             out_of_bounds = jnp.logical_not(jnp.all((prob >= 0) & (prob <= 1)))
             err |= (out_of_bounds * ERR)
             return sample, key, err, params
@@ -940,7 +979,7 @@ class GumbelSoftmaxDiscrete(JaxRDDLCompilerWithGrad):
         
         def _jax_wrapped_distribution_discrete_gumbel_softmax(x, params, key):
             w, eps = params[id_]
-            prob, err, key = prob_fn(x, key)
+            prob, key, err, params = prob_fn(x, params, key)
             key, subkey = random.split(key)
             Gumbel01 = random.gumbel(key=subkey, shape=jnp.shape(prob), dtype=self.REAL)
             sample = Gumbel01 + jnp.log(prob + eps)
@@ -967,7 +1006,7 @@ class GumbelSoftmaxDiscrete(JaxRDDLCompilerWithGrad):
 
         def _jax_wrapped_distribution_discrete_pvar_gumbel_softmax(x, params, key):
             w, eps = params[id_]
-            prob, err, key = prob_fn(x, key)
+            prob, key, err, params = prob_fn(x, params, key)
             key, subkey = random.split(key)
             Gumbel01 = random.gumbel(key=subkey, shape=jnp.shape(prob), dtype=self.REAL)
             sample = Gumbel01 + jnp.log(prob + eps)
@@ -999,7 +1038,7 @@ class DeterminizedDiscrete(JaxRDDLCompilerWithGrad):
         prob_fn = self._jax_discrete_prob(jax_probs, unnorm)
         
         def _jax_wrapped_distribution_discrete_determinized(x, params, key):
-            prob, err, key = prob_fn(x, key)
+            prob, key, err, params = prob_fn(x, params, key)
             literals = enumerate_literals(jnp.shape(prob), axis=-1)
             sample = jnp.sum(literals * prob, axis=-1)
             err = JaxRDDLCompilerWithGrad._jax_update_discrete_oob_error(err, prob)
@@ -1021,7 +1060,7 @@ class DeterminizedDiscrete(JaxRDDLCompilerWithGrad):
         prob_fn = self._jax_discrete_pvar_prob(jax_probs, unnorm)
 
         def _jax_wrapped_distribution_discrete_pvar_determinized(x, params, key):
-            prob, err, key = prob_fn(x, key)
+            prob, key, err, params = prob_fn(x, params, key)
             literals = enumerate_literals(jnp.shape(prob), axis=-1)
             sample = jnp.sum(literals * prob, axis=-1)
             err = JaxRDDLCompilerWithGrad._jax_update_discrete_oob_error(err, prob)
@@ -1188,7 +1227,7 @@ class ExponentialPoisson(JaxRDDLCompilerWithGrad):
             key=key,  shape=(bins,) + jnp.shape(rate), dtype=rate.dtype)
         delta_t = Exp1 / rate[jnp.newaxis, ...]
         times = jnp.cumsum(delta_t, axis=0)
-        indicator = jax.nn.sigmoid(w * (1. - times))
+        indicator = stable_sigmoid(w * (1. - times))
         sample = jnp.sum(indicator, axis=0)
         return sample
 
