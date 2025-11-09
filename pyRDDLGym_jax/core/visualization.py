@@ -91,7 +91,8 @@ class JaxPlannerDashboard:
         self.train_reward_dist = {}
         self.test_reward_dist = {}
         self.train_state_fluents = {}
-        self.test_state_fluents = {}
+        self.train_state_output = {}
+        self.test_state_output = {}
         
         self.tuning_gp_heatmaps = None
         self.tuning_gp_targets = None
@@ -758,7 +759,7 @@ class JaxPlannerDashboard:
                 if checked and self.action_output[row] is not None:
                     num_plots = len(self.action_output[row])
                     titles = []
-                    for (_, act, _) in self.action_output[row]:
+                    for act in self.action_output[row].keys():
                         titles.append(f'Values of Action-Fluents {act}')
                         titles.append(f'Std. Dev. of Action-Fluents {act}')
                     fig = make_subplots(
@@ -766,8 +767,7 @@ class JaxPlannerDashboard:
                         shared_xaxes=True, horizontal_spacing=0.15,
                         subplot_titles=titles
                     )
-                    for (i, (action_output, action, action_labels)) \
-                    in enumerate(self.action_output[row]):
+                    for (i, action_output) in enumerate(self.action_output[row].values()):
                         action_values = np.mean(1. * action_output, axis=0).T
                         action_errors = np.std(1. * action_output, axis=0).T
                         fig.add_trace(go.Heatmap(
@@ -1136,42 +1136,40 @@ class JaxPlannerDashboard:
             if not state: return fig
             for (row, checked) in self.checked.copy().items():
                 if checked and row in self.train_state_fluents:
-                    train_values = self.train_state_fluents[row][state]
-                    test_values = self.test_state_fluents[row][state]
-                    train_values = 1 * train_values.reshape(train_values.shape[:2] + (-1,))
-                    test_values = 1 * test_values.reshape(test_values.shape[:2] + (-1,))
-                    num_epochs, num_states = train_values.shape[1:]
-                    step = 1
-                    if num_epochs > REWARD_ERROR_DIST_SUBPLOTS:
-                        step = num_epochs // REWARD_ERROR_DIST_SUBPLOTS
+                    titles = [f'Values of Train State-Fluents {state}',
+                              f'Values of Test State-Fluents {state}']
                     fig = make_subplots(
-                        rows=num_states, cols=1, shared_xaxes=True,
-                        subplot_titles=self.rddl[row].variable_groundings[state]
+                        rows=1, cols=2,
+                        shared_xaxes=True, horizontal_spacing=0.15,
+                        subplot_titles=titles
                     )
-                    for istate in range(num_states):
-                        for epoch in range(0, num_epochs, step):
-                            fig.add_trace(go.Violin(
-                                y=train_values[:, epoch, istate], x0=epoch,
-                                side='negative', line_color='red',
-                                name=f'Train Epoch {epoch + 1}'
-                            ), row=istate + 1, col=1)
-                            fig.add_trace(go.Violin(
-                                y=test_values[:, epoch, istate], x0=epoch,
-                                side='positive', line_color='blue',
-                                name=f'Test Epoch {epoch + 1}'
-                            ), row=istate + 1, col=1)
-                    fig.update_traces(meanline_visible=True)
+                    train_state_output = self.train_state_output[row][state]
+                    test_state_output = self.test_state_output[row][state]
+                    train_state_values = np.mean(1. * train_state_output, axis=0).T
+                    test_state_values = np.mean(1. * test_state_output, axis=0).T
+                    fig.add_trace(go.Heatmap(
+                        z=train_state_values,
+                        x=np.arange(train_state_values.shape[1]),
+                        y=np.arange(train_state_values.shape[0]),
+                        colorscale='Blues', colorbar_x=0.45,
+                        colorbar_len=0.8 / 1,
+                        colorbar_y=1 - (0.5) / 1
+                    ), row=1, col=1)
+                    fig.add_trace(go.Heatmap(
+                        z=test_state_values,
+                        x=np.arange(test_state_values.shape[1]),
+                        y=np.arange(test_state_values.shape[0]),
+                        colorscale='Blues', colorbar_len=0.8 / 1,
+                        colorbar_y=1 - (0.5) / 1
+                    ), row=1, col=2)
                     fig.update_layout(
-                        title=dict(text=(f"Distribution of State-Fluent {state} "
-                                         f"in Relaxed Model vs True Model")),
+                        title=f"Values of State-Fluents {state}",
                         xaxis=dict(title=dict(text="Decision Epoch")),
-                        yaxis=dict(title=dict(text="State-Fluent Value")),
                         font=dict(size=PLOT_AXES_FONT_SIZE),
-                        height=MODEL_STATE_ERROR_HEIGHT * num_states,
-                        violingap=0, violinmode='overlay', showlegend=False,
-                        legend=dict(bgcolor='rgba(0,0,0,0)'),
+                        height=ACTION_HEATMAP_HEIGHT * 1,
+                        showlegend=False,
                         template="plotly_white"
-                    )
+                    )          
                     break
             return fig
                 
@@ -1418,33 +1416,38 @@ class JaxPlannerDashboard:
         
         # data for return distributions
         progress = int(callback['progress'])
-        if progress - self.return_dist_last_progress[experiment_id] \
-            >= PROGRESS_FOR_NEXT_RETURN_DIST:
+        if progress - self.return_dist_last_progress[experiment_id] >= PROGRESS_FOR_NEXT_RETURN_DIST:
             self.return_dist_ticks[experiment_id].append(iteration)
             self.return_dist[experiment_id].append(
                 np.sum(np.mean(callback['test_log']['reward'], axis=0), axis=1))
             self.return_dist_last_progress[experiment_id] = progress
         
-        # data for action heatmaps
-        action_output = []
-        rddl = self.rddl[experiment_id]
-        for action in rddl.action_fluents:
-            action_values = np.asarray(callback['test_log']['fluents'][action][0])
-            action_output.append(
-                (action_values.reshape(action_values.shape[:2] + (-1,)),
-                 action,
-                 rddl.variable_groundings[action])
-            )
-        self.action_output[experiment_id] = action_output
-        
         # data for policy weight distributions
-        if progress - self.policy_params_last_progress[experiment_id] \
-            >= PROGRESS_FOR_NEXT_POLICY_DIST:
+        if progress - self.policy_params_last_progress[experiment_id] >= PROGRESS_FOR_NEXT_POLICY_DIST:
             self.policy_params_ticks[experiment_id].append(iteration)
             self.policy_params[experiment_id].append(callback['best_params'])
             self.policy_params_last_progress[experiment_id] = progress
         
-        # data for model relaxations
+        # data for action heatmaps
+        action_output = {}
+        rddl = self.rddl[experiment_id]
+        for action in rddl.action_fluents:
+            action_values = np.asarray(callback['test_log']['fluents'][action][0])
+            action_output[action] = action_values.reshape(action_values.shape[:2] + (-1,))
+        self.action_output[experiment_id] = action_output
+        
+        # data for state heatmaps
+        train_state_output = {}
+        test_state_output = {}
+        for state in rddl.state_fluents:
+            state_values = np.asarray(callback['train_log']['fluents'][state][0])
+            train_state_output[state] = state_values.reshape(state_values.shape[:2] + (-1,))
+            state_values = np.asarray(callback['test_log']['fluents'][state][0])
+            test_state_output[state] = state_values.reshape(state_values.shape[:2] + (-1,))
+        self.train_state_output[experiment_id] = train_state_output
+        self.test_state_output[experiment_id] = test_state_output
+        
+        # data for reward distributions
         model_params = callback['model_params']
         for (key, values) in model_params.items():
             expr_id = int(str(key).split('_')[0])
@@ -1455,19 +1458,13 @@ class JaxPlannerDashboard:
             name: np.asarray(callback['train_log']['fluents'][name][0])
             for name in rddl.state_fluents
         }
-        self.test_state_fluents[experiment_id] = {
-            name: np.asarray(callback['test_log']['fluents'][name][0])
-            for name in self.train_state_fluents[experiment_id]
-        }
-        
         # update experiment table info
         self.status[experiment_id] = str(callback['status']).split('.')[1]
         self.duration[experiment_id] = callback["elapsed_time"]
         self.progress[experiment_id] = progress
         self.warnings = None
     
-    def update_tuning(self, optimizer: Any,
-                      bounds: Dict[str, Tuple[float, float]]) -> None:
+    def update_tuning(self, optimizer: Any, bounds: Dict[str, Tuple[float, float]]) -> None:
         '''Updates the hyper-parameter tuning plots.'''
         
         self.tuning_gp_heatmaps = []
