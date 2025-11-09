@@ -1412,9 +1412,9 @@ class JaxPlannerDashboard:
         # data for return curves
         iteration = callback['iteration']
         self.xticks[experiment_id].append(iteration)
-        self.train_return[experiment_id].append(callback['train_return'])    
-        self.test_return[experiment_id].append(callback['best_return'])
-        self.pgpe_return[experiment_id].append(callback['pgpe_return'])
+        self.train_return[experiment_id].append(np.min(callback['train_return']))  
+        self.test_return[experiment_id].append(np.min(callback['best_return']))
+        self.pgpe_return[experiment_id].append(np.min(callback['pgpe_return']))
         
         # data for return distributions
         progress = int(callback['progress'])
@@ -1422,14 +1422,14 @@ class JaxPlannerDashboard:
             >= PROGRESS_FOR_NEXT_RETURN_DIST:
             self.return_dist_ticks[experiment_id].append(iteration)
             self.return_dist[experiment_id].append(
-                np.sum(np.asarray(callback['reward']), axis=1))
+                np.sum(np.mean(callback['test_log']['reward'], axis=0), axis=1))
             self.return_dist_last_progress[experiment_id] = progress
         
         # data for action heatmaps
         action_output = []
         rddl = self.rddl[experiment_id]
         for action in rddl.action_fluents:
-            action_values = np.asarray(callback['fluents'][action])
+            action_values = np.asarray(callback['test_log']['fluents'][action][0])
             action_output.append(
                 (action_values.reshape(action_values.shape[:2] + (-1,)),
                  action,
@@ -1448,15 +1448,15 @@ class JaxPlannerDashboard:
         model_params = callback['model_params']
         for (key, values) in model_params.items():
             expr_id = int(str(key).split('_')[0])
-            self.relaxed_exprs_values[experiment_id][expr_id].append(values.item())
-        self.train_reward_dist[experiment_id] = callback['train_log']['reward']
-        self.test_reward_dist[experiment_id] = callback['reward']
+            self.relaxed_exprs_values[experiment_id][expr_id].append(values[0])
+        self.train_reward_dist[experiment_id] = np.mean(callback['train_log']['reward'], axis=0)
+        self.test_reward_dist[experiment_id] = np.mean(callback['test_log']['reward'], axis=0)
         self.train_state_fluents[experiment_id] = {
-            name: np.asarray(callback['train_log']['fluents'][name])
+            name: np.asarray(callback['train_log']['fluents'][name][0])
             for name in rddl.state_fluents
         }
         self.test_state_fluents[experiment_id] = {
-            name: np.asarray(callback['fluents'][name])
+            name: np.asarray(callback['test_log']['fluents'][name][0])
             for name in self.train_state_fluents[experiment_id]
         }
         
