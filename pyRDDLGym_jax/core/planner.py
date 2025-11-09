@@ -1280,7 +1280,7 @@ class PGPE(metaclass=ABCMeta):
     @abstractmethod
     def compile(self, loss_fn: Callable, projection: Callable, real_dtype: Type,
                 print_warnings: bool,
-                parallel_updates: Optional[int]=None) -> None:
+                parallel_updates: int=1) -> None:
         pass
 
 
@@ -1376,7 +1376,7 @@ class GaussianPGPE(PGPE):
 
     def compile(self, loss_fn: Callable, projection: Callable, real_dtype: Type,
                 print_warnings: bool,
-                parallel_updates: Optional[int]=None) -> None:
+                parallel_updates: int=1) -> None:
         sigma0 = self.init_sigma
         sigma_lo, sigma_hi = self.sigma_range
         scale_reward = self.scale_reward
@@ -1412,14 +1412,11 @@ class GaussianPGPE(PGPE):
         
         # for parallel policy update, initialize multiple indepdendent (mean, sigma)
         # gaussians that will be optimized in parallel
-        if parallel_updates is None:
-            self._initializer = jax.jit(_jax_wrapped_pgpe_init)
-        else:
-            def _jax_wrapped_pgpe_inits(key, policy_params):
-                keys = jnp.asarray(random.split(key, num=parallel_updates))
-                return jax.vmap(_jax_wrapped_pgpe_init, in_axes=0)(keys, policy_params)
-            
-            self._initializer = jax.jit(_jax_wrapped_pgpe_inits)
+        def _jax_wrapped_batched_pgpe_init(key, policy_params):
+            keys = jnp.asarray(random.split(key, num=parallel_updates))
+            return jax.vmap(_jax_wrapped_pgpe_init, in_axes=0)(keys, policy_params)
+    
+        self._initializer = jax.jit(_jax_wrapped_batched_pgpe_init)
 
         # ***********************************************************************
         # PARAMETER SAMPLING FUNCTIONS
@@ -1656,20 +1653,17 @@ class GaussianPGPE(PGPE):
             policy_params = new_mu
             return new_pgpe_params, new_r_max, new_pgpe_opt_state, policy_params, converged
 
-        if parallel_updates is None:
-            self._update = jax.jit(_jax_wrapped_pgpe_update)
-        else:
-            # for parallel policy update
-            def _jax_wrapped_pgpe_updates(key, pgpe_params, r_max, progress,
-                                          policy_hyperparams, subs, model_params, 
-                                          pgpe_opt_state):
-                keys = jnp.asarray(random.split(key, num=parallel_updates))
-                return jax.vmap(
-                    _jax_wrapped_pgpe_update, in_axes=(0, 0, 0, None, None, None, 0, 0)
-                )(keys, pgpe_params, r_max, progress, policy_hyperparams, subs, 
-                  model_params, pgpe_opt_state)
-            
-            self._update = jax.jit(_jax_wrapped_pgpe_updates)
+        # for parallel policy update
+        def _jax_wrapped_batched_pgpe_updates(key, pgpe_params, r_max, progress,
+                                              policy_hyperparams, subs, model_params, 
+                                              pgpe_opt_state):
+            keys = jnp.asarray(random.split(key, num=parallel_updates))
+            return jax.vmap(
+                _jax_wrapped_pgpe_update, in_axes=(0, 0, 0, None, None, None, 0, 0)
+            )(keys, pgpe_params, r_max, progress, policy_hyperparams, subs, 
+                model_params, pgpe_opt_state)
+        
+        self._update = jax.jit(_jax_wrapped_batched_pgpe_updates)
 
 
 # ***********************************************************************
@@ -1771,6 +1765,7 @@ class JaxBackpropPlanner:
                  batch_size_train: int=32,
                  batch_size_test: Optional[int]=None,
                  rollout_horizon: Optional[int]=None,
+                 parallel_updates: int=1,
                  action_bounds: Optional[Bounds]=None,
                  optimizer: Callable[..., optax.GradientTransformation]=optax.rmsprop,
                  optimizer_kwargs: Optional[Kwargs]=None,
@@ -1786,7 +1781,6 @@ class JaxBackpropPlanner:
                  utility_kwargs: Optional[Kwargs]=None,
                  logger: Optional[Logger]=None,
                  dashboard_viz: Optional[Any]=None,
-                 parallel_updates: Optional[int]=None,
                  preprocessor: Optional[Preprocessor]=None,
                  python_functions: Optional[Dict[str, Callable]]=None) -> None:
         '''Creates a new gradient-based algorithm for optimizing action sequences
@@ -1801,6 +1795,7 @@ class JaxBackpropPlanner:
         :param batch_size_test: how many rollouts to use to test the plan at each
         optimization step
         :param rollout_horizon: lookahead planning horizon: None uses the env horizon
+        :param parallel_updates: how many optimizers to run independently in parallel
         :param action_bounds: box constraints on actions
         :param optimizer: a factory for an optax SGD algorithm
         :param optimizer_kwargs: a dictionary of parameters to pass to the SGD
@@ -1823,7 +1818,6 @@ class JaxBackpropPlanner:
         :param logger: to log information about compilation to file
         :param dashboard_viz: optional visualizer object from the environment
         to pass to the dashboard to visualize the policy
-        :param parallel_updates: how many optimizers to run independently in parallel
         :param preprocessor: optional preprocessor for state inputs to plan
         :param python_functions: dictionary of external Python functions to call from RDDL
         '''
@@ -2024,14 +2018,14 @@ class JaxBackpropPlanner:
     
     def _jax_compile_test_loss(self):
         test_loss = self._jax_loss(self.test_rollouts, use_symlog=False)
-        if self.parallel_updates is not None:
-            test_loss = jax.vmap(test_loss, in_axes=(None, 0, None, None, 0))
+        self.single_test_loss = test_loss
+        test_loss = jax.vmap(test_loss, in_axes=(None, 0, None, None, 0))
         self.test_loss = jax.jit(test_loss)
 
     def _jax_compile_pgpe(self):
         if self.use_pgpe:
             self.pgpe.compile(
-                loss_fn=self.test_loss, 
+                loss_fn=self.single_test_loss, 
                 projection=self.plan.projection, 
                 real_dtype=self.test_compiled.REAL,
                 print_warnings=self.print_warnings,
@@ -2097,22 +2091,16 @@ class JaxBackpropPlanner:
         
         # initialize just the optimizer from the policy
         def _jax_wrapped_init_opt(policy_params):
-            if num_parallel is None:
-                opt_state = optimizer.init(policy_params)
-            else:
-                opt_state = jax.vmap(optimizer.init, in_axes=0)(policy_params)
+            opt_state = jax.vmap(optimizer.init, in_axes=0)(policy_params)
             return opt_state, {}
 
-        if num_parallel is None:
-            return jax.jit(_jax_wrapped_init_policy), jax.jit(_jax_wrapped_init_opt)
-        
         # initialize multiple policies to be optimized in parallel
-        def _jax_wrapped_init_policies(key, policy_hyperparams, subs):
+        def _jax_wrapped_batched_init_policy(key, policy_hyperparams, subs):
             keys = jnp.asarray(random.split(key, num=num_parallel))
             return jax.vmap(_jax_wrapped_init_policy, in_axes=(0, None, None))(
                 keys, policy_hyperparams, subs)      
           
-        return jax.jit(_jax_wrapped_init_policies), jax.jit(_jax_wrapped_init_opt)
+        return jax.jit(_jax_wrapped_batched_init_policy), jax.jit(_jax_wrapped_init_opt)
         
     def _jax_update(self, loss):
         optimizer = self.optimizer
@@ -2161,33 +2149,18 @@ class JaxBackpropPlanner:
             return policy_params, converged, opt_state, opt_aux, \
                 loss_val, log, model_params, zero_grads
         
-        if num_parallel is None:
-            return jax.jit(_jax_wrapped_plan_update)
-
         # for parallel policy update, just do each policy update in parallel
-        def _jax_wrapped_plan_updates(key, policy_params, policy_hyperparams,
-                                      subs, model_params, opt_state, opt_aux):
+        def _jax_wrapped_batched_plan_update(key, policy_params, policy_hyperparams,
+                                             subs, model_params, opt_state, opt_aux):
             keys = jnp.asarray(random.split(key, num=num_parallel))
             return jax.vmap(
                 _jax_wrapped_plan_update, in_axes=(0, 0, None, None, 0, 0, 0)
             )(keys, policy_params, policy_hyperparams, subs, model_params,
               opt_state, opt_aux)
-        return jax.jit(_jax_wrapped_plan_updates)
+        return jax.jit(_jax_wrapped_batched_plan_update)
             
     def _jax_merge_pgpe_jaxplan(self):
 
-        # no parallel updates, everything is scalar
-        if self.parallel_updates is None:
-            def _jax_wrapped_pgpe_jaxplan_merge(pgpe_mask, pgpe_param, policy_params, 
-                                                pgpe_loss, test_loss, 
-                                                pgpe_loss_smooth, test_loss_smooth, 
-                                                pgpe_converged, converged):
-                policy_params = pgpe_param
-                test_loss, test_loss_smooth = pgpe_loss, pgpe_loss_smooth
-                converged = pgpe_converged
-                return policy_params, test_loss, test_loss_smooth, converged
-            return _jax_wrapped_pgpe_jaxplan_merge
-        
         # for parallel policy update:
         # currently implements a hard replacement where the jaxplan parameter
         # is replaced by the PGPE parameter if the latter is an improvement
@@ -2252,10 +2225,6 @@ class JaxBackpropPlanner:
         return init_train, init_test
     
     def _broadcast_pytree(self, pytree):
-        if self.parallel_updates is None:
-            return pytree
-        
-        # for parallel policy update
         def make_batched(x):
             x = np.asarray(x)
             x = np.broadcast_to(
@@ -2292,7 +2261,7 @@ class JaxBackpropPlanner:
         '''
 
         # make sure parallel updates are disabled
-        if self.parallel_updates is not None:
+        if self.parallel_updates > 1:
             raise ValueError('Cannot compile static optimization problem '
                              'when parallel_updates is not None.')
         
@@ -2457,10 +2426,10 @@ class JaxBackpropPlanner:
         # ======================================================================
 
         # cannot run dashboard with parallel updates
-        if dashboard is not None and self.parallel_updates is not None:
+        if dashboard is not None and self.parallel_updates > 1:
             if self.print_warnings:
                 print(termcolor.colored(
-                    '[WARN] Dashboard is unavailable if parallel_updates is not None: '
+                    '[WARN] Dashboard is unavailable if parallel_updates > 1: '
                     'disabling dashboard.', 'yellow'
                 ))
             dashboard = None
@@ -2579,10 +2548,7 @@ class JaxBackpropPlanner:
         # ======================================================================
         
         # initialize running statistics
-        if self.parallel_updates is None:
-            best_params = policy_params
-        else:
-            best_params = pytree_at(policy_params, 0)
+        best_params = pytree_at(policy_params, 0)
         best_loss, pbest_loss, best_grad = np.inf, np.inf, None
         last_iter_improve = 0
         rolling_test_loss = RollingMean(test_rolling_window)
@@ -2645,9 +2611,8 @@ class JaxBackpropPlanner:
             test_loss, (test_log, model_params_test) = self.test_loss(
                 subkey, policy_params, policy_hyperparams, test_subs, model_params_test
             )
-            if self.parallel_updates:
-                train_loss = np.asarray(train_loss)
-                test_loss = np.asarray(test_loss)
+            train_loss = np.asarray(train_loss)
+            test_loss = np.asarray(test_loss)
             test_loss_smooth = rolling_test_loss.update(test_loss)
 
             # ==================================================================
@@ -2669,17 +2634,12 @@ class JaxBackpropPlanner:
                 pgpe_loss, _ = self.test_loss(
                     subkey, pgpe_param, policy_hyperparams, test_subs, model_params_test
                 )
-                if self.parallel_updates:
-                    pgpe_loss = np.asarray(pgpe_loss)
+                pgpe_loss = np.asarray(pgpe_loss)
                 pgpe_loss_smooth = rolling_pgpe_loss.update(pgpe_loss)
                 pgpe_return = -pgpe_loss_smooth
 
                 # replace JaxPlan with PGPE if new minimum reached or train loss invalid
-                if self.parallel_updates is None:
-                    pgpe_mask = (pgpe_loss_smooth < pbest_loss) | ~np.isfinite(train_loss)
-                else:
-                    pgpe_mask = (pgpe_loss_smooth < best_loss) or not np.isfinite(train_loss)
-
+                pgpe_mask = (pgpe_loss_smooth < best_loss) or not np.isfinite(train_loss)
                 if np.any(pgpe_mask):
                     policy_params, test_loss, test_loss_smooth, converged = \
                         self.merge_pgpe(
@@ -2697,20 +2657,13 @@ class JaxBackpropPlanner:
             # ==================================================================
 
             # evaluate test losses and record best parameters so far
-            if self.parallel_updates is None:
-                if test_loss_smooth < best_loss:
-                    best_params, best_loss, best_grad = \
-                        policy_params, test_loss_smooth, train_log['grad']
-                    pbest_loss = best_loss
-                    last_iter_improve = it
-            else:
-                best_index = np.argmin(test_loss_smooth)
-                if test_loss_smooth[best_index] < best_loss:
-                    best_params = pytree_at(policy_params, best_index)
-                    best_grad = pytree_at(train_log['grad'], best_index)
-                    best_loss = test_loss_smooth[best_index]
-                    last_iter_improve = it
-                pbest_loss = np.minimum(pbest_loss, test_loss_smooth)
+            best_index = np.argmin(test_loss_smooth)
+            if test_loss_smooth[best_index] < best_loss:
+                best_params = pytree_at(policy_params, best_index)
+                best_grad = pytree_at(train_log['grad'], best_index)
+                best_loss = test_loss_smooth[best_index]
+                last_iter_improve = it
+            pbest_loss = np.minimum(pbest_loss, test_loss_smooth)
                         
             # no progress
             if (not pgpe_improve) and np.all(zero_grads):
