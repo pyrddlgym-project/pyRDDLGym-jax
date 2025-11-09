@@ -1579,7 +1579,6 @@ class GaussianPGPE(PGPE):
             
             # for batching need to handle how meta-gradients of mean, sigma are aggregated
             else:
-
                 # do the batched calculation of mean and sigma gradients
                 keys = random.split(key, num=batch_size)
                 mu_grads, sigma_grads, r_maxs = jax.vmap(
@@ -1661,7 +1660,7 @@ class GaussianPGPE(PGPE):
             return jax.vmap(
                 _jax_wrapped_pgpe_update, in_axes=(0, 0, 0, None, None, None, 0, 0)
             )(keys, pgpe_params, r_max, progress, policy_hyperparams, subs, 
-                model_params, pgpe_opt_state)
+              model_params, pgpe_opt_state)
         
         self._update = jax.jit(_jax_wrapped_batched_pgpe_updates)
 
@@ -2001,19 +2000,20 @@ class JaxBackpropPlanner:
             policy=self.plan.train_policy,
             n_steps=self.horizon,
             n_batch=self.batch_size_train,
-            cache_path_info=self.preprocessor is not None
+            cache_path_info=self.preprocessor is not None or self.dashboard_viz is not None
         )
         test_rollouts = self.test_compiled.compile_rollouts(
             policy=self.plan.test_policy,
             n_steps=self.horizon,
             n_batch=self.batch_size_test,
-            cache_path_info=False
+            cache_path_info=self.dashboard_viz is not None
         )
         self.test_rollouts = jax.jit(test_rollouts)
 
     def _jax_compile_train_update(self):
         self.initialize, self.init_optimizer = self._jax_init_optimizer()
         train_loss = self._jax_loss(self.train_rollouts, use_symlog=self.use_symlog_reward)
+        self.single_train_loss = train_loss
         self.update = self._jax_update(train_loss)
     
     def _jax_compile_test_loss(self):
@@ -2161,23 +2161,22 @@ class JaxBackpropPlanner:
             
     def _jax_merge_pgpe_jaxplan(self):
 
-        # for parallel policy update:
         # currently implements a hard replacement where the jaxplan parameter
         # is replaced by the PGPE parameter if the latter is an improvement
-        def _jax_wrapped_pgpe_jaxplan_merge(pgpe_mask, pgpe_param, policy_params, 
+        def _jax_wrapped_batched_pgpe_merge(pgpe_mask, pgpe_param, policy_params, 
                                             pgpe_loss, test_loss, 
                                             pgpe_loss_smooth, test_loss_smooth, 
                                             pgpe_converged, converged):
-            def select_fn(leaf1, leaf2):
-                expanded_mask = pgpe_mask[(...,) + (jnp.newaxis,) * (jnp.ndim(leaf1) - 1)]
-                return jnp.where(expanded_mask, leaf1, leaf2)
-            policy_params = jax.tree_util.tree_map(select_fn, pgpe_param, policy_params)
+            mask_tree = jax.tree_util.tree_map(
+                lambda leaf: pgpe_mask[(...,) + (jnp.newaxis,) * (jnp.ndim(leaf) - 1)],
+                pgpe_param)
+            policy_params = jax.tree_util.tree_map(
+                jnp.where, mask_tree, pgpe_param, policy_params)
             test_loss = jnp.where(pgpe_mask, pgpe_loss, test_loss)
             test_loss_smooth = jnp.where(pgpe_mask, pgpe_loss_smooth, test_loss_smooth)
-            expanded_mask = pgpe_mask[(...,) + (jnp.newaxis,) * (jnp.ndim(converged) - 1)]
-            converged = jnp.where(expanded_mask, pgpe_converged, converged)
+            converged = jnp.where(pgpe_mask, pgpe_converged, converged)
             return policy_params, test_loss, test_loss_smooth, converged
-        return jax.jit(_jax_wrapped_pgpe_jaxplan_merge)
+        return jax.jit(_jax_wrapped_batched_pgpe_merge)
 
     def _batched_init_subs(self, subs): 
         rddl = self.rddl
@@ -2283,24 +2282,26 @@ class JaxBackpropPlanner:
                 
         # initialize the policy parameters
         params_guess, *_ = self.initialize(key, policy_hyperparams, train_subs)
+        params_guess = pytree_at(params_guess, 0)
+
+        # get the params mapping to a 1D vector
         guess_1d, unravel_fn = jax.flatten_util.ravel_pytree(params_guess)  
         guess_1d = np.asarray(guess_1d)      
         
-        # computes the training loss function and its 1D gradient
-        loss_fn = self._jax_loss(self.train_rollouts)
-        
-        # JAX requires an RNG seed for each evaluation as part of the pure function def
+        # computes the training loss function in a 1D vector
         @jax.jit
         def _loss_with_key(key, params_1d, model_params):
             policy_params = unravel_fn(params_1d)
-            loss_val, (_, model_params) = loss_fn(
+            loss_val, (_, model_params) = self.single_train_loss(
                 key, policy_params, policy_hyperparams, train_subs, model_params)
             return loss_val, model_params
         
+        # computes the training loss gradient function in a 1D vector
+        grad_fn = jax.grad(self.single_train_loss, argnums=1, has_aux=True)
+
         @jax.jit
         def _grad_with_key(key, params_1d, model_params):
             policy_params = unravel_fn(params_1d)
-            grad_fn = jax.grad(loss_fn, argnums=1, has_aux=True)
             grad_val, (_, model_params) = grad_fn(
                 key, policy_params, policy_hyperparams, train_subs, model_params)
             grad_val = jax.flatten_util.ravel_pytree(grad_val)[0]
@@ -2424,15 +2425,6 @@ class JaxBackpropPlanner:
         # ======================================================================
         # INITIALIZATION OF HYPER-PARAMETERS
         # ======================================================================
-
-        # cannot run dashboard with parallel updates
-        if dashboard is not None and self.parallel_updates > 1:
-            if self.print_warnings:
-                print(termcolor.colored(
-                    '[WARN] Dashboard is unavailable if parallel_updates > 1: '
-                    'disabling dashboard.', 'yellow'
-                ))
-            dashboard = None
 
         # if PRNG key is not provided
         if key is None:
@@ -2639,7 +2631,7 @@ class JaxBackpropPlanner:
                 pgpe_return = -pgpe_loss_smooth
 
                 # replace JaxPlan with PGPE if new minimum reached or train loss invalid
-                pgpe_mask = (pgpe_loss_smooth < best_loss) or not np.isfinite(train_loss)
+                pgpe_mask = (pgpe_loss_smooth < pbest_loss) | ~np.isfinite(train_loss)
                 if np.any(pgpe_mask):
                     policy_params, test_loss, test_loss_smooth, converged = \
                         self.merge_pgpe(
@@ -2764,7 +2756,7 @@ class JaxBackpropPlanner:
                 progress_bar.update(progress_percent - progress_bar.n)
             
             # dashboard
-            if dashboard is not None:
+            if dashboard is not None:            
                 dashboard.update_experiment(dashboard_id, callback)
                         
             # yield the callback
