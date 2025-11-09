@@ -386,14 +386,54 @@ class JaxRDDLCompiler:
         
         return _jax_wrapped_single_step        
     
+    def _compile_policy_step(self, policy, transition_fn):
+        
+        # for POMDP only observ-fluents are assumed visible to the policy
+        rddl = self.rddl
+        obs_vars = rddl.observ_fluents if rddl.observ_fluents else rddl.state_fluents
+        
+        def _jax_wrapped_policy_step(key, policy_params, hyperparams, step, subs, 
+                                     model_params):
+            states = {var: values 
+                      for (var, values) in subs.items()
+                      if var in obs_vars}
+            actions = policy(key, policy_params, hyperparams, step, states)
+            key, subkey = random.split(key)
+            return transition_fn(subkey, actions, subs, model_params)
+        return _jax_wrapped_policy_step
+
+    def _compile_batched_policy_step(self, policy_step_fn, n_batch, model_params_reduction):
+        def _jax_wrapped_batched_policy_step(carry, step):
+            key, policy_params, hyperparams, subs, model_params = carry  
+            key, *subkeys = random.split(key, num=1 + n_batch)
+            keys = jnp.asarray(subkeys)
+            subs, log, model_params = jax.vmap(
+                policy_step_fn, in_axes=(0, None, None, None, 0, None)
+            )(keys, policy_params, hyperparams, step, subs, model_params)
+            model_params = jax.tree_util.tree_map(model_params_reduction, model_params)
+            carry = (key, policy_params, hyperparams, subs, model_params)
+            return carry, log 
+        return _jax_wrapped_batched_policy_step
+        
+    def _compile_unrolled_policy_step(self, batched_policy_step_fn, n_steps):
+        def _jax_wrapped_batched_policy_rollout(key, policy_params, hyperparams, subs, 
+                                                model_params):
+            start = (key, policy_params, hyperparams, subs, model_params)
+            steps = jnp.arange(n_steps)
+            end, log = jax.lax.scan(batched_policy_step_fn, start, steps)
+            log = jax.tree_util.tree_map(partial(jnp.swapaxes, axis1=0, axis2=1), log)
+            model_params = end[-1]
+            return log, model_params        
+        return _jax_wrapped_batched_policy_rollout
+    
     def compile_rollouts(self, policy: Callable,
                          n_steps: int,
                          n_batch: int,
                          check_constraints: bool=False,
                          constraint_func: bool=False, 
                          init_params_constr: Dict[str, Any]={},
-                         model_params_reduction: Callable=lambda x: x[0],
-                         cache_path_info: bool=False) -> Callable:
+                         cache_path_info: bool=False,
+                         model_params_reduction: Callable=lambda x: x[0]) -> Callable:
         '''Compiles the current RDDL model into a JAX transition function that 
         samples trajectories with a fixed horizon from a policy.
         
@@ -425,53 +465,16 @@ class JaxRDDLCompiler:
         returned log and does not raise an exception
         :param constraint_func: produces the h(s, a) constraint function
         in addition to the usual outputs
+        :param cache_path_info: whether to save full path traces as part of the log
         :param model_params_reduction: how to aggregate updated model_params across runs
         in the batch (defaults to selecting the first element's parameters in the batch)
-        :param cache_path_info: whether to save full path traces as part of the log
         '''
-        rddl = self.rddl
-        jax_step_fn = self.compile_transition(
+        jax_fn = self.compile_transition(
             check_constraints, constraint_func, init_params_constr, cache_path_info)
-        
-        # for POMDP only observ-fluents are assumed visible to the policy
-        if rddl.observ_fluents:
-            observed_vars = rddl.observ_fluents
-        else:
-            observed_vars = rddl.state_fluents
-            
-        # evaluate the step from the policy
-        def _jax_wrapped_single_step_policy(key, policy_params, hyperparams, 
-                                            step, subs, model_params):
-            states = {var: values 
-                      for (var, values) in subs.items()
-                      if var in observed_vars}
-            actions = policy(key, policy_params, hyperparams, step, states)
-            key, subkey = random.split(key)
-            return jax_step_fn(subkey, actions, subs, model_params)
-                        
-        # do a batched step update from the policy
-        def _jax_wrapped_batched_step_policy(carry, step):
-            key, policy_params, hyperparams, subs, model_params = carry  
-            key, *subkeys = random.split(key, num=1 + n_batch)
-            keys = jnp.asarray(subkeys)
-            subs, log, model_params = jax.vmap(
-                _jax_wrapped_single_step_policy,
-                in_axes=(0, None, None, None, 0, None)
-            )(keys, policy_params, hyperparams, step, subs, model_params)
-            model_params = jax.tree_util.tree_map(model_params_reduction, model_params)
-            carry = (key, policy_params, hyperparams, subs, model_params)
-            return carry, log            
-            
-        # do a batched roll-out from the policy
-        def _jax_wrapped_batched_rollout(key, policy_params, hyperparams, 
-                                         subs, model_params):
-            start = (key, policy_params, hyperparams, subs, model_params)
-            steps = jnp.arange(n_steps)
-            end, log = jax.lax.scan(_jax_wrapped_batched_step_policy, start, steps)
-            log = jax.tree_util.tree_map(partial(jnp.swapaxes, axis1=0, axis2=1), log)
-            model_params = end[-1]
-            return log, model_params        
-        return _jax_wrapped_batched_rollout
+        jax_fn = self._compile_policy_step(policy, jax_fn)
+        jax_fn = self._compile_batched_policy_step(jax_fn, n_batch, model_params_reduction)
+        jax_fn = self._compile_unrolled_policy_step(jax_fn, n_steps)
+        return jax_fn
     
     # ===========================================================================
     # error checks and prints
@@ -713,7 +716,6 @@ class JaxRDDLCompiler:
         # boundary case: domain object is converted to canonical integer index
         if is_value:
             cached_value = cached_info
-
             def _jax_wrapped_object(x, params, key):
                 sample = jnp.asarray(cached_value, dtype=self._fix_dtype(cached_value))
                 return sample, key, NORMAL, params
@@ -721,7 +723,6 @@ class JaxRDDLCompiler:
         
         # boundary case: no shape information (e.g. scalar pvar)
         elif cached_info is None:
-            
             def _jax_wrapped_pvar_scalar(x, params, key):
                 value = x[var]
                 sample = jnp.asarray(value, dtype=self._fix_dtype(value))
@@ -734,7 +735,6 @@ class JaxRDDLCompiler:
         
             # compile nested expressions
             if slices and op_code == RDDLObjectsTracer.NUMPY_OP_CODE.NESTED_SLICE:
-                
                 jax_nested_expr = [(self._jax(arg, init_params) 
                                     if _slice is None 
                                     else self._jax_pvar_slice(_slice))
@@ -758,7 +758,6 @@ class JaxRDDLCompiler:
                 
             # tensor variable but no nesting  
             else:
-    
                 def _jax_wrapped_pvar_tensor_non_nested(x, params, key):
                     value = x[var]
                     sample = jnp.asarray(value, dtype=self._fix_dtype(value))
