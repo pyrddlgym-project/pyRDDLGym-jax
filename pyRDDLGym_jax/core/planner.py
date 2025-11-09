@@ -1904,8 +1904,7 @@ class JaxBackpropPlanner:
         self.logger = logger
         self.dashboard_viz = dashboard_viz
         
-        self._jax_compile_rddl()        
-        self._jax_compile_optimizer()
+        self._jax_compile_graph()
     
     @staticmethod
     def summarize_system() -> str:
@@ -1913,11 +1912,7 @@ class JaxBackpropPlanner:
         and jax-related packages that are relevant to the current planner.
         '''         
         devices = jax.devices()
-        if devices:
-            default_device = devices[0]
-        else:
-            default_device = 'n/a'
-
+        default_device = devices[0] if devices else 'n/a'
         return termcolor.colored(
             '\n'
             f'Starting JaxPlan v{__version__} '
@@ -1975,56 +1970,45 @@ class JaxBackpropPlanner:
         return result
         
     # ===========================================================================
-    # COMPILATION SUBROUTINES
+    # COMPILE RDDL
     # ===========================================================================
 
     def _jax_compile_rddl(self):
-        rddl = self.rddl
-        
-        # Jax compilation of the differentiable RDDL for training
         self.compiled = self.compiler_type(
-            rddl=rddl,
+            rddl=self.rddl,
             logger=self.logger,
             python_functions=self.python_functions,
             **self.compiler_kwargs
         )
         self.print_warnings = self.compiled.print_warnings
         self.compiled.compile(log_jax_expr=True, heading='RELAXED MODEL')
-        
-        # Jax compilation of the exact RDDL for testing
+    
         self.test_compiled = JaxRDDLCompiler(
-            rddl=rddl,
+            rddl=self.rddl,
             allow_synchronous_state=True,
             logger=self.logger,
             use64bit=self.compiled.use64bit,
             python_functions=self.python_functions
         )
         self.test_compiled.compile(log_jax_expr=True, heading='EXACT MODEL')
-        
-    def _jax_compile_optimizer(self):
-        
-        # preprocessor
+
+    def _jax_compile_policy(self):
         if self.preprocessor is not None:
             self.preprocessor.compile(self.compiled)   
-
-        # policy
         self.plan.compile(self.compiled,
                           _bounds=self._action_bounds,
                           horizon=self.horizon,
                           preprocessor=self.preprocessor)
         self.train_policy = jax.jit(self.plan.train_policy)
         self.test_policy = jax.jit(self.plan.test_policy)
-        
-        # training rollouts
-        train_rollouts = self.compiled.compile_rollouts(
+
+    def _jax_compile_rollouts(self):
+        self.train_rollouts = self.compiled.compile_rollouts(
             policy=self.plan.train_policy,
             n_steps=self.horizon,
             n_batch=self.batch_size_train,
             cache_path_info=self.preprocessor is not None
         )
-        self.train_rollouts = train_rollouts
-        
-        # testing rollouts
         test_rollouts = self.test_compiled.compile_rollouts(
             policy=self.plan.test_policy,
             n_steps=self.horizon,
@@ -2032,27 +2016,22 @@ class JaxBackpropPlanner:
             cache_path_info=False
         )
         self.test_rollouts = jax.jit(test_rollouts)
-        
-        # initialization
-        self.initialize, self.init_optimizer = self._jax_init()
-        
-        # training loss
-        train_loss = self._jax_loss(train_rollouts, use_symlog=self.use_symlog_reward)
 
-        # testing loss
-        test_loss = self._jax_loss(test_rollouts, use_symlog=False)
-        if self.parallel_updates is None:
-            self.test_loss = jax.jit(test_loss)
-        else:
-            self.test_loss = jax.jit(jax.vmap(test_loss, in_axes=(None, 0, None, None, 0)))
-        
-        # optimization
+    def _jax_compile_train_update(self):
+        self.initialize, self.init_optimizer = self._jax_init_optimizer()
+        train_loss = self._jax_loss(self.train_rollouts, use_symlog=self.use_symlog_reward)
         self.update = self._jax_update(train_loss)
+    
+    def _jax_compile_test_loss(self):
+        test_loss = self._jax_loss(self.test_rollouts, use_symlog=False)
+        if self.parallel_updates is not None:
+            test_loss = jax.vmap(test_loss, in_axes=(None, 0, None, None, 0))
+        self.test_loss = jax.jit(test_loss)
 
-        # pgpe option
+    def _jax_compile_pgpe(self):
         if self.use_pgpe:
             self.pgpe.compile(
-                loss_fn=test_loss, 
+                loss_fn=self.test_loss, 
                 projection=self.plan.projection, 
                 real_dtype=self.test_compiled.REAL,
                 print_warnings=self.print_warnings,
@@ -2062,6 +2041,14 @@ class JaxBackpropPlanner:
         else:
             self.merge_pgpe = None
     
+    def _jax_compile_graph(self):
+        self._jax_compile_rddl()
+        self._jax_compile_policy()
+        self._jax_compile_rollouts()
+        self._jax_compile_train_update()
+        self._jax_compile_test_loss()
+        self._jax_compile_pgpe()
+
     def _jax_return(self, use_symlog):
         gamma = self.rddl.discount
         
@@ -2075,7 +2062,6 @@ class JaxBackpropPlanner:
             if use_symlog:
                 returns = jnp.sign(returns) * jnp.log(1.0 + jnp.abs(returns))
             return returns
-        
         return _jax_wrapped_returns
         
     def _jax_loss(self, rollouts, use_symlog=False): 
@@ -2086,8 +2072,8 @@ class JaxBackpropPlanner:
         # the loss is the average cumulative reward across all roll-outs
         # but applies a utility function if requested to each return observation:
         # by default, the utility function is the mean
-        def _jax_wrapped_plan_loss(key, policy_params, policy_hyperparams,
-                                   subs, model_params):
+        def _jax_wrapped_plan_loss(key, policy_params, policy_hyperparams, subs, 
+                                   model_params):
             log, model_params = rollouts(
                 key, policy_params, policy_hyperparams, subs, model_params)
             rewards = log['reward']
@@ -2096,10 +2082,9 @@ class JaxBackpropPlanner:
             loss = -utility
             aux = (log, model_params)
             return loss, aux
-        
         return _jax_wrapped_plan_loss
     
-    def _jax_init(self):
+    def _jax_init_optimizer(self):
         init = self.plan.initializer
         optimizer = self.optimizer
         num_parallel = self.parallel_updates
@@ -2143,12 +2128,12 @@ class JaxBackpropPlanner:
         
         # calculate the plan gradient w.r.t. return loss and update optimizer
         # also perform a projection step to satisfy constraints on actions
-        def _jax_wrapped_loss_swapped(policy_params, key, policy_hyperparams,
-                                      subs, model_params):
+        def _jax_wrapped_loss_swapped(policy_params, key, policy_hyperparams, subs, 
+                                      model_params):
             return loss(key, policy_params, policy_hyperparams, subs, model_params)[0]
             
-        def _jax_wrapped_plan_update(key, policy_params, policy_hyperparams,
-                                     subs, model_params, opt_state, opt_aux):
+        def _jax_wrapped_plan_update(key, policy_params, policy_hyperparams, subs, 
+                                     model_params, opt_state, opt_aux):
             
             # calculate the gradient of the loss with respect to the policy
             grad_fn = jax.value_and_grad(loss, argnums=1, has_aux=True)
@@ -2161,10 +2146,10 @@ class JaxBackpropPlanner:
                     grad, opt_state, params=policy_params, 
                     value=loss_val, grad=grad, value_fn=_jax_wrapped_loss_swapped,
                     key=key, policy_hyperparams=policy_hyperparams, subs=subs,
-                    model_params=model_params)
+                    model_params=model_params
+                )
             else:
-                updates, opt_state = optimizer.update(
-                    grad, opt_state, params=policy_params) 
+                updates, opt_state = optimizer.update(grad, opt_state, params=policy_params) 
 
             # apply optimizer and optional policy projection
             policy_params = optax.apply_updates(policy_params, updates)
@@ -2185,9 +2170,8 @@ class JaxBackpropPlanner:
             keys = jnp.asarray(random.split(key, num=num_parallel))
             return jax.vmap(
                 _jax_wrapped_plan_update, in_axes=(0, 0, None, None, 0, 0, 0)
-            )(keys, policy_params, policy_hyperparams, subs, model_params, 
+            )(keys, policy_params, policy_hyperparams, subs, model_params,
               opt_state, opt_aux)
-        
         return jax.jit(_jax_wrapped_plan_updates)
             
     def _jax_merge_pgpe_jaxplan(self):
