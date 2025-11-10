@@ -405,11 +405,11 @@ class JaxRDDLCompiler:
     def _compile_batched_policy_step(self, policy_step_fn, n_batch, model_params_reduction):
         def _jax_wrapped_batched_policy_step(carry, step):
             key, policy_params, hyperparams, subs, model_params = carry  
-            key, *subkeys = random.split(key, num=1 + n_batch)
-            keys = jnp.asarray(subkeys)
+            keys = random.split(key, num=1 + n_batch)
+            key, subkeys = keys[0], keys[1:]
             subs, log, model_params = jax.vmap(
                 policy_step_fn, in_axes=(0, None, None, None, 0, None)
-            )(keys, policy_params, hyperparams, step, subs, model_params)
+            )(subkeys, policy_params, hyperparams, step, subs, model_params)
             model_params = jax.tree_util.tree_map(model_params_reduction, model_params)
             carry = (key, policy_params, hyperparams, subs, model_params)
             return carry, log 
@@ -694,9 +694,10 @@ class JaxRDDLCompiler:
     def _jax_constant(self, expr, init_params):
         NORMAL = JaxRDDLCompiler.ERROR_CODES['NORMAL']
         cached_value = self.traced.cached_sim_info(expr)
+        dtype = self._fix_dtype(cached_value)
         
         def _jax_wrapped_constant(x, params, key):
-            sample = jnp.asarray(cached_value, dtype=self._fix_dtype(cached_value))
+            sample = jnp.asarray(cached_value, dtype=dtype)
             return sample, key, NORMAL, params
         return _jax_wrapped_constant
     
@@ -716,8 +717,10 @@ class JaxRDDLCompiler:
         # boundary case: domain object is converted to canonical integer index
         if is_value:
             cached_value = cached_info
+            dtype = self._fix_dtype(cached_value)
+            
             def _jax_wrapped_object(x, params, key):
-                sample = jnp.asarray(cached_value, dtype=self._fix_dtype(cached_value))
+                sample = jnp.asarray(cached_value, dtype=dtype)
                 return sample, key, NORMAL, params
             return _jax_wrapped_object
         
