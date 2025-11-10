@@ -1374,7 +1374,9 @@ class GaussianPGPE(PGPE):
                 f'    max_kl_update      ={self.max_kl}\n'
         )
 
-    def compile(self, loss_fn: Callable, projection: Callable, real_dtype: Type,
+    def compile(self, loss_fn: Callable, 
+                projection: Callable, 
+                real_dtype: Type,
                 print_warnings: bool,
                 parallel_updates: int=1) -> None:
         sigma0 = self.init_sigma
@@ -2270,7 +2272,7 @@ class JaxBackpropPlanner:
         # initialize the initial fluents, model parameters, policy hyper-params
         subs = self.test_compiled.init_values
         train_subs, _ = self._batched_init_subs(subs)
-        model_params = self.compiled.model_params
+        model_params = self.compiled.model_aux['params']
         if policy_hyperparams is None:
             if self.print_warnings:
                 print(termcolor.colored(
@@ -2513,9 +2515,9 @@ class JaxBackpropPlanner:
         
         # initialize model parameters
         if model_params is None:
-            model_params = self.compiled.model_params
+            model_params = self.compiled.model_aux['params']
         model_params = self._broadcast_pytree(model_params)
-        model_params_test = self._broadcast_pytree(self.test_compiled.model_params)
+        model_params_test = self._broadcast_pytree(self.test_compiled.model_aux['params'])
         
         # initialize policy parameters
         if guess is None:

@@ -181,7 +181,7 @@ class JaxModelLearner:
 
         # compile the RDDL model
         self.compiled = self.compiler_type(
-            rddl=self.rddl,
+            self.rddl,
             **self.compiler_kwargs
         )
         self.compiled.compile(log_jax_expr=True, heading='RELAXED MODEL')
@@ -423,7 +423,7 @@ class JaxModelLearner:
             params, opt_state = self.init_opt_fn(guess)
 
         # initialize model hyper-parameters
-        hyperparams = self.compiled.model_params
+        hyperparams = self.compiled.model_aux['params']
 
         # progress bar
         if print_progress:
@@ -503,7 +503,7 @@ class JaxModelLearner:
         if key is None:
             key = random.PRNGKey(round(time.time() * 1000))
         subs = self._batched_init_subs()
-        hyperparams = self.compiled.model_params
+        hyperparams = self.compiled.model_aux['params']
         mean_loss = 0.0
         for (it, (states, actions, next_states)) in enumerate(data):
             subs.update(states)

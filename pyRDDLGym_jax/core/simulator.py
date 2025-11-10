@@ -103,7 +103,7 @@ class JaxRDDLSimulator(RDDLSimulator):
         self.terminals = jax.tree_util.tree_map(jax.jit, compiled.terminations)
         self.reward = jax.jit(compiled.reward)
         jax_cpfs = jax.tree_util.tree_map(jax.jit, compiled.cpfs)
-        self.model_params = compiled.model_params
+        self.model_params = compiled.model_aux['params']
         
         # level analysis
         self.cpfs = []  
