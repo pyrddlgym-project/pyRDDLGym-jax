@@ -789,7 +789,7 @@ class ReparameterizedGeometric(JaxRDDLCompilerWithGrad):
             key, subkey = random.split(key)
             U = random.uniform(key=subkey, shape=jnp.shape(prob), dtype=self.REAL)
             sample = 1. + SoftFloor.soft_floor(jnp.log1p(-U) / jnp.log1p(-prob + eps), w=w)
-            out_of_bounds = jnp.logical_not(jnp.all((prob >= 0) & (prob <= 1)))
+            out_of_bounds = jnp.logical_not(jnp.all(jnp.logical_and(prob >= 0, prob <= 1)))
             err |= (out_of_bounds * ERR)
             return sample, key, err, params
         return _jax_wrapped_distribution_geometric_reparam
@@ -820,7 +820,7 @@ class DeterminizedGeometric(JaxRDDLCompilerWithGrad):
         def _jax_wrapped_distribution_geometric_determinized(x, params, key):
             prob, key, err, params = jax_prob(x, params, key)
             sample = 1. / prob
-            out_of_bounds = jnp.logical_not(jnp.all((prob >= 0) & (prob <= 1)))
+            out_of_bounds = jnp.logical_not(jnp.all(jnp.logical_and(prob >= 0, prob <= 1)))
             err |= (out_of_bounds * ERR)
             return sample, key, err, params
         return _jax_wrapped_distribution_geometric_determinized
@@ -861,7 +861,7 @@ class ReparameterizedSigmoidBernoulli(JaxRDDLCompilerWithGrad):
             key, subkey = random.split(key)
             U = random.uniform(key=subkey, shape=jnp.shape(prob), dtype=self.REAL)
             sample = stable_sigmoid(params[id_] * (prob - U))
-            out_of_bounds = jnp.logical_not(jnp.all((prob >= 0) & (prob <= 1)))
+            out_of_bounds = jnp.logical_not(jnp.all(jnp.logical_and(prob >= 0, prob <= 1)))
             err |= (out_of_bounds * ERR)
             return sample, key, err, params
         return _jax_wrapped_distribution_bernoulli_reparam
@@ -904,7 +904,7 @@ class GumbelSoftmaxBernoulli(JaxRDDLCompilerWithGrad):
             Gumbel01 = random.gumbel(key=subkey, shape=jnp.shape(probs), dtype=self.REAL)
             samples = Gumbel01 + jnp.log(probs + eps)
             sample = SoftmaxArgmax.soft_argmax(samples, w=w, axes=-1)
-            out_of_bounds = jnp.logical_not(jnp.all((prob >= 0) & (prob <= 1)))
+            out_of_bounds = jnp.logical_not(jnp.all(jnp.logical_and(prob >= 0, prob <= 1)))
             err |= (out_of_bounds * ERR)
             return sample, key, err, params
         return _jax_wrapped_distribution_bernoulli_gumbel_softmax
@@ -935,7 +935,7 @@ class DeterminizedBernoulli(JaxRDDLCompilerWithGrad):
         def _jax_wrapped_distribution_bernoulli_determinized(x, params, key):
             prob, key, err, params = jax_prob(x, params, key)
             sample = prob
-            out_of_bounds = jnp.logical_not(jnp.all((prob >= 0) & (prob <= 1)))
+            out_of_bounds = jnp.logical_not(jnp.all(jnp.logical_and(prob >= 0, prob <= 1)))
             err |= (out_of_bounds * ERR)
             return sample, key, err, params
         return _jax_wrapped_distribution_bernoulli_determinized
@@ -1152,7 +1152,7 @@ class GumbelSoftmaxBinomial(JaxRDDLCompilerWithGrad):
             sample = jnp.where(small_trials, small_sample, large_sample)
 
             out_of_bounds = jnp.logical_not(jnp.all(
-                (prob >= 0) & (prob <= 1) & (trials >= 0)))
+                jnp.logical_and(jnp.logical_and(prob >= 0, prob <= 1), trials >= 0)))
             err = err1 | err2 | (out_of_bounds * ERR)
             return sample, key, err, params
         return _jax_wrapped_distribution_binomial_gumbel_softmax
@@ -1189,7 +1189,7 @@ class DeterminizedBinomial(JaxRDDLCompilerWithGrad):
             prob = jnp.asarray(prob, dtype=self.REAL)
             sample = trials * prob
             out_of_bounds = jnp.logical_not(jnp.all(
-                (prob >= 0) & (prob <= 1) & (trials >= 0)))
+                jnp.logical_and(jnp.logical_and(prob >= 0, prob <= 1), trials >= 0)))
             err = err1 | err2 | (out_of_bounds * ERR)
             return sample, key, err, params
         return _jax_wrapped_distribution_binomial_determinized    
@@ -1295,7 +1295,7 @@ class ExponentialPoisson(JaxRDDLCompilerWithGrad):
             rate = ((1.0 - prob) / prob) * Gamma
             sample = self.branched_approx_to_poisson(subkey, rate, *params[id_])   
             out_of_bounds = jnp.logical_not(jnp.all(
-                (prob >= 0) & (prob <= 1) & (trials > 0)))
+                jnp.logical_and(jnp.logical_and(prob >= 0, prob <= 1), trials > 0)))
             err = err1 | err2 | (out_of_bounds * ERR)
             return sample, key, err, params
         return _jax_wrapped_distribution_negative_binomial_exponential 
@@ -1401,7 +1401,7 @@ class GumbelSoftmaxPoisson(JaxRDDLCompilerWithGrad):
             rate = ((1.0 - prob) / prob) * Gamma
             sample = self.branched_approx_to_poisson(subkey, rate, *params[id_])   
             out_of_bounds = jnp.logical_not(jnp.all(
-                (prob >= 0) & (prob <= 1) & (trials > 0)))
+                jnp.logical_and(jnp.logical_and(prob >= 0, prob <= 1), trials > 0)))
             err = err1 | err2 | (out_of_bounds * ERR)
             return sample, key, err, params
         return _jax_wrapped_distribution_negative_binomial_gumbel_softmax 
@@ -1459,7 +1459,7 @@ class DeterminizedPoisson(JaxRDDLCompilerWithGrad):
             prob = jnp.asarray(prob, dtype=self.REAL)
             sample = ((1.0 - prob) / prob) * trials
             out_of_bounds = jnp.logical_not(jnp.all(
-                (prob >= 0) & (prob <= 1) & (trials > 0)))
+                jnp.logical_and(jnp.logical_and(prob >= 0, prob <= 1), trials > 0)))
             err = err1 | err2 | (out_of_bounds * ERR)
             return sample, key, err, params
         return _jax_wrapped_distribution_negative_binomial_determinized    

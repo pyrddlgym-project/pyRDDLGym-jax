@@ -1486,7 +1486,7 @@ class JaxRDDLCompiler:
             key, subkey = random.split(key)
             sample = random.weibull_min(
                 key=subkey, scale=scale, concentration=shape, dtype=self.REAL)
-            out_of_bounds = jnp.logical_not(jnp.all((shape > 0) & (scale > 0)))
+            out_of_bounds = jnp.logical_not(jnp.all(jnp.logical_and(shape > 0, scale > 0)))
             err = err1 | err2 | (out_of_bounds * ERR)
             return sample, key, err, params        
         return _jax_wrapped_distribution_weibull
@@ -1503,7 +1503,7 @@ class JaxRDDLCompiler:
             prob, key, err, params = jax_prob(x, params, key)
             key, subkey = random.split(key)
             sample = random.bernoulli(subkey, prob)
-            out_of_bounds = jnp.logical_not(jnp.all((prob >= 0) & (prob <= 1)))
+            out_of_bounds = jnp.logical_not(jnp.all(jnp.logical_and(prob >= 0, prob <= 1)))
             err |= (out_of_bounds * ERR)
             return sample, key, err, params        
         return _jax_wrapped_distribution_bernoulli
@@ -1542,7 +1542,7 @@ class JaxRDDLCompiler:
             key, subkey = random.split(key)
             Gamma = random.gamma(key=subkey, a=shape, dtype=self.REAL)
             sample = scale * Gamma
-            out_of_bounds = jnp.logical_not(jnp.all((shape > 0) & (scale > 0)))
+            out_of_bounds = jnp.logical_not(jnp.all(jnp.logical_and(shape > 0, scale > 0)))
             err = err1 | err2 | (out_of_bounds * ERR)
             return sample, key, err, params        
         return _jax_wrapped_distribution_gamma
@@ -1565,7 +1565,7 @@ class JaxRDDLCompiler:
             sample = random.binomial(key=subkey, n=trials, p=prob, dtype=self.REAL)
             sample = jnp.asarray(sample, dtype=self.INT)
             out_of_bounds = jnp.logical_not(jnp.all(
-                (prob >= 0) & (prob <= 1) & (trials >= 0)))
+                jnp.logical_and(jnp.logical_and(prob >= 0, prob <= 1), trials >= 0)))
             err = err1 | err2 | (out_of_bounds * ERR)
             return sample, key, err, params        
         return _jax_wrapped_distribution_binomial
@@ -1588,7 +1588,7 @@ class JaxRDDLCompiler:
             dist = tfp.distributions.NegativeBinomial(total_count=trials, probs=1. - prob)
             sample = jnp.asarray(dist.sample(seed=subkey), dtype=self.INT)
             out_of_bounds = jnp.logical_not(jnp.all(
-                (prob >= 0) & (prob <= 1) & (trials > 0)))
+                jnp.logical_and(jnp.logical_and(prob >= 0, prob <= 1), trials > 0)))
             err = err1 | err2 | (out_of_bounds * ERR)
             return sample, key, err, params        
         return _jax_wrapped_distribution_negative_binomial    
@@ -1607,7 +1607,7 @@ class JaxRDDLCompiler:
             rate, key, err2, params = jax_rate(x, params, key)
             key, subkey = random.split(key)
             sample = random.beta(key=subkey, a=shape, b=rate, dtype=self.REAL)
-            out_of_bounds = jnp.logical_not(jnp.all((shape > 0) & (rate > 0)))
+            out_of_bounds = jnp.logical_not(jnp.all(jnp.logical_and(shape > 0, rate > 0)))
             err = err1 | err2 | (out_of_bounds * ERR)
             return sample, key, err, params        
         return _jax_wrapped_distribution_beta
@@ -1624,7 +1624,7 @@ class JaxRDDLCompiler:
             prob, key, err, params = jax_prob(x, params, key)
             key, subkey = random.split(key)
             sample = random.geometric(key=subkey, p=prob, dtype=self.INT)
-            out_of_bounds = jnp.logical_not(jnp.all((prob >= 0) & (prob <= 1)))
+            out_of_bounds = jnp.logical_not(jnp.all(jnp.logical_and(prob >= 0, prob <= 1)))
             err |= (out_of_bounds * ERR)
             return sample, key, err, params        
         return _jax_wrapped_distribution_geometric
@@ -1644,7 +1644,7 @@ class JaxRDDLCompiler:
             scale, key, err2, params = jax_scale(x, params, key)
             key, subkey = random.split(key)
             sample = scale * random.pareto(key=subkey, b=shape, dtype=self.REAL)
-            out_of_bounds = jnp.logical_not(jnp.all((shape > 0) & (scale > 0)))
+            out_of_bounds = jnp.logical_not(jnp.all(jnp.logical_and(shape > 0, scale > 0)))
             err = err1 | err2 | (out_of_bounds * ERR)
             return sample, key, err, params        
         return _jax_wrapped_distribution_pareto
@@ -1741,7 +1741,7 @@ class JaxRDDLCompiler:
             key, subkey = random.split(key)
             U = random.uniform(key=subkey, shape=jnp.shape(scale), dtype=self.REAL)
             sample = jnp.log(1.0 - jnp.log1p(-U) / shape) / scale
-            out_of_bounds = jnp.logical_not(jnp.all((shape > 0) & (scale > 0)))
+            out_of_bounds = jnp.logical_not(jnp.all(jnp.logical_and(shape > 0, scale > 0)))
             err = err1 | err2 | (out_of_bounds * ERR)
             return sample, key, err, params        
         return _jax_wrapped_distribution_gompertz
@@ -1780,7 +1780,7 @@ class JaxRDDLCompiler:
             key, subkey = random.split(key)
             U = random.uniform(key=subkey, shape=jnp.shape(a), dtype=self.REAL)            
             sample = jnp.power(1.0 - jnp.power(U, 1.0 / b), 1.0 / a)
-            out_of_bounds = jnp.logical_not(jnp.all((a > 0) & (b > 0)))
+            out_of_bounds = jnp.logical_not(jnp.all(jnp.logical_and(a > 0, b > 0)))
             err = err1 | err2 | (out_of_bounds * ERR)
             return sample, key, err, params        
         return _jax_wrapped_distribution_kumaraswamy
@@ -1980,9 +1980,10 @@ class JaxRDDLCompiler:
             sample = jnp.asarray(dist.sample(seed=subkey), dtype=self.INT)
             sample = jnp.moveaxis(sample, source=-1, destination=index)
             out_of_bounds = jnp.logical_not(jnp.all(
-                (prob >= 0)
-                & jnp.allclose(jnp.sum(prob, axis=-1), 1.0)
-                & (trials >= 0)
+                jnp.logical_and(
+                    jnp.logical_and(prob >= 0, jnp.allclose(jnp.sum(prob, axis=-1), 1.)),
+                    trials >= 0
+                )
             ))
             error = err1 | err2 | (out_of_bounds * ERR)
             return sample, key, error, params                  
