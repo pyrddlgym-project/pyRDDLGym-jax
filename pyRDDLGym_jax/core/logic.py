@@ -506,7 +506,7 @@ class LukasiewiczNormLogical(JaxRDDLCompilerWithGrad):
             return super()._jax_or(expr, init_params)
         self.overriden_ops[expr.id] = __class__.__name__
         def or_op(x, y):
-            return 1. - jax.nn.relu((1. - x) + (1. - y) - 1.)
+            return 1. - jax.nn.relu(1. - x - y)
         return self._jax_nary_helper(expr, init_params, or_op)
 
     def _jax_xor(self, expr, init_params):
@@ -514,9 +514,7 @@ class LukasiewiczNormLogical(JaxRDDLCompilerWithGrad):
             return super()._jax_xor(expr, init_params)
         self.overriden_ops[expr.id] = __class__.__name__
         def xor_op(x, y):
-            x_or_y = 1. - jax.nn.relu((1. - x) + (1. - y) - 1.)
-            x_and_y = jax.nn.relu(x + y - 1.)
-            return jax.nn.relu(x_or_y + (1. - x_and_y) - 1.)
+            return jax.nn.relu(1. - jnp.abs(1. - x - y))
         return self._jax_binary_helper(expr, init_params, xor_op)
 
     def _jax_implies(self, expr, init_params):
@@ -532,7 +530,7 @@ class LukasiewiczNormLogical(JaxRDDLCompilerWithGrad):
             return super()._jax_equiv(expr, init_params)
         self.overriden_ops[expr.id] = __class__.__name__
         def equiv_op(x, y):
-            return jax.nn.relu((1. - jax.nn.relu(x - y)) + (1. - jax.nn.relu(y - x)) - 1.)
+            return jax.nn.relu(1. - jnp.abs(x - y))
         return self._jax_binary_helper(expr, init_params, equiv_op)
     
     def _jax_forall(self, expr, init_params):
@@ -581,11 +579,9 @@ class SoftFloor(JaxRDDLCompilerWithGrad):
 
     @staticmethod
     def soft_floor(x: jnp.ndarray, w: float) -> jnp.ndarray:
-        return (
-            (stable_sigmoid(w * (x - jnp.floor(x) - 1.0)) - stable_sigmoid(-w / 2.0)) 
-            / stable_tanh(w / 4.0) 
-            + jnp.floor(x)
-        )
+        s = x - jnp.floor(x)
+        return jnp.floor(x) + 0.5 * (
+            1. + stable_tanh(w * (s - 1.) / 2.) / stable_tanh(w / 4.))
 
     def _jax_floor(self, expr, init_params):
         if not self.traced.cached_is_fluent(expr):
