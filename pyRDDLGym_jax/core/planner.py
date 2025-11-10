@@ -1436,14 +1436,13 @@ class GaussianPGPE(PGPE):
 
             # more accurate formula
             if super_symmetric_accurate:
-                c1, c2, c3 = -0.06655, -0.9706, 0.124
                 aa = jnp.abs(a)
-                aa3 = jnp.power(aa, 3)
-                epsilon_star = jnp.sign(epsilon) * phi * jnp.where(
-                    a <= 0,
-                    jnp.exp(c1 * (aa3 - aa) / jnp.log(aa + 1e-10) + c2 * aa),
-                    jnp.exp(aa - c3 * aa * jnp.log(1.0 - aa3 + 1e-10))
-                )
+                atol = 1e-10
+                c1, c2, c3 = -0.06655, -0.9706, 0.124
+                term_neg_log = c1 * (aa * aa - 1.) / jnp.log(aa + atol) + c2
+                term_pos_log = 1. - c3 * jnp.log1p(-aa ** 3 + atol)
+                epsilon_star = jnp.sign(epsilon) * phi * jnp.exp(
+                    aa * jnp.where(a <= 0, term_neg_log, term_pos_log))
             
             # less accurate and simple formula
             else:
@@ -2054,7 +2053,7 @@ class JaxBackpropPlanner:
                 rewards = rewards * discount[jnp.newaxis, ...]
             returns = jnp.sum(rewards, axis=1)
             if use_symlog:
-                returns = jnp.sign(returns) * jnp.log(1.0 + jnp.abs(returns))
+                returns = jnp.sign(returns) * jnp.log1p(jnp.abs(returns))
             return returns
         return _jax_wrapped_returns
         
