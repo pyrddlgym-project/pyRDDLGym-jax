@@ -272,6 +272,8 @@ class JaxPlannerDashboard:
                              dbc.DropdownMenuItem("30s", id='30sec'),
                              dbc.DropdownMenuItem("1m", id='1min'),
                              dbc.DropdownMenuItem("5m", id='5min'),
+                             dbc.DropdownMenuItem("30m", id='30min'),
+                             dbc.DropdownMenuItem("1h", id='1h'),
                              dbc.DropdownMenuItem("1d", id='1day')],
                             label="Refresh: 2s",
                             id='refresh-rate-dropdown',
@@ -516,10 +518,12 @@ class JaxPlannerDashboard:
              Input("30sec", "n_clicks"),
              Input("1min", "n_clicks"),
              Input("5min", "n_clicks"),
+             Input("30min", "n_clicks"),
+             Input("1h", "n_clicks"),
              Input("1day", "n_clicks")],
             [State('refresh-interval', 'data')]
         )
-        def click_refresh_rate(n05, n1, n2, n5, n10, n30, n1m, n5m, nd, data):
+        def click_refresh_rate(n05, n1, n2, n5, n10, n30, n1m, n5m, n30m, n1h, nd, data):
             ctx = dash.callback_context 
             if not ctx.triggered: 
                 return data 
@@ -540,6 +544,10 @@ class JaxPlannerDashboard:
                 return 60000
             elif button_id == '5min':
                 return 300000
+            elif button_id == '30min':
+                return 1800000
+            elif button_id == '1h':
+                return 3600000
             elif button_id == '1day':
                 return 86400000
             return data            
@@ -572,8 +580,14 @@ class JaxPlannerDashboard:
                 return 'Refresh: 1m'
             elif selected_interval == 300000:
                 return 'Refresh: 5m'
+            elif selected_interval == 1800000:
+                return 'Refresh: 30m'
+            elif selected_interval == 3600000:
+                return 'Refresh: 1h'
+            elif selected_interval == 86400000:
+                return 'Refresh: 1day'
             else:
-                return 'Refresh: 2s'
+                return 'Refresh: n/a'
         
         # update the experiments per page
         @app.callback(
