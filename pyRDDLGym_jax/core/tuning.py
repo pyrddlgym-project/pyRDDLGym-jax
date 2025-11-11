@@ -321,7 +321,8 @@ class JaxParameterTuning:
                            index: int, 
                            iteration: int,
                            kwargs: Kwargs, 
-                           queue: object) -> Tuple[ParameterValues, float, int, int]:
+                           queue: object,
+                           show_dashboard: bool) -> Tuple[ParameterValues, float, int, int]:
         '''A pickleable objective function to evaluate a single hyper-parameter 
         configuration.'''
         
@@ -345,7 +346,10 @@ class JaxParameterTuning:
         planner_args, _, train_args = load_config_from_string(config_string)
         
         # remove keywords that should not be in the tuner
-        train_args.pop('dashboard', None)
+        if show_dashboard:
+            planner_args['dashboard'] = True
+        else:
+            planner_args['dashboard'] = None
         planner_args.pop('parallel_updates', None)
     
         # initialize env for evaluation (need fresh copy to avoid concurrency)
@@ -353,6 +357,7 @@ class JaxParameterTuning:
     
         # run planning algorithm
         planner = JaxBackpropPlanner(rddl=env.model, **planner_args)
+        planner.dashboard = None
         if online:
             average_reward = JaxParameterTuning.online_trials(
                 env, planner, train_args, key, iteration, index, num_trials, 
@@ -482,7 +487,7 @@ class JaxParameterTuning:
                     # assign jobs to worker pool
                     results = [
                         pool.apply_async(JaxParameterTuning.objective_function,
-                                         obj_args + (it, obj_kwargs, queue))
+                                         obj_args + (it, obj_kwargs, queue, show_dashboard))
                         for obj_args in zip(suggested_params, subkeys, worker_ids)
                     ]
                 

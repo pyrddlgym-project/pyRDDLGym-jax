@@ -202,11 +202,11 @@ def _load_config(config, args):
         train_args['key'] = random.PRNGKey(planner_key)
     
     # dashboard
-    dashboard_key = train_args.get('dashboard', None)
+    dashboard_key = planner_args.get('dashboard', None)
     if dashboard_key is not None and dashboard_key and JaxPlannerDashboard is not None:
-        train_args['dashboard'] = JaxPlannerDashboard()
+        planner_args['dashboard'] = JaxPlannerDashboard()
     elif dashboard_key is not None:
-        del train_args['dashboard']        
+        del planner_args['dashboard']        
     
     # optimize call stopping rule
     stopping_rule = train_args.get('stopping_rule', None)
@@ -1792,6 +1792,7 @@ class JaxBackpropPlanner:
                  utility: Union[Callable[[jnp.ndarray], float], str]='mean',
                  utility_kwargs: Optional[Kwargs]=None,
                  logger: Optional[Logger]=None,
+                 dashboard: Optional[Any]=None,
                  dashboard_viz: Optional[Any]=None,
                  preprocessor: Optional[Preprocessor]=None,
                  python_functions: Optional[Dict[str, Callable]]=None) -> None:
@@ -1828,6 +1829,7 @@ class JaxBackpropPlanner:
         :param utility_kwargs: additional keyword arguments to pass hyper-
         parameters to the utility function call
         :param logger: to log information about compilation to file
+        :param dashboard: optional dashboard to display training progress and results
         :param dashboard_viz: optional visualizer object from the environment
         to pass to the dashboard to visualize the policy
         :param preprocessor: optional preprocessor for state inputs to plan
@@ -1907,6 +1909,7 @@ class JaxBackpropPlanner:
         self.use_symlog_reward = use_symlog_reward
 
         self.logger = logger
+        self.dashboard = dashboard
         self.dashboard_viz = dashboard_viz
         
         self._jax_compile_graph()
@@ -2012,13 +2015,13 @@ class JaxBackpropPlanner:
             policy=self.plan.train_policy,
             n_steps=self.horizon,
             n_batch=self.batch_size_train,
-            cache_path_info=self.preprocessor is not None or self.dashboard_viz is not None
+            cache_path_info=self.preprocessor is not None or self.dashboard is not None
         )
         test_rollouts = self.test_compiled.compile_rollouts(
             policy=self.plan.test_policy,
             n_steps=self.horizon,
             n_batch=self.batch_size_test,
-            cache_path_info=self.dashboard_viz is not None
+            cache_path_info=self.dashboard is not None
         )
         self.test_rollouts = jax.jit(test_rollouts)
 
@@ -2354,9 +2357,7 @@ class JaxBackpropPlanner:
         
         :param key: JAX PRNG key (derived from clock if not provided)
         :param epochs: the maximum number of steps of gradient descent
-        :param train_seconds: total time allocated for gradient descent               
-        :param dashboard: dashboard to display training results
-        :param dashboard_id: experiment id for the dashboard
+        :param train_seconds: total time allocated for gradient descent    
         :param model_params: optional model-parameters to override default
         :param policy_hyperparams: hyper-parameters for the policy/plan, such as
         weights for sigmoid wrapping boolean actions
@@ -2366,7 +2367,8 @@ class JaxBackpropPlanner:
         specified in this instance
         :param print_summary: whether to print planner header and diagnosis
         :param print_progress: whether to print the progress bar during training
-        :param print_hyperparams: whether to print list of hyper-parameter settings
+        :param print_hyperparams: whether to print list of hyper-parameter settings   
+        :param dashboard_id: experiment id for the dashboard
         :param stopping_rule: stopping criterion
         :param test_rolling_window: the test return is averaged on a rolling 
         window of the past test_rolling_window returns when updating the best
@@ -2392,8 +2394,6 @@ class JaxBackpropPlanner:
     def optimize_generator(self, key: Optional[random.PRNGKey]=None,
                            epochs: int=999999,
                            train_seconds: float=120.,
-                           dashboard: Optional[Any]=None,
-                           dashboard_id: Optional[str]=None,
                            model_params: Optional[Dict[str, Any]]=None,
                            policy_hyperparams: Optional[Dict[str, Any]]=None,
                            subs: Optional[Dict[str, Any]]=None,
@@ -2401,6 +2401,7 @@ class JaxBackpropPlanner:
                            print_summary: bool=True,
                            print_progress: bool=True,
                            print_hyperparams: bool=False,
+                           dashboard_id: Optional[str]=None,
                            stopping_rule: Optional[JaxPlannerStoppingRule]=None,
                            test_rolling_window: int=10,
                            tqdm_position: Optional[int]=None) -> Generator[Dict[str, Any], None, None]:
@@ -2410,9 +2411,7 @@ class JaxBackpropPlanner:
         
         :param key: JAX PRNG key (derived from clock if not provided)
         :param epochs: the maximum number of steps of gradient descent
-        :param train_seconds: total time allocated for gradient descent        
-        :param dashboard: dashboard to display training results
-        :param dashboard_id: experiment id for the dashboard
+        :param train_seconds: total time allocated for gradient descent 
         :param model_params: optional model-parameters to override default
         :param policy_hyperparams: hyper-parameters for the policy/plan, such as
         weights for sigmoid wrapping boolean actions
@@ -2423,6 +2422,7 @@ class JaxBackpropPlanner:
         :param print_summary: whether to print planner header and diagnosis
         :param print_progress: whether to print the progress bar during training
         :param print_hyperparams: whether to print list of hyper-parameter settings
+        :param dashboard_id: experiment id for the dashboard
         :param stopping_rule: stopping criterion
         :param test_rolling_window: the test return is averaged on a rolling 
         window of the past test_rolling_window returns when updating the best
@@ -2494,11 +2494,10 @@ class JaxBackpropPlanner:
                 f'    policy_hyper_params={policy_hyperparams}\n'
                 f'    override_subs_dict ={subs is not None}\n'
                 f'    provide_param_guess={guess is not None}\n'
-                f'    test_rolling_window={test_rolling_window}\n' 
-                f'    dashboard          ={dashboard is not None}\n'
-                f'    dashboard_id       ={dashboard_id}\n'
+                f'    test_rolling_window={test_rolling_window}\n'
                 f'    print_summary      ={print_summary}\n'
                 f'    print_progress     ={print_progress}\n'
+                f'    dashboard_id       ={dashboard_id}\n'
                 f'    stopping_rule      ={stopping_rule}\n'
             )
         
@@ -2564,6 +2563,7 @@ class JaxBackpropPlanner:
             stopping_rule.reset()
             
         # initialize dashboard 
+        dashboard = self.dashboard
         if dashboard is not None:
             dashboard_id = dashboard.register_experiment(
                 dashboard_id, 
