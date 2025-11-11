@@ -18,6 +18,8 @@ import os
 from datetime import datetime
 import math
 import numpy as np
+import io
+import pickle
 import time
 import threading
 from typing import Any, Dict, Optional, Tuple, TYPE_CHECKING
@@ -29,7 +31,7 @@ log = logging.getLogger('werkzeug')
 log.setLevel(logging.ERROR)
 
 import dash
-from dash.dcc import Interval, Graph, Store
+from dash.dcc import Download, Interval, Graph, Store
 from dash.dependencies import Input, Output, State, ALL
 from dash.html import Div, B, H4, P, Hr
 import dash_bootstrap_components as dbc
@@ -329,6 +331,13 @@ class JaxPlannerDashboard:
                         # policy
                         dbc.Tab(dbc.Card(
                             dbc.CardBody([
+                                dbc.Row([
+                                    dbc.Col([
+                                        dbc.Button('Save Policy Weights',
+                                                    id='policy-save-button'),
+                                        Download(id="download-policy")
+                                    ], width='auto')
+                                ]),
                                 dbc.Row([
                                     Graph(id='action-output'),
                                 ]),
@@ -984,6 +993,21 @@ class JaxPlannerDashboard:
                     return fig
             return dash.no_update
         
+        # save policy button
+        @app.callback(
+            Output('download-policy', 'data'),
+            Input("policy-save-button", "n_clicks"),
+            prevent_initial_call=True
+        )
+        def save_policy_weights(n_clicks):
+            for (row, checked) in self.checked.copy().items():
+                if checked:
+                    bytes_io = io.BytesIO()
+                    pickle.dump(self.policy_params[row], bytes_io)
+                    bytes_io.seek(0)
+                    return dash.dcc.send_bytes(bytes_io.read(), "policy_params.pkl")
+            return dash.no_update
+
         # update the model parameter information
         @app.callback(
             Output('model-params-dropdown', 'children'),
