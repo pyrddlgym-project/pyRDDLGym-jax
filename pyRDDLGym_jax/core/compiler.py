@@ -53,13 +53,11 @@ class JaxRDDLCompiler:
     All operations are identical to their numpy equivalents.
     '''
     
-    def __init__(self, rddl: RDDLLiftedModel, 
-                 *args, 
+    def __init__(self, rddl: RDDLLiftedModel, *args, 
                  allow_synchronous_state: bool=True,
                  logger: Optional[Logger]=None,
                  use64bit: bool=False,
-                 python_functions: Optional[Dict[str, Callable]]=None,
-                 **kwargs) -> None:
+                 python_functions: Optional[Dict[str, Callable]]=None, **kwargs) -> None:
         '''Creates a new RDDL to Jax compiler.
         
         :param rddl: the RDDL model to compile into Jax
