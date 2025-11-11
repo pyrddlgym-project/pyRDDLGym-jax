@@ -260,6 +260,71 @@ class JaxRDDLCompiler:
             
         return jax_inequalities, jax_equalities
     
+    def _jax_preconditions(self):
+        preconds = self.preconditions
+        def _jax_wrapped_preconditions(key, errors, subs, params):
+            precond_check = True
+            for precond in preconds:
+                sample, key, err, params = precond(subs, params, key)
+                precond_check = jnp.logical_and(precond_check, sample)
+                errors |= err
+            return precond_check, key, errors, params 
+        return _jax_wrapped_preconditions
+
+    def _jax_inequalities(self, aux_constr):
+        inequality_fns, equality_fns = self._jax_nonlinear_constraints(aux_constr)
+        def _jax_wrapped_inequalities(key, errors, subs, params):
+            inequalities, equalities = [], []
+            for constraint in inequality_fns:
+                sample, key, err, params = constraint(subs, params, key)
+                inequalities.append(sample)
+                errors |= err
+            for constraint in equality_fns:
+                sample, key, err, params = constraint(subs, params, key)
+                equalities.append(sample)
+                errors |= err
+            return (inequalities, equalities), key, errors, params
+        return _jax_wrapped_inequalities
+
+    def _jax_cpfs(self):
+        cpfs = self.cpfs
+        def _jax_wrapped_cpfs(key, errors, subs, params):
+            for (name, cpf) in cpfs.items():
+                subs[name], key, err, params = cpf(subs, params, key)
+                errors |= err  
+            return subs, key, errors, params
+        return _jax_wrapped_cpfs
+
+    def _jax_reward(self):
+        reward_fn = self.reward
+        def _jax_wrapped_reward(key, errors, subs, params):
+            reward, key, err, params = reward_fn(subs, params, key)
+            errors |= err
+            return reward, key, errors, params
+        return _jax_wrapped_reward
+
+    def _jax_invariants(self):
+        invariants = self.invariants
+        def _jax_wrapped_invariants(key, errors, subs, params):
+            invariant_check = True
+            for invariant in invariants:
+                sample, key, err, params = invariant(subs, params, key)
+                invariant_check = jnp.logical_and(invariant_check, sample)
+                errors |= err
+            return invariant_check, key, errors, params
+        return _jax_wrapped_invariants
+
+    def _jax_terminations(self):
+        terminations = self.terminations
+        def _jax_wrapped_terminations(key, errors, subs, params):
+            terminated_check = False
+            for terminal in terminations:
+                sample, key, err, params = terminal(subs, params, key)
+                terminated_check = jnp.logical_or(terminated_check, sample)
+                errors |= err
+            return terminated_check
+        return _jax_wrapped_terminations
+
     def compile_transition(self, check_constraints: bool=False,
                            constraint_func: bool=False, 
                            cache_path_info: bool=False,
@@ -304,49 +369,43 @@ class JaxRDDLCompiler:
         '''
         NORMAL = JaxRDDLCompiler.ERROR_CODES['NORMAL']        
         rddl = self.rddl
-        reward_fn, cpfs, preconds, invariants, terminals = \
-            self.reward, self.cpfs, self.preconditions, self.invariants, self.terminations
         
-        # compile constraint information
-        if constraint_func:
-            inequality_fns, equality_fns = self._jax_nonlinear_constraints(aux_constr)
+        cpf_fn = self._jax_cpfs()
+        reward_fn = self._jax_reward()
+
+        if check_constraints:
+            precond_fn = self._jax_preconditions()
+            invariant_fn = self._jax_invariants()
+            terminal_fn = self._jax_terminations()
         else:
-            inequality_fns, equality_fns = None, None
-        
+            precond_fn = invariant_fn = terminal_fn = None
+
+        if constraint_func:
+            ineq_fn = self._jax_inequalities(aux_constr)
+        else:
+            ineq_fn = None        
+
         # do a single step update from the RDDL model
         def _jax_wrapped_single_step(key, actions, subs, params):
             errors = NORMAL
             subs.update(actions)
             
             # check action preconditions
-            precond_check = True
             if check_constraints:
-                for precond in preconds:
-                    sample, key, err, params = precond(subs, params, key)
-                    precond_check = jnp.logical_and(precond_check, sample)
-                    errors |= err
+                precond_sat, key, errors, params = precond_fn(key, errors, subs, params)
+            else:
+                precond_sat = True
             
             # compute h(s, a) <= 0 and g(s, a) == 0 constraint functions
-            inequalities, equalities = [], []
             if constraint_func:
-                for constraint in inequality_fns:
-                    sample, key, err, params = constraint(subs, params, key)
-                    inequalities.append(sample)
-                    errors |= err
-                for constraint in equality_fns:
-                    sample, key, err, params = constraint(subs, params, key)
-                    equalities.append(sample)
-                    errors |= err
+                ineq_sample, key, errors, params = ineq_fn(key, errors, subs, params)
+                inequalities, equalities = ineq_sample
+            else:
+                inequalities, equalities = [], []
                 
             # calculate CPFs in topological order
-            for (name, cpf) in cpfs.items():
-                subs[name], key, err, params = cpf(subs, params, key)
-                errors |= err                
+            subs, key, errors, params = cpf_fn(key, errors, subs, params)                
                 
-            # calculate the immediate reward
-            reward, key, err, params = reward_fn(subs, params, key)
-            errors |= err
-            
             # calculate fluent values
             if cache_path_info:
                 fluents = {name: values for (name, values) in subs.items() 
@@ -354,39 +413,32 @@ class JaxRDDLCompiler:
             else:
                 fluents = {}
             
+            # calculate the immediate reward
+            reward, key, errors, params = reward_fn(key, errors, subs, params)
+            
             # set the next state to the current state
             for (state, next_state) in rddl.next_state.items():
                 subs[state] = subs[next_state]
             
-            # check the state invariants
-            invariant_check = True
+            # check the state invariants and termination
             if check_constraints:
-                for invariant in invariants:
-                    sample, key, err, params = invariant(subs, params, key)
-                    invariant_check = jnp.logical_and(invariant_check, sample)
-                    errors |= err
-            
-            # check the termination (TODO: zero out reward in s if terminated)
-            terminated_check = False
-            if check_constraints:
-                for terminal in terminals:
-                    sample, key, err, params = terminal(subs, params, key)
-                    terminated_check = jnp.logical_or(terminated_check, sample)
-                    errors |= err
-            
+                invariant_sat, key, errors, params = invariant_fn(key, errors, subs, params)
+                terminated_sat, key, errors, params = terminal_fn(key, errors, subs, params)
+            else:
+                invariant_sat = True
+                terminated_sat = False
+               
             # prepare the return value
             log = {
                 'fluents': fluents,
                 'reward': reward,
                 'error': errors,
-                'precondition': precond_check,
-                'invariant': invariant_check,
-                'termination': terminated_check
-            }            
-            if constraint_func:
-                log['inequalities'] = inequalities
-                log['equalities'] = equalities
-                
+                'precondition': precond_sat,
+                'invariant': invariant_sat,
+                'termination': terminated_sat,
+                'inequalities': inequalities,
+                'equalities': equalities
+            }                
             return subs, log, params
         
         return _jax_wrapped_single_step        
