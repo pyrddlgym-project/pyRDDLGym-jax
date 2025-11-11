@@ -20,7 +20,7 @@
 
 import time
 import numpy as np
-from typing import Callable, Dict, Optional, Union
+from typing import Callable, Dict, Optional, Tuple, Union
 
 import jax
 
@@ -186,7 +186,7 @@ class JaxRDDLSimulator(RDDLSimulator):
         self.handle_error_code(error, 'reward function')
         return float(reward)
     
-    def step(self, actions: Args) -> Args:
+    def step(self, actions: Args) -> Tuple[Args, float, bool]:
         '''Samples and returns the next state from the cpfs.
         
         :param actions: a dict mapping current action fluents to their values

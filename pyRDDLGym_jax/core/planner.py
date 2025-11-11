@@ -43,8 +43,7 @@ import pickle
 import sys
 import time
 import traceback
-from typing import Any, Callable, Dict, Generator, Optional, Set, Sequence, Type, Tuple, \
-    Union
+from typing import Any, Callable, Dict, Generator, Optional, Sequence, Type, Tuple, Union
 
 import haiku as hk
 import jax
@@ -256,15 +255,15 @@ class Preprocessor(metaclass=ABCMeta):
         self._transform = None
 
     @property
-    def initialize(self):
+    def initialize(self) -> Callable:
         return self._initializer
 
     @property
-    def update(self):
+    def update(self) -> Callable:
         return self._update
     
     @property
-    def transform(self):
+    def transform(self) -> Callable:
         return self._transform
     
     @abstractmethod
@@ -365,40 +364,38 @@ class JaxPlan(metaclass=ABCMeta):
         pass
     
     @property
-    def initializer(self):
+    def initializer(self) -> Callable:
         return self._initializer
 
     @initializer.setter
-    def initializer(self, value):
+    def initializer(self, value: Callable) -> None:
         self._initializer = value
     
     @property
-    def train_policy(self):
+    def train_policy(self) -> Callable:
         return self._train_policy
 
     @train_policy.setter
-    def train_policy(self, value):
+    def train_policy(self, value: Callable) -> None:
         self._train_policy = value
         
     @property
-    def test_policy(self):
+    def test_policy(self) -> Callable:
         return self._test_policy
 
     @test_policy.setter
-    def test_policy(self, value):
+    def test_policy(self, value: Callable) -> None:
         self._test_policy = value
          
     @property
-    def projection(self):
+    def projection(self) -> Callable:
         return self._projection
 
     @projection.setter
-    def projection(self, value):
+    def projection(self, value: Callable) -> None:
         self._projection = value
     
-    def _calculate_action_info(self, compiled: JaxRDDLCompilerWithGrad,
-                               user_bounds: Bounds,
-                               horizon: int):
+    def _calculate_action_info(self, compiled, user_bounds, horizon):
         shapes, bounds, bounds_safe, cond_lists = {}, {}, {}, {}
         for (name, prange) in compiled.rddl.variable_ranges.items():
             if compiled.rddl.variable_types[name] != 'action-fluent':
@@ -449,10 +446,9 @@ class JaxPlan(metaclass=ABCMeta):
                     f'[INFO] Bounds of action-fluent <{name}> set to {bounds[name]}.', 
                     'dark_grey'
                 ))
-
         return shapes, bounds, bounds_safe, cond_lists
     
-    def _count_bool_actions(self, rddl: RDDLLiftedModel):
+    def _count_bool_actions(self, rddl):
         constraint = rddl.max_allowed_actions
         num_bool_actions = sum(np.size(values)
                                for (var, values) in rddl.action_fluents.items()
@@ -460,18 +456,20 @@ class JaxPlan(metaclass=ABCMeta):
         return num_bool_actions, constraint
 
 
-class JaxActionProjection:
+class JaxActionProjection(metaclass=ABCMeta):
     '''Base of all straight-line plan action projections.'''
 
+    @abstractmethod
     def compile(self, *args, **kwargs) -> Callable:
-        raise NotImplementedError
+        pass
     
 
 class JaxSortingActionProjection(JaxActionProjection):
     '''Action projection using sorting method.'''
 
-    def compile(self, ranges, noop, wrap_sigmoid, allowed_actions, bool_threshold, 
-                jax_bool_to_box, *args, **kwargs) -> Callable:
+    def compile(self, ranges: Dict[str, str], noop: Dict[str, Any], 
+                wrap_sigmoid: bool, allowed_actions: int, bool_threshold: float, 
+                jax_bool_to_box: Callable, *args, **kwargs) -> Callable:
 
         # shift the boolean actions uniformly, clipping at the min/max values
         # the amount to move is such that only top allowed_actions actions
@@ -513,9 +511,10 @@ class JaxSortingActionProjection(JaxActionProjection):
 class JaxSogbofaActionProjection(JaxActionProjection):
     '''Action projection using the SOGBOFA method.'''
 
-    def compile(self, ranges, noop, allowed_actions, max_constraint_iter, 
-                jax_param_to_action, jax_action_to_param, min_action, max_action,
-                *args, **kwargs) -> Callable:
+    def compile(self, ranges: Dict[str, str], noop: Dict[str, Any], 
+                allowed_actions: int, max_constraint_iter: int, 
+                jax_param_to_action: Callable, jax_action_to_param: Callable, 
+                min_action: float, max_action: float, *args, **kwargs) -> Callable:
         
         # calculate the surplus of actions above max-nondef-actions
         def _jax_wrapped_sogbofa_surplus(actions):
@@ -1283,11 +1282,11 @@ class PGPE(metaclass=ABCMeta):
         self._update = None
 
     @property
-    def initialize(self):
+    def initialize(self) -> Callable:
         return self._initializer
 
     @property
-    def update(self):
+    def update(self) -> Callable:
         return self._update
 
     @abstractmethod
@@ -1765,7 +1764,7 @@ UTILITY_LOOKUP = {
 
 
 @jax.jit
-def pytree_at(tree, i):
+def pytree_at(tree: Pytree, i: int) -> Pytree:
     return jax.tree_util.tree_map(lambda x: x[i], tree)
 
 
@@ -2806,7 +2805,7 @@ class JaxBackpropPlanner:
                 f'diagnosis: {diagnosis}\n'
             )
     
-    def _perform_diagnosis(self, last_iter_improve,
+    def _perform_diagnosis(self, last_iter_improve, 
                            train_return, test_return, best_return, grad_norm):
         grad_norms = jax.tree_util.tree_leaves(grad_norm)
         max_grad_norm = max(grad_norms) if grad_norms else np.nan

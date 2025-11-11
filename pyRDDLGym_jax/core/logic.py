@@ -51,7 +51,7 @@ def enumerate_literals(shape: Tuple[int, ...], axis: int, dtype: type=jnp.int32)
 
 # branching sigmoid to help reduce numerical issues
 @jax.custom_jvp
-def stable_sigmoid(x):
+def stable_sigmoid(x: jnp.ndarray) -> jnp.ndarray:
     return jnp.where(x >= 0, 1.0 / (1.0 + jnp.exp(-x)), jnp.exp(x) / (1.0 + jnp.exp(x)))
 
 
@@ -66,7 +66,7 @@ def stable_sigmoid_jvp(primals, tangents):
 
 # branching tanh to help reduce numerical issues
 @jax.custom_jvp
-def stable_tanh(x):
+def stable_tanh(x: jnp.ndarray) -> jnp.ndarray:
     ax = jnp.abs(x)
     small = jnp.where(
         ax < 20.0,
@@ -85,7 +85,8 @@ def stable_tanh_jvp(primals, tangents):
 
 
 # it seems JAX uses the stability trick already
-def stable_softmax_weight_sum(logits, values, axis):
+def stable_softmax_weight_sum(logits: jnp.ndarray, values: jnp.ndarray, 
+                              axis: Union[int, Tuple[int, ...]]) -> jnp.ndarray:
     probs = jax.nn.softmax(logits)
     return jnp.sum(values * probs, axis=axis)
 
@@ -99,8 +100,7 @@ class JaxRDDLCompilerWithGrad(JaxRDDLCompiler):
     
     def __init__(self, *args,
                  cpfs_without_grad: Optional[Set[str]]=None,
-                 print_warnings: bool=True,
-                 **kwargs) -> None:
+                 print_warnings: bool=True, **kwargs) -> None:
         '''Creates a new RDDL to Jax compiler, where operations that are not
         differentiable are converted to approximate forms that have defined gradients.
         
@@ -757,7 +757,8 @@ class SoftmaxSwitch(JaxRDDLCompilerWithGrad):
 
 class ReparameterizedGeometric(JaxRDDLCompilerWithGrad):
 
-    def __init__(self, *args, geometric_floor_weight: float=10., 
+    def __init__(self, *args, 
+                 geometric_floor_weight: float=10., 
                  geometric_eps: float=1e-14, **kwargs) -> None:
         super(ReparameterizedGeometric, self).__init__(*args, **kwargs)
         self.geometric_floor_weight = float(geometric_floor_weight)
@@ -870,7 +871,8 @@ class ReparameterizedSigmoidBernoulli(JaxRDDLCompilerWithGrad):
 
 class GumbelSoftmaxBernoulli(JaxRDDLCompilerWithGrad):
     
-    def __init__(self, *args, bernoulli_softmax_weight: float=10., 
+    def __init__(self, *args, 
+                 bernoulli_softmax_weight: float=10., 
                  bernoulli_eps: float=1e-14, **kwargs) -> None:
         super(GumbelSoftmaxBernoulli, self).__init__(*args, **kwargs)
         self.bernoulli_softmax_weight = float(bernoulli_softmax_weight)
@@ -949,7 +951,8 @@ class DeterminizedBernoulli(JaxRDDLCompilerWithGrad):
 # https://arxiv.org/pdf/1611.01144
 class GumbelSoftmaxDiscrete(JaxRDDLCompilerWithGrad):
     
-    def __init__(self, *args, discrete_softmax_weight: float=10., 
+    def __init__(self, *args, 
+                 discrete_softmax_weight: float=10., 
                  discrete_eps: float=1e-14, **kwargs) -> None:
         super(GumbelSoftmaxDiscrete, self).__init__(*args, **kwargs)
         self.discrete_softmax_weight = float(discrete_softmax_weight)
@@ -1072,7 +1075,8 @@ class DeterminizedDiscrete(JaxRDDLCompilerWithGrad):
 
 class GumbelSoftmaxBinomial(JaxRDDLCompilerWithGrad):
 
-    def __init__(self, *args, binomial_nbins: int=100, 
+    def __init__(self, *args, 
+                 binomial_nbins: int=100, 
                  binomial_softmax_weight: float=10., 
                  binomial_eps: float=1e-14, **kwargs) -> None:
         super(GumbelSoftmaxBinomial, self).__init__(*args, **kwargs)
@@ -1202,10 +1206,10 @@ class DeterminizedBinomial(JaxRDDLCompilerWithGrad):
 
 class ExponentialPoisson(JaxRDDLCompilerWithGrad):
     
-    def __init__(self, *args, poisson_nbins: int=100, 
+    def __init__(self, *args, 
+                 poisson_nbins: int=100, 
                  poisson_comparison_weight: float=10., 
-                 poisson_min_cdf: float=0.999, 
-                 **kwargs) -> None:
+                 poisson_min_cdf: float=0.999, **kwargs) -> None:
         super(ExponentialPoisson, self).__init__(*args, **kwargs)
         self.poisson_nbins = poisson_nbins
         self.poisson_comparison_weight = float(poisson_comparison_weight)
@@ -1306,11 +1310,11 @@ class ExponentialPoisson(JaxRDDLCompilerWithGrad):
 
 class GumbelSoftmaxPoisson(JaxRDDLCompilerWithGrad):
 
-    def __init__(self, *args, poisson_nbins: int=100, 
+    def __init__(self, *args, 
+                 poisson_nbins: int=100, 
                  poisson_softmax_weight: float=10., 
                  poisson_min_cdf: float=0.999, 
-                 poisson_eps: float=1e-14,
-                 **kwargs) -> None:
+                 poisson_eps: float=1e-14, **kwargs) -> None:
         super(GumbelSoftmaxPoisson, self).__init__(*args, **kwargs)
         self.poisson_nbins = poisson_nbins
         self.poisson_softmax_weight = float(poisson_softmax_weight)
