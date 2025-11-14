@@ -311,7 +311,7 @@ class SoftmaxArgmax(JaxRDDLCompilerWithGrad):
         id_ = expr.id
         aux['params'][id_] = self.argmax_weight
         aux['overriden'][id_] = __class__.__name__
-        * _, arg = expr.args
+        *_, arg = expr.args
         _, axes = self.traced.cached_sim_info(expr)   
         jax_expr = self._jax(arg, aux) 
         def argmax_op(x, params):
@@ -325,7 +325,7 @@ class SoftmaxArgmax(JaxRDDLCompilerWithGrad):
         id_ = expr.id
         aux['params'][id_] = self.argmax_weight
         aux['overriden'][id_] = __class__.__name__
-        * _, arg = expr.args
+        *_, arg = expr.args
         _, axes = self.traced.cached_sim_info(expr)   
         jax_expr = self._jax(arg, aux) 
         def argmin_op(x, params):

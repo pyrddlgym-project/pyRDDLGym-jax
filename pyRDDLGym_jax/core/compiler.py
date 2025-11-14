@@ -1037,7 +1037,7 @@ class JaxRDDLCompiler:
             return self._jax_argmax(expr, aux)
         
     def _jax_aggregation_helper(self, expr, aux, jax_op, is_bool=False):
-        * _, arg = expr.args
+        *_, arg = expr.args
         _, axes = self.traced.cached_sim_info(expr)   
         jax_expr = self._jax(arg, aux) 
         return self._jax_unary(
@@ -2065,7 +2065,7 @@ class JaxRDDLCompiler:
                 f'Matrix operation {op} is not supported.\n' + print_stack_trace(expr))
     
     def _jax_matrix_det(self, expr, aux):
-        * _, arg = expr.args
+        *_, arg = expr.args
         jax_arg = self._jax(arg, aux)
         
         def _jax_wrapped_matrix_operation_det(x, params, key):

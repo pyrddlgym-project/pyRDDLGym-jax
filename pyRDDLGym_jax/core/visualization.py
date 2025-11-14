@@ -50,6 +50,7 @@ POLICY_DIST_PLOTS_PER_ROW = 6
 ACTION_HEATMAP_HEIGHT = 400
 PROGRESS_FOR_NEXT_RETURN_DIST = 2
 PROGRESS_FOR_NEXT_POLICY_DIST = 10
+PROGRESS_FOR_NEXT_BASIC_TIME_CURVE = 0.05
 REWARD_ERROR_DIST_SUBPLOTS = 20
 MODEL_STATE_ERROR_HEIGHT = 300
 POLICY_STATE_VIZ_MAX_HEIGHT = 800
@@ -79,6 +80,7 @@ class JaxPlannerDashboard:
         self.test_return = {}
         self.train_return = {}
         self.pgpe_return = {}
+        self.basic_time_curve_last_progress = {}
         self.return_dist = {}
         self.return_dist_ticks = {}
         self.return_dist_last_progress = {}
@@ -1399,6 +1401,7 @@ class JaxPlannerDashboard:
         self.train_return[experiment_id] = []
         self.test_return[experiment_id] = []
         self.pgpe_return[experiment_id] = []
+        self.basic_time_curve_last_progress[experiment_id] = 0
         self.return_dist_ticks[experiment_id] = []
         self.return_dist_last_progress[experiment_id] = 0
         self.return_dist[experiment_id] = []
@@ -1446,14 +1449,18 @@ class JaxPlannerDashboard:
         '''Pass new information and update the dashboard for a given experiment.'''
         
         # data for return curves
+        progress = callback['progress']
         iteration = callback['iteration']
-        self.xticks[experiment_id].append(iteration)
-        self.train_return[experiment_id].append(np.min(callback['train_return']))  
-        self.test_return[experiment_id].append(np.min(callback['best_return']))
-        self.pgpe_return[experiment_id].append(np.min(callback['pgpe_return']))
+        if progress - self.basic_time_curve_last_progress[experiment_id] >= PROGRESS_FOR_NEXT_BASIC_TIME_CURVE:
+            self.xticks[experiment_id].append(iteration)
+            self.train_return[experiment_id].append(np.min(callback['train_return']))  
+            self.test_return[experiment_id].append(np.min(callback['best_return']))
+            self.pgpe_return[experiment_id].append(np.min(callback['pgpe_return']))
+            for (key, values) in callback['model_params'].items():
+                self.relaxed_exprs_values[experiment_id][key].append(values[0])
+            self.basic_time_curve_last_progress[experiment_id] = progress
         
         # data for return distributions
-        progress = int(callback['progress'])
         if progress - self.return_dist_last_progress[experiment_id] >= PROGRESS_FOR_NEXT_RETURN_DIST:
             self.return_dist_ticks[experiment_id].append(iteration)
             self.return_dist[experiment_id].append(
@@ -1486,10 +1493,6 @@ class JaxPlannerDashboard:
         self.test_state_output[experiment_id] = test_state_output
         
         # data for reward distributions
-        model_params = callback['model_params']
-        for (key, values) in model_params.items():
-            expr_id = int(str(key).split('_')[0])
-            self.relaxed_exprs_values[experiment_id][expr_id].append(values[0])
         self.train_reward_dist[experiment_id] = np.mean(callback['train_log']['reward'], axis=0)
         self.test_reward_dist[experiment_id] = np.mean(callback['test_log']['reward'], axis=0)
         self.train_state_fluents[experiment_id] = {
@@ -1499,7 +1502,7 @@ class JaxPlannerDashboard:
         # update experiment table info
         self.status[experiment_id] = str(callback['status']).split('.')[1]
         self.duration[experiment_id] = callback["elapsed_time"]
-        self.progress[experiment_id] = progress
+        self.progress[experiment_id] = int(progress)
         self.warnings = None
     
     def update_tuning(self, optimizer: Any, bounds: Dict[str, Tuple[float, float]]) -> None:
