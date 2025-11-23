@@ -37,25 +37,22 @@ LossFunction = Callable[[jnp.ndarray, jnp.ndarray], jnp.ndarray]
 
 def mean_squared_error() -> LossFunction:
     def _jax_wrapped_mse_loss(target, pred):
-        loss_values = jnp.square(target - pred)
-        return loss_values
+        return jnp.square(target - pred)
     return jax.jit(_jax_wrapped_mse_loss)
 
 
-def binary_cross_entropy(eps: float=1e-6) -> LossFunction:
+def binary_cross_entropy(eps: float=1e-8) -> LossFunction:
     def _jax_wrapped_binary_cross_entropy_loss(target, pred):
         pred = jnp.clip(pred, eps, 1.0 - eps)
         log_pred = jnp.log(pred)
         log_not_pred = jnp.log(1.0 - pred)
-        loss_values = -target * log_pred - (1.0 - target) * log_not_pred
-        return loss_values
+        return -target * log_pred - (1.0 - target) * log_not_pred
     return jax.jit(_jax_wrapped_binary_cross_entropy_loss)
 
 
 def optax_loss(loss_fn: LossFunction, **kwargs) -> LossFunction:
     def _jax_wrapped_optax_loss(target, pred):
-        loss_values = loss_fn(pred, target, **kwargs)
-        return loss_values
+        return loss_fn(pred, target, **kwargs)
     return jax.jit(_jax_wrapped_optax_loss)
 
 
@@ -189,32 +186,30 @@ class JaxModelLearner:
         # compile the transition step function
         step_fn = self.compiled.compile_transition()
 
-        def _jax_wrapped_step(key, param_fluents, subs, actions, hyperparams):
-            for (name, param) in param_fluents.items():
-                subs[name] = param
-            subs, _, hyperparams = step_fn(key, actions, subs, hyperparams)
-            return subs, hyperparams
+        def _jax_wrapped_step(key, param_fluents, fls, nfls, actions, hyperparams):
+            nfls = nfls.copy()
+            nfls.update(param_fluents)
+            fls, _, hyperparams = step_fn(key, actions, fls, nfls, hyperparams)
+            return fls, hyperparams
 
         # batched step function
-        def _jax_wrapped_batched_step(key, param_fluents, subs, actions, hyperparams):
-            keys = jnp.asarray(random.split(key, num=self.batch_size_train))
-            subs, hyperparams = jax.vmap(
-                _jax_wrapped_step, in_axes=(0, None, 0, 0, None)
-            )(keys, param_fluents, subs, actions, hyperparams)
+        def _jax_wrapped_batched_step(key, param_fluents, fls, nfls, actions, hyperparams):
+            keys = random.split(key, num=self.batch_size_train)
+            fls, hyperparams = jax.vmap(
+                _jax_wrapped_step, in_axes=(0, None, 0, None, 0, None)
+            )(keys, param_fluents, fls, nfls, actions, hyperparams)
             hyperparams = jax.tree_util.tree_map(self.model_params_reduction, hyperparams)
-            return subs, hyperparams
+            return fls, hyperparams
 
         # batched step function with parallel samples per data point
-        def _jax_wrapped_batched_parallel_step(key, param_fluents, subs, actions, hyperparams):
-            keys = jnp.asarray(random.split(key, num=self.samples_per_datapoint))
-            subs, hyperparams = jax.vmap(
-                _jax_wrapped_batched_step, in_axes=(0, None, None, None, None)
-            )(keys, param_fluents, subs, actions, hyperparams)
+        def _jax_wrapped_batched_parallel_step(key, param_fluents, fls, nfls, actions, hyperparams):
+            keys = random.split(key, num=self.samples_per_datapoint)
+            fls, hyperparams = jax.vmap(
+                _jax_wrapped_batched_step, in_axes=(0, None, None, None, None, None)
+            )(keys, param_fluents, fls, nfls, actions, hyperparams)
             hyperparams = jax.tree_util.tree_map(self.model_params_reduction, hyperparams)
-            return subs, hyperparams
-
-        batched_step_fn = jax.jit(_jax_wrapped_batched_parallel_step)
-        return batched_step_fn        
+            return fls, hyperparams
+        return jax.jit(_jax_wrapped_batched_parallel_step)
 
     def _jax_map(self):
 
@@ -252,20 +247,18 @@ class JaxModelLearner:
                     else:
                         param_fluents[name] = param
             return param_fluents
-        
-        map_fn = jax.jit(_jax_wrapped_params_to_fluents)
-        return map_fn
+        return jax.jit(_jax_wrapped_params_to_fluents)
 
     def _jax_loss(self, map_fn, step_fn):
 
         # use binary cross entropy for bool fluents
         # mean squared error for continuous and integer fluents
-        def _jax_wrapped_batched_model_loss(key, param_fluents, subs, actions, next_fluents, 
-                                            hyperparams):
-            next_subs, hyperparams = step_fn(key, param_fluents, subs, actions, hyperparams)
+        def _jax_wrapped_batched_model_loss(key, param_fluents, fls, nfls, actions, 
+                                            next_fluents, hyperparams):
+            fls, hyperparams = step_fn(key, param_fluents, fls, nfls, actions, hyperparams)
             total_loss = 0.0
             for (name, next_value) in next_fluents.items():
-                preds = jnp.asarray(next_subs[name], dtype=self.compiled.REAL)
+                preds = jnp.asarray(fls[name], dtype=self.compiled.REAL)
                 targets = jnp.asarray(next_value, dtype=self.compiled.REAL)[jnp.newaxis, ...]
                 if self.rddl.variable_ranges[name] == 'bool':
                     loss_values = self.bool_fluent_loss(targets, preds)
@@ -277,14 +270,12 @@ class JaxModelLearner:
             return total_loss, hyperparams
         
         # loss with the parameters mapped to their fluents
-        def _jax_wrapped_batched_loss(key, params, subs, actions, next_fluents, hyperparams):
+        def _jax_wrapped_batched_loss(key, params, fls, nfls, actions, next_fluents, 
+                                      hyperparams):
             param_fluents = map_fn(params)
-            loss, hyperparams = _jax_wrapped_batched_model_loss(
-                key, param_fluents, subs, actions, next_fluents, hyperparams)
-            return loss, hyperparams
-
-        loss_fn = jax.jit(_jax_wrapped_batched_loss)
-        return loss_fn
+            return _jax_wrapped_batched_model_loss(
+                key, param_fluents, fls, nfls, actions, next_fluents, hyperparams)
+        return jax.jit(_jax_wrapped_batched_loss)
     
     def _jax_init(self, project_fn):
         optimizer = self.optimizer
@@ -323,20 +314,19 @@ class JaxModelLearner:
                     if self.rddl.variable_ranges[name] == 'bool':
                         new_params[name] = value
                     else:
-                        lower, upper = self.param_ranges[name]
-                        new_params[name] = jnp.clip(value, lower, upper)
+                        new_params[name] = jnp.clip(value, *self.param_ranges[name])
                 return new_params
 
         # gradient descent update
-        def _jax_wrapped_params_update(key, params, subs, actions, next_fluents, 
+        def _jax_wrapped_params_update(key, params, fls, nfls, actions, next_fluents, 
                                        hyperparams, opt_state):
             (loss_val, hyperparams), grad = jax.value_and_grad(
                 loss_fn, argnums=1, has_aux=True
-            )(key, params, subs, actions, next_fluents, hyperparams)
+            )(key, params, fls, nfls, actions, next_fluents, hyperparams)
             updates, opt_state = optimizer.update(grad, opt_state)
             params = optax.apply_updates(params, updates)
             params = _jax_wrapped_project_params(params)
-            zero_grads = jax.tree_util.tree_map(partial(jnp.allclose, b=0.0), grad)
+            zero_grads = jax.tree_util.tree_map(partial(jnp.allclose, b=0), grad)
             return params, opt_state, loss_val, zero_grads, hyperparams
     
         update_fn = jax.jit(_jax_wrapped_params_update)
@@ -344,15 +334,17 @@ class JaxModelLearner:
         return update_fn, project_fn
     
     def _batched_init_subs(self): 
-        init_train = {}
+        init_fls, init_nfls = {}, {}
         for (name, value) in self.compiled.init_values.items():
-            value = np.reshape(value, np.shape(value))[np.newaxis, ...]
-            value = np.repeat(value, repeats=self.batch_size_train, axis=0)
             value = np.asarray(value, dtype=self.compiled.REAL)
-            init_train[name] = value
+            if name in self.rddl.non_fluents:
+                init_nfls[name] = value
+            else:
+                init_fls[name] = np.repeat(
+                    value[np.newaxis, ...], repeats=self.batch_size_train, axis=0)
         for (state, next_state) in self.rddl.next_state.items():
-            init_train[next_state] = init_train[state]
-        return init_train
+            init_fls[next_state] = init_fls[state]
+        return init_fls, init_nfls
     
     # ===========================================================================
     # ESTIMATE API
@@ -413,7 +405,7 @@ class JaxModelLearner:
             key = random.PRNGKey(round(time.time() * 1000))
         
         # prepare initial subs
-        subs = self._batched_init_subs()
+        fls, nfls = self._batched_init_subs()
 
         # initialize parameter fluents to optimize
         if guess is None:
@@ -437,10 +429,10 @@ class JaxModelLearner:
             status = JaxLearnerStatus.NORMAL
 
             # gradient update
-            subs.update(states)
+            fls.update(states)
             key, subkey = random.split(key)
             params, opt_state, loss, zero_grads, hyperparams = self.update_fn(
-                subkey, params, subs, actions, next_states, hyperparams, opt_state)
+                subkey, params, fls, nfls, actions, next_states, hyperparams, opt_state)
             
             # extract non-fluent values from the trainable parameters
             param_fluents = self.map_fn(params)
@@ -448,7 +440,8 @@ class JaxModelLearner:
 
             # check for learnability
             params_zero_grads = {
-                name for (name, zero_grad) in zero_grads.items() if zero_grad}
+                name for (name, zero_grad) in zero_grads.items() if zero_grad
+            }
             if params_zero_grads:
                 status = JaxLearnerStatus.NO_PROGRESS
 
@@ -502,14 +495,14 @@ class JaxModelLearner:
         '''
         if key is None:
             key = random.PRNGKey(round(time.time() * 1000))
-        subs = self._batched_init_subs()
+        fls, nfls = self._batched_init_subs()
         hyperparams = self.compiled.model_aux['params']
         mean_loss = 0.0
         for (it, (states, actions, next_states)) in enumerate(data):
-            subs.update(states)
+            fls.update(states)
             key, subkey = random.split(key)
             loss_value, _ = self.loss_fn(
-                subkey, param_fluents, subs, actions, next_states, hyperparams)
+                subkey, param_fluents, fls, nfls, actions, next_states, hyperparams)
             mean_loss += (loss_value - mean_loss) / (it + 1)
         return mean_loss
 
@@ -522,15 +515,13 @@ class JaxModelLearner:
         model = deepcopy(self.rddl)
         for (name, values) in param_fluents.items():
             prange = model.variable_ranges[name]
-            if prange == 'real':
-                pass
-            elif prange == 'bool':
+            if prange == 'bool':
                 values = values > 0.5
-            else:
+            elif prange != 'real':
                 values = np.asarray(values, dtype=self.compiled.INT)
             values = np.ravel(values, order='C').tolist()
             if not self.rddl.variable_params[name]:
-                assert(len(values) == 1)
+                assert (len(values) == 1)
                 values = values[0]
             model.non_fluents[name] = values
         return model
@@ -547,7 +538,7 @@ if __name__ == '__main__':
         env = pyRDDLGym.make('CartPole_Continuous_gym', '0', vectorized=True)
         model = JaxModelLearner(rddl=env.model, param_ranges={}, batch_size_train=bs)
         key = random.PRNGKey(round(time.time() * 1000))
-        subs = model._batched_init_subs()
+        fls, nfls = model._batched_init_subs()
         param_fluents = {}
         while True:
             states = {
@@ -556,14 +547,14 @@ if __name__ == '__main__':
                 'ang-pos': np.random.uniform(-0.21, 0.21, (bs,)),
                 'ang-vel': np.random.uniform(-0.21, 0.21, (bs,))
             }
-            subs.update(states)
+            fls.update(states)
             actions = {
                 'force': np.random.uniform(-10., 10., (bs,))
             }
             key, subkey = random.split(key)
-            subs, _ = model.step_fn(subkey, param_fluents, subs, actions, {})
-            subs = {k: np.asarray(v)[0, ...] for k, v in subs.items()}
-            next_states = {k: subs[k] for k in model.rddl.state_fluents}
+            fls, _ = model.step_fn(subkey, param_fluents, fls, nfls, actions, {})
+            fls = {k: np.asarray(v)[0, ...] for k, v in fls.items()}
+            next_states = {k: fls[k] for k in model.rddl.state_fluents}
             yield (states, actions, next_states)
     
     # train it

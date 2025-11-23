@@ -85,10 +85,10 @@ def stable_tanh_jvp(primals, tangents):
 
 
 # it seems JAX uses the stability trick already
-def stable_softmax_weight_sum(logits: jnp.ndarray, values: jnp.ndarray, 
+def stable_softmax_weight_sum(logits: jnp.ndarray, 
+                              values: jnp.ndarray, 
                               axis: Union[int, Tuple[int, ...]]) -> jnp.ndarray:
-    probs = jax.nn.softmax(logits)
-    return jnp.sum(values * probs, axis=axis)
+    return jnp.sum(values * jax.nn.softmax(logits), axis=axis)
 
 
 class JaxRDDLCompilerWithGrad(JaxRDDLCompiler):
@@ -100,7 +100,8 @@ class JaxRDDLCompilerWithGrad(JaxRDDLCompiler):
     
     def __init__(self, *args,
                  cpfs_without_grad: Optional[Set[str]]=None,
-                 print_warnings: bool=True, **kwargs) -> None:
+                 print_warnings: bool=True, 
+                 **kwargs) -> None:
         '''Creates a new RDDL to Jax compiler, where operations that are not
         differentiable are converted to approximate forms that have defined gradients.
         
@@ -125,9 +126,7 @@ class JaxRDDLCompilerWithGrad(JaxRDDLCompiler):
                 pvars_cast.add(var)
         if self.print_warnings and pvars_cast:
             print(termcolor.colored(
-                f'[INFO] JAX gradient compiler will cast pvars {pvars_cast} to float.', 
-                'dark_grey'
-            ))
+                f'[INFO] Compiler will cast pvars {pvars_cast} to float.', 'dark_grey'))
         
     def get_kwargs(self) -> Dict[str, Any]:
         kwargs = super().get_kwargs()
@@ -136,8 +135,8 @@ class JaxRDDLCompilerWithGrad(JaxRDDLCompiler):
         return kwargs
 
     def _jax_stop_grad(self, jax_expr):        
-        def _jax_wrapped_stop_grad(x, params, key):
-            sample, key, error, params = jax_expr(x, params, key)
+        def _jax_wrapped_stop_grad(fls, nfls, params, key):
+            sample, key, error, params = jax_expr(fls, nfls, params, key)
             sample = jax.lax.stop_gradient(sample)
             return sample, key, error, params
         return _jax_wrapped_stop_grad
@@ -158,29 +157,25 @@ class JaxRDDLCompilerWithGrad(JaxRDDLCompiler):
                     
         if self.print_warnings and cpfs_cast:
             print(termcolor.colored(
-                f'[INFO] JAX gradient compiler will cast CPFs {cpfs_cast} to float.', 
-                'dark_grey'
-            ))
+                f'[INFO] Compiler will cast CPFs {cpfs_cast} to float.', 'dark_grey'))
         if self.print_warnings and self.cpfs_without_grad:
             print(termcolor.colored(
-                f'[INFO] Gradients will not flow through CPFs {self.cpfs_without_grad}.', 
-                'dark_grey'
-            ))
+                f'[INFO] Gradient disabled for CPFs {self.cpfs_without_grad}.', 'dark_grey'))
  
         return jax_cpfs
     
     def _jax_unary_with_param(self, jax_expr, jax_op):
-        def _jax_wrapped_unary_op_with_param(x, params, key):
-            sample, key, err, params = jax_expr(x, params, key)
+        def _jax_wrapped_unary_op_with_param(fls, nfls, params, key):
+            sample, key, err, params = jax_expr(fls, nfls, params, key)
             sample = self.ONE * sample
             sample, params = jax_op(sample, params)
             return sample, key, err, params
         return _jax_wrapped_unary_op_with_param
     
     def _jax_binary_with_param(self, jax_lhs, jax_rhs, jax_op):
-        def _jax_wrapped_binary_op_with_param(x, params, key):
-            sample1, key, err1, params = jax_lhs(x, params, key)
-            sample2, key, err2, params = jax_rhs(x, params, key)
+        def _jax_wrapped_binary_op_with_param(fls, nfls, params, key):
+            sample1, key, err1, params = jax_lhs(fls, nfls, params, key)
+            sample2, key, err2, params = jax_rhs(fls, nfls, params, key)
             sample1 = self.ONE * sample1
             sample2 = self.ONE * sample2
             sample, params = jax_op(sample1, sample2, params)
@@ -302,8 +297,7 @@ class SoftmaxArgmax(JaxRDDLCompilerWithGrad):
     @staticmethod
     def soft_argmax(x: jnp.ndarray, w: float, axes: Union[int, Tuple[int, ...]]) -> jnp.ndarray:
         literals = enumerate_literals(jnp.shape(x), axis=axes)
-        sample = stable_softmax_weight_sum(w * x, literals, axis=axes)
-        return sample
+        return stable_softmax_weight_sum(w * x, literals, axis=axes)
 
     def _jax_argmax(self, expr, aux):
         if not self.traced.cached_is_fluent(expr):
@@ -311,7 +305,7 @@ class SoftmaxArgmax(JaxRDDLCompilerWithGrad):
         id_ = expr.id
         aux['params'][id_] = self.argmax_weight
         aux['overriden'][id_] = __class__.__name__
-        *_, arg = expr.args
+        arg = expr.args[-1]
         _, axes = self.traced.cached_sim_info(expr)   
         jax_expr = self._jax(arg, aux) 
         def argmax_op(x, params):
@@ -325,7 +319,7 @@ class SoftmaxArgmax(JaxRDDLCompilerWithGrad):
         id_ = expr.id
         aux['params'][id_] = self.argmax_weight
         aux['overriden'][id_] = __class__.__name__
-        *_, arg = expr.args
+        arg = expr.args[-1]
         _, axes = self.traced.cached_sim_info(expr)   
         jax_expr = self._jax(arg, aux) 
         def argmin_op(x, params):
@@ -345,8 +339,7 @@ class ProductNormLogical(JaxRDDLCompilerWithGrad):
         super(ProductNormLogical, self).__init__(*args, **kwargs)
 
     def get_kwargs(self) -> Dict[str, Any]:
-        kwargs = super().get_kwargs()
-        return kwargs
+        return super().get_kwargs()
 
     def _jax_not(self, expr, aux):
         if not self.traced.cached_is_fluent(expr):
@@ -416,8 +409,7 @@ class GodelNormLogical(JaxRDDLCompilerWithGrad):
         super(GodelNormLogical, self).__init__(*args, **kwargs)
         
     def get_kwargs(self) -> Dict[str, Any]:
-        kwargs = super().get_kwargs()
-        return kwargs
+        return super().get_kwargs()
 
     def _jax_not(self, expr, aux):
         if not self.traced.cached_is_fluent(expr):
@@ -483,8 +475,7 @@ class LukasiewiczNormLogical(JaxRDDLCompilerWithGrad):
         super(LukasiewiczNormLogical, self).__init__(*args, **kwargs)
 
     def get_kwargs(self) -> Dict[str, Any]:
-        kwargs = super().get_kwargs()
-        return kwargs
+        return super().get_kwargs()
 
     def _jax_not(self, expr, aux):
         if not self.traced.cached_is_fluent(expr):
@@ -667,8 +658,7 @@ class LinearIfElse(JaxRDDLCompilerWithGrad):
         super(LinearIfElse, self).__init__(*args, **kwargs)
 
     def get_kwargs(self) -> Dict[str, Any]:
-        kwargs = super().get_kwargs()
-        return kwargs
+        return super().get_kwargs()
 
     def _jax_if(self, expr, aux):
         JaxRDDLCompilerWithGrad._check_num_args(expr, 3)
@@ -684,11 +674,11 @@ class LinearIfElse(JaxRDDLCompilerWithGrad):
         jax_true = self._jax(if_true, aux)
         jax_false = self._jax(if_false, aux)
         
-        def _jax_wrapped_if_then_else_linear(x, params, key):
-            sample_pred, key, err1, params = jax_pred(x, params, key)
-            sample_true, key, err2, params = jax_true(x, params, key)
-            sample_false, key, err3, params = jax_false(x, params, key)
-            sample = sample_pred * sample_true + (1. - sample_pred) * sample_false
+        def _jax_wrapped_if_then_else_linear(fls, nfls, params, key):
+            sample_pred, key, err1, params = jax_pred(fls, nfls, params, key)
+            sample_true, key, err2, params = jax_true(fls, nfls, params, key)
+            sample_false, key, err3, params = jax_false(fls, nfls, params, key)
+            sample = sample_pred * sample_true + (1 - sample_pred) * sample_false
             err = err1 | err2 | err3
             return sample, key, err, params
         return _jax_wrapped_if_then_else_linear
@@ -710,7 +700,7 @@ class SoftmaxSwitch(JaxRDDLCompilerWithGrad):
 
          # if predicate is non-fluent, always use the exact operation
         # case conditions are currently only literals so they are non-fluent
-        pred, *_ = expr.args
+        pred = expr.args[0]
         if not self.traced.cached_is_fluent(pred):
             return super()._jax_switch(expr, aux)  
         
@@ -724,19 +714,22 @@ class SoftmaxSwitch(JaxRDDLCompilerWithGrad):
         # recursively compile cases
         cases, default = self.traced.cached_sim_info(expr) 
         jax_default = None if default is None else self._jax(default, aux)
-        jax_cases = [(jax_default if _case is None else self._jax(_case, aux))
-                     for _case in cases]
+        jax_cases = [
+            (jax_default if _case is None else self._jax(_case, aux))
+            for _case in cases
+        ]
                     
-        def _jax_wrapped_switch_softmax(x, params, key):
+        def _jax_wrapped_switch_softmax(fls, nfls, params, key):
             
             # sample predicate
-            sample_pred, key, err, params = jax_pred(x, params, key) 
+            sample_pred, key, err, params = jax_pred(fls, nfls, params, key) 
             
             # sample cases
-            sample_cases = [None] * len(jax_cases)
-            for (i, jax_case) in enumerate(jax_cases):
-                sample_cases[i], key, err_case, params = jax_case(x, params, key)
-                err |= err_case      
+            sample_cases = []
+            for jax_case in jax_cases:
+                sample, key, err_case, params = jax_case(fls, nfls, params, key)
+                sample_cases.append(sample)
+                err = err | err_case      
             sample_cases = jnp.asarray(sample_cases)          
             sample_cases = jnp.asarray(sample_cases, dtype=self._fix_dtype(sample_cases))
             
@@ -785,14 +778,14 @@ class ReparameterizedGeometric(JaxRDDLCompilerWithGrad):
 
         jax_prob = self._jax(arg_prob, aux)
         
-        def _jax_wrapped_distribution_geometric_reparam(x, params, key):
+        def _jax_wrapped_distribution_geometric_reparam(fls, nfls, params, key):
             w, eps = params[id_]
-            prob, key, err, params = jax_prob(x, params, key)
+            prob, key, err, params = jax_prob(fls, nfls, params, key)
             key, subkey = random.split(key)
             U = random.uniform(key=subkey, shape=jnp.shape(prob), dtype=self.REAL)
             sample = 1. + SoftFloor.soft_floor(jnp.log1p(-U) / jnp.log1p(-prob + eps), w=w)
             out_of_bounds = jnp.logical_not(jnp.all(jnp.logical_and(prob >= 0, prob <= 1)))
-            err |= (out_of_bounds * ERR)
+            err = err | (out_of_bounds * ERR)
             return sample, key, err, params
         return _jax_wrapped_distribution_geometric_reparam
 
@@ -803,8 +796,7 @@ class DeterminizedGeometric(JaxRDDLCompilerWithGrad):
         super(DeterminizedGeometric, self).__init__(*args, **kwargs)
 
     def get_kwargs(self) -> Dict[str, Any]:
-        kwargs = super().get_kwargs()
-        return kwargs
+        return super().get_kwargs()
 
     def _jax_geometric(self, expr, aux):
         ERR = JaxRDDLCompilerWithGrad.ERROR_CODES['INVALID_PARAM_GEOMETRIC']
@@ -819,11 +811,11 @@ class DeterminizedGeometric(JaxRDDLCompilerWithGrad):
 
         jax_prob = self._jax(arg_prob, aux)
         
-        def _jax_wrapped_distribution_geometric_determinized(x, params, key):
-            prob, key, err, params = jax_prob(x, params, key)
+        def _jax_wrapped_distribution_geometric_determinized(fls, nfls, params, key):
+            prob, key, err, params = jax_prob(fls, nfls, params, key)
             sample = 1. / prob
             out_of_bounds = jnp.logical_not(jnp.all(jnp.logical_and(prob >= 0, prob <= 1)))
-            err |= (out_of_bounds * ERR)
+            err = err | (out_of_bounds * ERR)
             return sample, key, err, params
         return _jax_wrapped_distribution_geometric_determinized
 
@@ -858,13 +850,13 @@ class ReparameterizedSigmoidBernoulli(JaxRDDLCompilerWithGrad):
 
         jax_prob = self._jax(arg_prob, aux)
         
-        def _jax_wrapped_distribution_bernoulli_reparam(x, params, key):
-            prob, key, err, params = jax_prob(x, params, key)
+        def _jax_wrapped_distribution_bernoulli_reparam(fls, nfls, params, key):
+            prob, key, err, params = jax_prob(fls, nfls, params, key)
             key, subkey = random.split(key)
             U = random.uniform(key=subkey, shape=jnp.shape(prob), dtype=self.REAL)
             sample = stable_sigmoid(params[id_] * (prob - U))
             out_of_bounds = jnp.logical_not(jnp.all(jnp.logical_and(prob >= 0, prob <= 1)))
-            err |= (out_of_bounds * ERR)
+            err = err | (out_of_bounds * ERR)
             return sample, key, err, params
         return _jax_wrapped_distribution_bernoulli_reparam
 
@@ -899,16 +891,15 @@ class GumbelSoftmaxBernoulli(JaxRDDLCompilerWithGrad):
 
         jax_prob = self._jax(arg_prob, aux)
         
-        def _jax_wrapped_distribution_bernoulli_gumbel_softmax(x, params, key):
+        def _jax_wrapped_distribution_bernoulli_gumbel_softmax(fls, nfls, params, key):
             w, eps = params[id_]
-            prob, key, err, params = jax_prob(x, params, key)
+            prob, key, err, params = jax_prob(fls, nfls, params, key)
             probs = jnp.stack([1. - prob, prob], axis=-1)
             key, subkey = random.split(key)
-            Gumbel01 = random.gumbel(key=subkey, shape=jnp.shape(probs), dtype=self.REAL)
-            samples = Gumbel01 + jnp.log(probs + eps)
-            sample = SoftmaxArgmax.soft_argmax(samples, w=w, axes=-1)
+            g = random.gumbel(key=subkey, shape=jnp.shape(probs), dtype=self.REAL)
+            sample = SoftmaxArgmax.soft_argmax(g + jnp.log(probs + eps), w=w, axes=-1)
             out_of_bounds = jnp.logical_not(jnp.all(jnp.logical_and(prob >= 0, prob <= 1)))
-            err |= (out_of_bounds * ERR)
+            err = err | (out_of_bounds * ERR)
             return sample, key, err, params
         return _jax_wrapped_distribution_bernoulli_gumbel_softmax
     
@@ -919,8 +910,7 @@ class DeterminizedBernoulli(JaxRDDLCompilerWithGrad):
         super(DeterminizedBernoulli, self).__init__(*args, **kwargs)
 
     def get_kwargs(self) -> Dict[str, Any]:
-        kwargs = super().get_kwargs()
-        return kwargs
+        return super().get_kwargs()
 
     def _jax_bernoulli(self, expr, aux):
         ERR = JaxRDDLCompilerWithGrad.ERROR_CODES['INVALID_PARAM_BERNOULLI']
@@ -935,11 +925,11 @@ class DeterminizedBernoulli(JaxRDDLCompilerWithGrad):
 
         jax_prob = self._jax(arg_prob, aux)
         
-        def _jax_wrapped_distribution_bernoulli_determinized(x, params, key):
-            prob, key, err, params = jax_prob(x, params, key)
+        def _jax_wrapped_distribution_bernoulli_determinized(fls, nfls, params, key):
+            prob, key, err, params = jax_prob(fls, nfls, params, key)
             sample = prob
             out_of_bounds = jnp.logical_not(jnp.all(jnp.logical_and(prob >= 0, prob <= 1)))
-            err |= (out_of_bounds * ERR)
+            err = err | (out_of_bounds * ERR)
             return sample, key, err, params
         return _jax_wrapped_distribution_bernoulli_determinized
     
@@ -978,13 +968,12 @@ class GumbelSoftmaxDiscrete(JaxRDDLCompilerWithGrad):
         jax_probs = [self._jax(arg, aux) for arg in ordered_args]
         prob_fn = self._jax_discrete_prob(jax_probs, unnorm)
         
-        def _jax_wrapped_distribution_discrete_gumbel_softmax(x, params, key):
+        def _jax_wrapped_distribution_discrete_gumbel_softmax(fls, nfls, params, key):
             w, eps = params[id_]
-            prob, key, err, params = prob_fn(x, params, key)
+            prob, key, err, params = prob_fn(fls, nfls, params, key)
             key, subkey = random.split(key)
-            Gumbel01 = random.gumbel(key=subkey, shape=jnp.shape(prob), dtype=self.REAL)
-            sample = Gumbel01 + jnp.log(prob + eps)
-            sample = SoftmaxArgmax.soft_argmax(sample, w=w, axes=-1)
+            g = random.gumbel(key=subkey, shape=jnp.shape(prob), dtype=self.REAL)
+            sample = SoftmaxArgmax.soft_argmax(g + jnp.log(prob + eps), w=w, axes=-1)
             err = JaxRDDLCompilerWithGrad._jax_update_discrete_oob_error(err, prob)
             return sample, key, err, params
         return _jax_wrapped_distribution_discrete_gumbel_softmax
@@ -1005,13 +994,12 @@ class GumbelSoftmaxDiscrete(JaxRDDLCompilerWithGrad):
         jax_probs = self._jax(arg, aux)
         prob_fn = self._jax_discrete_pvar_prob(jax_probs, unnorm)
 
-        def _jax_wrapped_distribution_discrete_pvar_gumbel_softmax(x, params, key):
+        def _jax_wrapped_distribution_discrete_pvar_gumbel_softmax(fls, nfls, params, key):
             w, eps = params[id_]
-            prob, key, err, params = prob_fn(x, params, key)
+            prob, key, err, params = prob_fn(fls, nfls, params, key)
             key, subkey = random.split(key)
-            Gumbel01 = random.gumbel(key=subkey, shape=jnp.shape(prob), dtype=self.REAL)
-            sample = Gumbel01 + jnp.log(prob + eps)
-            sample = SoftmaxArgmax.soft_argmax(sample, w=w, axes=-1)
+            g = random.gumbel(key=subkey, shape=jnp.shape(prob), dtype=self.REAL)
+            sample = SoftmaxArgmax.soft_argmax(g + jnp.log(prob + eps), w=w, axes=-1)
             err = JaxRDDLCompilerWithGrad._jax_update_discrete_oob_error(err, prob)
             return sample, key, err, params
         return _jax_wrapped_distribution_discrete_pvar_gumbel_softmax
@@ -1023,8 +1011,7 @@ class DeterminizedDiscrete(JaxRDDLCompilerWithGrad):
         super(DeterminizedDiscrete, self).__init__(*args, **kwargs)
 
     def get_kwargs(self) -> Dict[str, Any]:
-        kwargs = super().get_kwargs()
-        return kwargs
+        return super().get_kwargs()
 
     def _jax_discrete(self, expr, aux, unnorm):
         
@@ -1038,8 +1025,8 @@ class DeterminizedDiscrete(JaxRDDLCompilerWithGrad):
         jax_probs = [self._jax(arg, aux) for arg in ordered_args]
         prob_fn = self._jax_discrete_prob(jax_probs, unnorm)
         
-        def _jax_wrapped_distribution_discrete_determinized(x, params, key):
-            prob, key, err, params = prob_fn(x, params, key)
+        def _jax_wrapped_distribution_discrete_determinized(fls, nfls, params, key):
+            prob, key, err, params = prob_fn(fls, nfls, params, key)
             literals = enumerate_literals(jnp.shape(prob), axis=-1)
             sample = jnp.sum(literals * prob, axis=-1)
             err = JaxRDDLCompilerWithGrad._jax_update_discrete_oob_error(err, prob)
@@ -1060,8 +1047,8 @@ class DeterminizedDiscrete(JaxRDDLCompilerWithGrad):
         jax_probs = self._jax(arg, aux)
         prob_fn = self._jax_discrete_pvar_prob(jax_probs, unnorm)
 
-        def _jax_wrapped_distribution_discrete_pvar_determinized(x, params, key):
-            prob, key, err, params = prob_fn(x, params, key)
+        def _jax_wrapped_distribution_discrete_pvar_determinized(fls, nfls, params, key):
+            prob, key, err, params = prob_fn(fls, nfls, params, key)
             literals = enumerate_literals(jnp.shape(prob), axis=-1)
             sample = jnp.sum(literals * prob, axis=-1)
             err = JaxRDDLCompilerWithGrad._jax_update_discrete_oob_error(err, prob)
@@ -1098,8 +1085,7 @@ class GumbelSoftmaxBinomial(JaxRDDLCompilerWithGrad):
         normal = random.normal(key=key, shape=jnp.shape(trials), dtype=prob.dtype)
         mean = trials * prob
         std = jnp.sqrt(trials * prob * (1.0 - prob))
-        sample = mean + std * normal
-        return sample
+        return mean + std * normal
     
     @staticmethod
     def gumbel_softmax_approx_to_binomial(key: random.PRNGKey, 
@@ -1113,13 +1099,11 @@ class GumbelSoftmaxBinomial(JaxRDDLCompilerWithGrad):
         log_prob = ((scipy.special.gammaln(trials + 1) - 
                      scipy.special.gammaln(ks + 1) - 
                      scipy.special.gammaln(trials - ks + 1)) +
-                     ks * jnp.log(prob + eps) + 
-                     (trials - ks) * jnp.log1p(-prob + eps))
+                    ks * jnp.log(prob + eps) + 
+                    (trials - ks) * jnp.log1p(-prob + eps))
         log_prob = jnp.where(in_support, log_prob, jnp.log(eps))
-        Gumbel01 = random.gumbel(key=key, shape=jnp.shape(log_prob), dtype=prob.dtype)
-        sample = Gumbel01 + log_prob
-        sample = SoftmaxArgmax.soft_argmax(sample, w=w, axes=-1)
-        return sample    
+        g = random.gumbel(key=key, shape=jnp.shape(log_prob), dtype=prob.dtype)
+        return SoftmaxArgmax.soft_argmax(g + log_prob, w=w, axes=-1)
         
     def _jax_binomial(self, expr, aux):
         ERR = JaxRDDLCompilerWithGrad.ERROR_CODES['INVALID_PARAM_BINOMIAL']
@@ -1140,9 +1124,9 @@ class GumbelSoftmaxBinomial(JaxRDDLCompilerWithGrad):
         jax_trials = self._jax(arg_trials, aux)
         jax_prob = self._jax(arg_prob, aux)
 
-        def _jax_wrapped_distribution_binomial_gumbel_softmax(x, params, key):
-            trials, key, err2, params = jax_trials(x, params, key)       
-            prob, key, err1, params = jax_prob(x, params, key)
+        def _jax_wrapped_distribution_binomial_gumbel_softmax(fls, nfls, params, key):
+            trials, key, err2, params = jax_trials(fls, nfls, params, key)       
+            prob, key, err1, params = jax_prob(fls, nfls, params, key)
             key, subkey = random.split(key)
             trials = jnp.asarray(trials, dtype=self.REAL)
             prob = jnp.asarray(prob, dtype=self.REAL)
@@ -1169,8 +1153,7 @@ class DeterminizedBinomial(JaxRDDLCompilerWithGrad):
         super(DeterminizedBinomial, self).__init__(*args, **kwargs)
 
     def get_kwargs(self) -> Dict[str, Any]:
-        kwargs = super().get_kwargs()
-        return kwargs
+        return super().get_kwargs()
 
     def _jax_binomial(self, expr, aux):
         ERR = JaxRDDLCompilerWithGrad.ERROR_CODES['INVALID_PARAM_BINOMIAL']
@@ -1179,7 +1162,7 @@ class DeterminizedBinomial(JaxRDDLCompilerWithGrad):
 
         # if prob is non-fluent, always use the exact operation
         if not self.traced.cached_is_fluent(arg_trials) \
-            and not self.traced.cached_is_fluent(arg_prob):
+        and not self.traced.cached_is_fluent(arg_prob):
             return super()._jax_binomial(expr, aux)
         
         aux['overriden'][expr.id] = __class__.__name__
@@ -1187,9 +1170,9 @@ class DeterminizedBinomial(JaxRDDLCompilerWithGrad):
         jax_trials = self._jax(arg_trials, aux)
         jax_prob = self._jax(arg_prob, aux)
 
-        def _jax_wrapped_distribution_binomial_determinized(x, params, key):
-            trials, key, err2, params = jax_trials(x, params, key)       
-            prob, key, err1, params = jax_prob(x, params, key)
+        def _jax_wrapped_distribution_binomial_determinized(fls, nfls, params, key):
+            trials, key, err2, params = jax_trials(fls, nfls, params, key)       
+            prob, key, err1, params = jax_prob(fls, nfls, params, key)
             trials = jnp.asarray(trials, dtype=self.REAL)
             prob = jnp.asarray(prob, dtype=self.REAL)
             sample = trials * prob
@@ -1226,13 +1209,11 @@ class ExponentialPoisson(JaxRDDLCompilerWithGrad):
     def exponential_approx_to_poisson(key: random.PRNGKey, 
                                       rate: jnp.ndarray, 
                                       bins: int, w: float) -> jnp.ndarray:
-        Exp1 = random.exponential(
-            key=key, shape=(bins,) + jnp.shape(rate), dtype=rate.dtype)
-        delta_t = Exp1 / rate[jnp.newaxis, ...]
+        exp = random.exponential(key=key, shape=(bins,) + jnp.shape(rate), dtype=rate.dtype)
+        delta_t = exp / rate[jnp.newaxis, ...]
         times = jnp.cumsum(delta_t, axis=0)
         indicator = stable_sigmoid(w * (1. - times))
-        sample = jnp.sum(indicator, axis=0)
-        return sample
+        return jnp.sum(indicator, axis=0)
 
     @staticmethod
     def branched_approx_to_poisson(key: random.PRNGKey, 
@@ -1243,8 +1224,7 @@ class ExponentialPoisson(JaxRDDLCompilerWithGrad):
         small_sample = ExponentialPoisson.exponential_approx_to_poisson(key, rate, bins, w)
         normal = random.normal(key=key, shape=jnp.shape(rate), dtype=rate.dtype)
         large_sample = rate + jnp.sqrt(rate) * normal
-        sample = jnp.where(small_rate, small_sample, large_sample)
-        return sample
+        return jnp.where(small_rate, small_sample, large_sample)
 
     def _jax_poisson(self, expr, aux):
         ERR = JaxRDDLCompilerWithGrad.ERROR_CODES['INVALID_PARAM_POISSON']
@@ -1264,12 +1244,12 @@ class ExponentialPoisson(JaxRDDLCompilerWithGrad):
         
         # use the exponential/Poisson process trick for small rate
         # use the normal approximation for large rate
-        def _jax_wrapped_distribution_poisson_exponential(x, params, key):
-            rate, key, err, params = jax_rate(x, params, key)
+        def _jax_wrapped_distribution_poisson_exponential(fls, nfls, params, key):
+            rate, key, err, params = jax_rate(fls, nfls, params, key)
             key, subkey = random.split(key)
             sample = self.branched_approx_to_poisson(subkey, rate, *params[id_])            
             out_of_bounds = jnp.logical_not(jnp.all(rate >= 0))
-            err |= (out_of_bounds * ERR)
+            err = err | (out_of_bounds * ERR)
             return sample, key, err, params
         return _jax_wrapped_distribution_poisson_exponential
 
@@ -1285,21 +1265,22 @@ class ExponentialPoisson(JaxRDDLCompilerWithGrad):
         
         id_ = expr.id
         aux['params'][id_] = (
-            self.poisson_nbins, self.poisson_comparison_weight, self.poisson_min_cdf)
+            self.poisson_nbins, self.poisson_comparison_weight, self.poisson_min_cdf
+        )
         aux['overriden'][id_] = __class__.__name__
 
         jax_trials = self._jax(arg_trials, aux)
         jax_prob = self._jax(arg_prob, aux)
         
         # https://en.wikipedia.org/wiki/Negative_binomial_distribution#Gamma%E2%80%93Poisson_mixture
-        def _jax_wrapped_distribution_negative_binomial_exponential(x, params, key):
-            trials, key, err2, params = jax_trials(x, params, key)       
-            prob, key, err1, params = jax_prob(x, params, key)
+        def _jax_wrapped_distribution_negative_binomial_exponential(fls, nfls, params, key):
+            trials, key, err2, params = jax_trials(fls, nfls, params, key)       
+            prob, key, err1, params = jax_prob(fls, nfls, params, key)
             key, subkey = random.split(key)
             trials = jnp.asarray(trials, dtype=self.REAL)
             prob = jnp.asarray(prob, dtype=self.REAL)
-            Gamma = random.gamma(key=subkey, a=trials, dtype=self.REAL)
-            rate = ((1.0 - prob) / prob) * Gamma
+            gamma = random.gamma(key=subkey, a=trials, dtype=self.REAL)
+            rate = ((1.0 - prob) / prob) * gamma
             sample = self.branched_approx_to_poisson(subkey, rate, *params[id_])   
             out_of_bounds = jnp.logical_not(jnp.all(
                 jnp.logical_and(jnp.logical_and(prob >= 0, prob <= 1), trials > 0)))
@@ -1335,10 +1316,8 @@ class GumbelSoftmaxPoisson(JaxRDDLCompilerWithGrad):
         ks = jnp.arange(bins)[(jnp.newaxis,) * jnp.ndim(rate) + (...,)]
         rate = rate[..., jnp.newaxis]
         log_prob = ks * jnp.log(rate + eps) - rate - scipy.special.gammaln(ks + 1)
-        Gumbel01 = random.gumbel(key=key, shape=jnp.shape(log_prob), dtype=rate.dtype)
-        sample = Gumbel01 + log_prob
-        sample = SoftmaxArgmax.soft_argmax(sample, w=w, axes=-1)
-        return sample
+        g = random.gumbel(key=key, shape=jnp.shape(log_prob), dtype=rate.dtype)
+        return SoftmaxArgmax.soft_argmax(g + log_prob, w=w, axes=-1)
     
     @staticmethod
     def branched_approx_to_poisson(key: random.PRNGKey, 
@@ -1349,8 +1328,7 @@ class GumbelSoftmaxPoisson(JaxRDDLCompilerWithGrad):
         small_sample = GumbelSoftmaxPoisson.gumbel_softmax_poisson(key, rate, bins, w, eps)
         normal = random.normal(key=key, shape=jnp.shape(rate), dtype=rate.dtype)
         large_sample = rate + jnp.sqrt(rate) * normal
-        sample = jnp.where(small_rate, small_sample, large_sample)
-        return sample
+        return jnp.where(small_rate, small_sample, large_sample)
         
     def _jax_poisson(self, expr, aux):
         ERR = JaxRDDLCompilerWithGrad.ERROR_CODES['INVALID_PARAM_POISSON']
@@ -1371,12 +1349,12 @@ class GumbelSoftmaxPoisson(JaxRDDLCompilerWithGrad):
         
         # use the gumbel-softmax and truncation trick for small rate
         # use the normal approximation for large rate
-        def _jax_wrapped_distribution_poisson_gumbel_softmax(x, params, key):
-            rate, key, err, params = jax_rate(x, params, key)
+        def _jax_wrapped_distribution_poisson_gumbel_softmax(fls, nfls, params, key):
+            rate, key, err, params = jax_rate(fls, nfls, params, key)
             key, subkey = random.split(key)
             sample = self.branched_approx_to_poisson(subkey, rate, *params[id_])
             out_of_bounds = jnp.logical_not(jnp.all(rate >= 0))
-            err |= (out_of_bounds * ERR)
+            err = err | (out_of_bounds * ERR)
             return sample, key, err, params
         return _jax_wrapped_distribution_poisson_gumbel_softmax
     
@@ -1393,21 +1371,22 @@ class GumbelSoftmaxPoisson(JaxRDDLCompilerWithGrad):
         id_ = expr.id
         aux['params'][id_] = (
             self.poisson_nbins, self.poisson_softmax_weight, self.poisson_min_cdf,
-            self.poisson_eps)
+            self.poisson_eps
+        )
         aux['overriden'][id_] = __class__.__name__
         
         jax_trials = self._jax(arg_trials, aux)
         jax_prob = self._jax(arg_prob, aux)
 
         # https://en.wikipedia.org/wiki/Negative_binomial_distribution#Gamma%E2%80%93Poisson_mixture
-        def _jax_wrapped_distribution_negative_binomial_gumbel_softmax(x, params, key):
-            trials, key, err2, params = jax_trials(x, params, key)       
-            prob, key, err1, params = jax_prob(x, params, key)
+        def _jax_wrapped_distribution_negative_binomial_gumbel_softmax(fls, nfls, params, key):
+            trials, key, err2, params = jax_trials(fls, nfls, params, key)       
+            prob, key, err1, params = jax_prob(fls, nfls, params, key)
             key, subkey = random.split(key)
             trials = jnp.asarray(trials, dtype=self.REAL)
             prob = jnp.asarray(prob, dtype=self.REAL)
-            Gamma = random.gamma(key=subkey, a=trials, dtype=self.REAL)
-            rate = ((1.0 - prob) / prob) * Gamma
+            gamma = random.gamma(key=subkey, a=trials, dtype=self.REAL)
+            rate = ((1.0 - prob) / prob) * gamma
             sample = self.branched_approx_to_poisson(subkey, rate, *params[id_])   
             out_of_bounds = jnp.logical_not(jnp.all(
                 jnp.logical_and(jnp.logical_and(prob >= 0, prob <= 1), trials > 0)))
@@ -1422,8 +1401,7 @@ class DeterminizedPoisson(JaxRDDLCompilerWithGrad):
         super(DeterminizedPoisson, self).__init__(*args, **kwargs)
 
     def get_kwargs(self) -> Dict[str, Any]:
-        kwargs = super().get_kwargs()
-        return kwargs
+        return super().get_kwargs()
 
     def _jax_poisson(self, expr, aux):
         ERR = JaxRDDLCompilerWithGrad.ERROR_CODES['INVALID_PARAM_POISSON']
@@ -1438,11 +1416,11 @@ class DeterminizedPoisson(JaxRDDLCompilerWithGrad):
 
         jax_rate = self._jax(arg_rate, aux)
         
-        def _jax_wrapped_distribution_poisson_determinized(x, params, key):
-            rate, key, err, params = jax_rate(x, params, key)
+        def _jax_wrapped_distribution_poisson_determinized(fls, nfls, params, key):
+            rate, key, err, params = jax_rate(fls, nfls, params, key)
             sample = rate
             out_of_bounds = jnp.logical_not(jnp.all(rate >= 0))
-            err |= (out_of_bounds * ERR)
+            err = err | (out_of_bounds * ERR)
             return sample, key, err, params
         return _jax_wrapped_distribution_poisson_determinized
     
@@ -1461,9 +1439,9 @@ class DeterminizedPoisson(JaxRDDLCompilerWithGrad):
         jax_trials = self._jax(arg_trials, aux)
         jax_prob = self._jax(arg_prob, aux)
         
-        def _jax_wrapped_distribution_negative_binomial_determinized(x, params, key):
-            trials, key, err2, params = jax_trials(x, params, key)       
-            prob, key, err1, params = jax_prob(x, params, key)
+        def _jax_wrapped_distribution_negative_binomial_determinized(fls, nfls, params, key):
+            trials, key, err2, params = jax_trials(fls, nfls, params, key)       
+            prob, key, err1, params = jax_prob(fls, nfls, params, key)
             trials = jnp.asarray(trials, dtype=self.REAL)
             prob = jnp.asarray(prob, dtype=self.REAL)
             sample = ((1.0 - prob) / prob) * trials
