@@ -248,8 +248,8 @@ class JaxParameterTuning:
             policy = JaxOfflineController(
                 planner=planner, key=subkey, tqdm_position=index, 
                 params=best_params, train_on_reset=False)
-            total_reward = policy.evaluate(env, episodes=rollouts_per_trial, 
-                                           seed=np.array(subkey)[0])['mean']
+            total_reward = policy.evaluate(
+                env, episodes=rollouts_per_trial, seed=np.array(subkey)[0])['mean']
             
             # update average reward
             if verbose:
@@ -507,8 +507,7 @@ class JaxParameterTuning:
                             # extract and register the new evaluation
                             params, target, index, pid = results.pop(i).get()
                             optimizer.register(params, target)
-                            optimizer._gp.fit(
-                                optimizer.space.params, optimizer.space.target)
+                            optimizer._gp.fit(optimizer.space.params, optimizer.space.target)
                             
                             # update acquisition function and suggest a new point
                             suggested_params[index] = optimizer.suggest()
