@@ -499,10 +499,9 @@ class JaxSortingActionProjection(JaxActionProjection):
                         new_param = param + surplus
                     else:
                         new_param = param - surplus
-                    new_param = jax_bool_to_box(var, new_param, hyperparams)
+                    new_params[var] = jax_bool_to_box(var, new_param, hyperparams)
                 else:
-                    new_param = param
-                new_params[var] = new_param
+                    new_params[var] = param
             converged = jnp.array(True, dtype=jnp.bool_)
             return new_params, converged
         return _jax_wrapped_sorting_project
@@ -514,12 +513,12 @@ class JaxSogbofaActionProjection(JaxActionProjection):
     def compile(self, ranges: Dict[str, str], noop: Dict[str, Any], 
                 allowed_actions: int, max_constraint_iter: int, 
                 jax_param_to_action: Callable, jax_action_to_param: Callable, 
-                min_action: float, max_action: float, *args, **kwargs) -> Callable:
+                min_action: float, max_action: float, real_dtype: type, *args, **kwargs) -> Callable:
         
         # calculate the surplus of actions above max-nondef-actions
         def _jax_wrapped_sogbofa_surplus(actions):
-            sum_action = 0.0
-            k = 0
+            sum_action = jnp.array(0.0, dtype=real_dtype)
+            k = jnp.array(0, dtype=jnp.int32)
             for (var, action) in actions.items():
                 if ranges[var] == 'bool':
                     if noop[var]:
@@ -574,15 +573,35 @@ class JaxSogbofaActionProjection(JaxActionProjection):
             )
             converged = jnp.logical_not(surplus > 0)
 
+            # check for any remaining constraint violation
+            total_bool = jnp.array(0, dtype=jnp.int32)
+            for (var, action) in actions.items():
+                if ranges[var] == 'bool':
+                    if noop[var]:
+                        total_bool = total_bool + jnp.count_nonzero(action < 0.5)
+                    else:
+                        total_bool = total_bool + jnp.count_nonzero(action > 0.5)
+            excess = jnp.maximum(total_bool - allowed_actions, 0)
+            
             # convert the adjusted actions back to parameters
-            new_params = {}
+            # reduce the excess number of parameters that are non-noop above constraint
+            new_params = {}            
             for (var, action) in actions.items():
                 if ranges[var] == 'bool':
                     action = jnp.clip(action, min_action, max_action)
-                    param = jax_action_to_param(var, action, hyperparams)
-                    new_params[var] = param
+                    flat_action = jnp.ravel(action, order='C')
+                    if noop[var]:
+                        ranks = jnp.cumsum(flat_action < 0.5)
+                        replace_mask = (flat_action < 0.5) & (ranks <= excess)
+                    else:
+                        ranks = jnp.cumsum(flat_action > 0.5)
+                        replace_mask = (flat_action > 0.5) & (ranks <= excess)
+                    flat_action = jnp.where(replace_mask, 0.5, flat_action)
+                    action = jnp.reshape(flat_action, jnp.shape(action))
+                    new_params[var] = jax_action_to_param(var, action, hyperparams)
+                    excess = jnp.maximum(excess - jnp.count_nonzero(replace_mask), 0)
                 else:
-                    new_params[var] = action                        
+                    new_params[var] = action              
             return new_params, converged
         return _jax_wrapped_sogbofa_project
 
@@ -835,7 +854,7 @@ class JaxStraightLinePlan(JaxPlan):
             jax_project_fn = JaxSogbofaActionProjection().compile(
                 ranges, noop, allowed_actions, self._max_constraint_iter, 
                 _jax_bool_param_to_action, _jax_bool_action_to_param, 
-                min_action, max_action
+                min_action, max_action, compiled.REAL
             )
             
             # clip actions to valid bounds and satisfy constraint on max actions
@@ -1084,22 +1103,20 @@ class JaxDeepReactivePolicy(JaxPlan):
                         lower, upper = bounds_safe[var]
                         mb, ml, mu, mn = [jnp.asarray(mask, dtype=compiled.REAL) 
                                           for mask in cond_lists[var]]       
-                        action = (
+                        actions[var] = (
                             mb * (lower + (upper - lower) * stable_sigmoid(output)) + 
                             ml * (lower + jax.nn.softplus(output)) + 
                             mu * (upper - jax.nn.softplus(-output)) + 
                             mn * output
                         )
                     else:
-                        action = output
-                    actions[var] = action
+                        actions[var] = output
             
             # for constraint satisfaction wrap bool actions with softmax:
             # this only works when |A| = 1
             if use_constraint_satisfaction:
                 linear = hk.Linear(bool_action_count, name='output_bool', w_init=init)
-                output = jax.nn.softmax(linear(hidden))
-                actions[bool_key] = output
+                actions[bool_key] = jax.nn.softmax(linear(hidden))
             return actions
         
         # we need pure JAX functions for the policy network prediction
@@ -1288,8 +1305,7 @@ class PGPE(metaclass=ABCMeta):
 
     @abstractmethod
     def compile(self, loss_fn: Callable, projection: Callable, real_dtype: Type,
-                print_warnings: bool,
-                parallel_updates: int=1) -> None:
+                print_warnings: bool, parallel_updates: int=1) -> None:
         pass
 
 
@@ -1734,7 +1750,7 @@ def var_utility(returns: jnp.ndarray, alpha: float) -> float:
 def cvar_utility(returns: jnp.ndarray, alpha: float) -> float:
     var = jnp.percentile(returns, q=100 * alpha)
     mask = returns <= var
-    return jnp.sum(returns * mask) / jnp.maximum(1, jnp.sum(mask))
+    return jnp.sum(returns * mask) / jnp.maximum(1, jnp.count_nonzero(mask))
 
 
 # set of all currently valid built-in utility functions
