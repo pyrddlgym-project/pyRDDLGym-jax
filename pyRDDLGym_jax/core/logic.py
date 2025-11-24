@@ -212,15 +212,18 @@ class SigmoidRelational(JaxRDDLCompilerWithGrad):
     '''Comparison operations approximated using sigmoid functions.'''
     
     def __init__(self, *args, sigmoid_weight: float=10., 
-                 use_sigmoid_ste: bool=True, **kwargs) -> None:
+                 use_sigmoid_ste: bool=True, use_tanh_ste: bool=True, 
+                 **kwargs) -> None:
         super(SigmoidRelational, self).__init__(*args, **kwargs)
         self.sigmoid_weight = float(sigmoid_weight)
         self.use_sigmoid_ste = use_sigmoid_ste
+        self.use_tanh_ste = use_tanh_ste
     
     def get_kwargs(self) -> Dict[str, Any]:
         kwargs = super().get_kwargs()
         kwargs['sigmoid_weight'] = self.sigmoid_weight
         kwargs['use_sigmoid_ste'] = self.use_sigmoid_ste
+        kwargs['use_tanh_ste'] = self.use_tanh_ste
         return kwargs
 
     def _jax_greater(self, expr, aux):
@@ -283,6 +286,8 @@ class SigmoidRelational(JaxRDDLCompilerWithGrad):
         aux['overriden'][id_] = __class__.__name__
         def equal_op(x, y, params):
             sample = 1. - jnp.square(stable_tanh(params[id_] * (y - x)))
+            if self.use_tanh_ste:
+                sample = sample + jax.lax.stop_gradient(jnp.equal(x, y) - sample)
             return sample, params
         return self._jax_binary_helper_with_param(expr, aux, equal_op)
     
@@ -294,6 +299,8 @@ class SigmoidRelational(JaxRDDLCompilerWithGrad):
         aux['overriden'][id_] = __class__.__name__
         def not_equal_op(x, y, params):
             sample = jnp.square(stable_tanh(params[id_] * (y - x)))
+            if self.use_tanh_ste:
+                sample = sample + jax.lax.stop_gradient(jnp.not_equal(x, y) - sample)
             return sample, params
         return self._jax_binary_helper_with_param(expr, aux, not_equal_op)
     
@@ -305,6 +312,8 @@ class SigmoidRelational(JaxRDDLCompilerWithGrad):
         aux['overriden'][id_] = __class__.__name__
         def sgn_op(x, params):
             sample = stable_tanh(params[id_] * x)
+            if self.use_tanh_ste:
+                sample = sample + jax.lax.stop_gradient(jnp.sign(x) - sample)
             return sample, params
         return self._jax_unary_helper_with_param(expr, aux, sgn_op)
     
