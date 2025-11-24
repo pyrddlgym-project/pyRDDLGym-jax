@@ -2566,6 +2566,7 @@ class JaxBackpropPlanner:
         # initialize running statistics
         best_params = pytree_at(policy_params, 0)
         best_loss, pbest_loss, best_grad = np.inf, np.inf, None
+        best_index = 0
         last_iter_improve = 0
         rolling_test_loss = RollingMean(test_rolling_window)
         status = JaxPlannerStatus.NORMAL
@@ -2749,6 +2750,7 @@ class JaxBackpropPlanner:
                 'pgpe_improved': pgpe_improve,
                 'params': policy_params,
                 'best_params': best_params,
+                'best_index': best_index,
                 'pgpe_params': pgpe_params,
                 'model_params': model_params,
                 'policy_hyperparams': policy_hyperparams,
@@ -2804,25 +2806,37 @@ class JaxBackpropPlanner:
         # summarize and test for convergence
         if print_summary:
             grad_norm = jax.tree_util.tree_map(lambda x: np.linalg.norm(x).item(), best_grad)
+            grad_norms = jax.tree_util.tree_leaves(grad_norm)
+            max_grad_norm = max(grad_norms) if grad_norms else np.nan
+            returns = np.sum(test_log['reward'][best_index], axis=-1)
+            rlo, rhi = self.ci_bootstrap(returns)            
+
             diagnosis = self._perform_diagnosis(
                 last_iter_improve, -np.min(train_loss), -np.min(test_loss_smooth), 
-                -best_loss, grad_norm
+                -best_loss, max_grad_norm
             )
             print(
                 f'[INFO] Summary of optimization:\n'
-                f'    status        ={status}\n'
-                f'    time          ={elapsed:.2f} seconds\n'
-                f'    iterations    ={it}\n'
-                f'    best objective={-best_loss:.6f}\n'
-                f'    best grad norm={grad_norm}\n'
-                f'diagnosis: {diagnosis}\n'
+                f'    status:           {status}\n'
+                f'    time:             {elapsed:.2f} seconds\n'
+                f'    iterations:       {it}\n'
+                f'    best objective:   {-best_loss:.6f}\n'
+                f'    best grad norm:   {max_grad_norm:.6f}\n'
+                f'    best cuml reward: Mean = {np.mean(returns):.6f}, 95% CI [{rlo:.6f}, {rhi:.6f}]\n'
+                f'    diagnosis:        {diagnosis}\n'
             )
     
-    def _perform_diagnosis(self, last_iter_improve, 
-                           train_return, test_return, best_return, grad_norm):
-        grad_norms = jax.tree_util.tree_leaves(grad_norm)
-        max_grad_norm = max(grad_norms) if grad_norms else np.nan
-        grad_is_zero = np.allclose(max_grad_norm, 0)
+    @staticmethod
+    def ci_bootstrap(returns, confidence=0.95, n_boot=10000):
+        means = np.zeros((n_boot,))
+        for i in range(n_boot):
+            means[i] = np.mean(np.random.choice(returns, size=len(returns), replace=True))
+        lower = np.percentile(means, (1 - confidence) / 2 * 100)
+        upper = np.percentile(means, (1 + confidence) / 2 * 100)
+        return lower, upper
+
+    def _perform_diagnosis(self, last_iter_improve, train_return, test_return, best_return, 
+                           max_grad_norm):
         
         # divergence if the solution is not finite
         if not np.isfinite(train_return):
@@ -2831,47 +2845,41 @@ class JaxBackpropPlanner:
         # hit a plateau is likely IF:
         # 1. planner does not improve at all
         # 2. the gradient norm at the best solution is zero
+        grad_is_zero = np.allclose(max_grad_norm, 0)
         if last_iter_improve <= 1:
             if grad_is_zero:
                 return termcolor.colored(
-                    f'[FAIL] No progress was made '
-                    f'and max grad norm {max_grad_norm:.4f} was zero: '
-                    f'solver likely stuck in a plateau.', 'red'
+                    f'[FAIL] No progress and ||g||={max_grad_norm:.4f}, '
+                    f'solver initialized in a plateau.', 'red'
                 )
             else:
                 return termcolor.colored(
-                    f'[FAIL] No progress was made '
-                    f'but max grad norm {max_grad_norm:.4f} was non-zero: '
-                    f'learning rate or another hyper-parameter likely suboptimal.', 'red'
+                    f'[FAIL] No progress and ||g||={max_grad_norm:.4f}, '
+                    f'adjust learning rate or other parameters.', 'red'
                 )
         
         # model is likely poor IF:
         # 1. the train and test return disagree
-        validation_error = 100 * abs(test_return - train_return) / \
-                            max(abs(train_return), abs(test_return))
-        if not (validation_error < 20):
+        validation_error = (abs(test_return - train_return) / 
+                            max(abs(train_return), abs(test_return)))
+        if not (validation_error < 0.2):
             return termcolor.colored(
-                f'[WARN] Progress was made '
-                f'but relative train-test error {validation_error:.4f} was high: '
-                f'poor model relaxation around solution or batch size too small.', 'yellow'
+                f'[WARN] Progress but large rel. train/test error {validation_error:.4f}, '
+                f'adjust model or batch size.', 'yellow'
             )
         
         # model likely did not converge IF:
         # 1. the max grad relative to the return is high
         if not grad_is_zero:
-            return_to_grad_norm = abs(best_return) / max_grad_norm
-            if not (return_to_grad_norm > 1):
+            if not (abs(best_return) > 1.0 * max_grad_norm):
                 return termcolor.colored(
-                    f'[WARN] Progress was made '
-                    f'but max grad norm {max_grad_norm:.4f} was high: '
-                    f'solution locally suboptimal, relaxed model nonsmooth around solution, '
-                    f'or batch size too small.', 'yellow'
+                    f'[WARN] Progress but large ||g||={max_grad_norm:.4f}, '
+                    f'adjust learning rate or budget.', 'yellow'
                 )
         
         # likely successful
         return termcolor.colored(
-            '[SUCC] Planner converged successfully '
-            '(note: not all problems can be ruled out).', 'green'
+            '[SUCC] No convergence problems found.', 'green'
         )
         
     def get_action(self, key: random.PRNGKey,
