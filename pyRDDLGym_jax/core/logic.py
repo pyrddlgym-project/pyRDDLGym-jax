@@ -211,13 +211,16 @@ class JaxRDDLCompilerWithGrad(JaxRDDLCompiler):
 class SigmoidRelational(JaxRDDLCompilerWithGrad):
     '''Comparison operations approximated using sigmoid functions.'''
     
-    def __init__(self, *args, sigmoid_weight: float=10., **kwargs) -> None:
+    def __init__(self, *args, sigmoid_weight: float=10., 
+                 use_sigmoid_ste: bool=True, **kwargs) -> None:
         super(SigmoidRelational, self).__init__(*args, **kwargs)
         self.sigmoid_weight = float(sigmoid_weight)
+        self.use_sigmoid_ste = use_sigmoid_ste
     
     def get_kwargs(self) -> Dict[str, Any]:
         kwargs = super().get_kwargs()
         kwargs['sigmoid_weight'] = self.sigmoid_weight
+        kwargs['use_sigmoid_ste'] = self.use_sigmoid_ste
         return kwargs
 
     def _jax_greater(self, expr, aux):
@@ -228,11 +231,23 @@ class SigmoidRelational(JaxRDDLCompilerWithGrad):
         aux['overriden'][id_] = __class__.__name__
         def greater_op(x, y, params):
             sample = stable_sigmoid(params[id_] * (x - y))
+            if self.use_sigmoid_ste:
+                sample = sample + jax.lax.stop_gradient(jnp.greater(x, y) - sample)
             return sample, params
         return self._jax_binary_helper_with_param(expr, aux, greater_op)
     
     def _jax_greater_equal(self, expr, aux):
-        return self._jax_greater(expr, aux)
+        if not self.traced.cached_is_fluent(expr):
+            return super()._jax_greater(expr, aux)
+        id_ = expr.id
+        aux['params'][id_] = self.sigmoid_weight
+        aux['overriden'][id_] = __class__.__name__
+        def greater_equal_op(x, y, params):
+            sample = stable_sigmoid(params[id_] * (x - y))
+            if self.use_sigmoid_ste:
+                sample = sample + jax.lax.stop_gradient(jnp.greater_equal(x, y) - sample)
+            return sample, params
+        return self._jax_binary_helper_with_param(expr, aux, greater_equal_op)
     
     def _jax_less(self, expr, aux):
         if not self.traced.cached_is_fluent(expr):
@@ -242,11 +257,23 @@ class SigmoidRelational(JaxRDDLCompilerWithGrad):
         aux['overriden'][id_] = __class__.__name__
         def less_op(x, y, params):
             sample = stable_sigmoid(params[id_] * (y - x))
+            if self.use_sigmoid_ste:
+                sample = sample + jax.lax.stop_gradient(jnp.less(x, y) - sample)
             return sample, params
         return self._jax_binary_helper_with_param(expr, aux, less_op)
     
     def _jax_less_equal(self, expr, aux):
-        return self._jax_less(expr, aux)
+        if not self.traced.cached_is_fluent(expr):
+            return super()._jax_less(expr, aux)
+        id_ = expr.id
+        aux['params'][id_] = self.sigmoid_weight
+        aux['overriden'][id_] = __class__.__name__
+        def less_equal_op(x, y, params):
+            sample = stable_sigmoid(params[id_] * (y - x))
+            if self.use_sigmoid_ste:
+                sample = sample + jax.lax.stop_gradient(jnp.less_equal(x, y) - sample)
+            return sample, params
+        return self._jax_binary_helper_with_param(expr, aux, less_equal_op)
     
     def _jax_equal(self, expr, aux):
         if not self.traced.cached_is_fluent(expr):
