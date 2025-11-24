@@ -596,13 +596,16 @@ class SafeSqrt(JaxRDDLCompilerWithGrad):
 class SoftFloor(JaxRDDLCompilerWithGrad):
     '''Floor and ceil operations approximated using soft operations.'''
     
-    def __init__(self, *args, floor_weight: float=10., **kwargs) -> None:
+    def __init__(self, *args, floor_weight: float=10., 
+                 use_floor_ste: bool=True, **kwargs) -> None:
         super(SoftFloor, self).__init__(*args, **kwargs)
         self.floor_weight = float(floor_weight)
+        self.use_floor_ste = use_floor_ste
     
     def get_kwargs(self) -> Dict[str, Any]:
         kwargs = super().get_kwargs()
         kwargs['floor_weight'] = self.floor_weight
+        kwargs['use_floor_ste'] = self.use_floor_ste
         return kwargs
 
     @staticmethod
@@ -619,6 +622,8 @@ class SoftFloor(JaxRDDLCompilerWithGrad):
         aux['overriden'][id_] = __class__.__name__
         def floor_op(x, params):
             sample = self.soft_floor(x, params[id_])
+            if self.use_floor_ste:
+                sample = sample + jax.lax.stop_gradient(jnp.floor(x) - sample)
             return sample, params
         return self._jax_unary_helper_with_param(expr, aux, floor_op)
 
@@ -630,6 +635,8 @@ class SoftFloor(JaxRDDLCompilerWithGrad):
         aux['overriden'][id_] = __class__.__name__
         def ceil_op(x, params):
             sample = -self.soft_floor(-x, params[id_])
+            if self.use_floor_ste:
+                sample = sample + jax.lax.stop_gradient(jnp.ceil(x) - sample)
             return sample, params
         return self._jax_unary_helper_with_param(expr, aux, ceil_op)
 
@@ -641,6 +648,8 @@ class SoftFloor(JaxRDDLCompilerWithGrad):
         aux['overriden'][id_] = __class__.__name__
         def div_op(x, y, params):
             sample = self.soft_floor(x / y, params[id_])
+            if self.use_floor_ste:
+                sample = sample + jax.lax.stop_gradient(jnp.floor_divide(x, y) - sample)
             return sample, params
         return self._jax_binary_helper_with_param(expr, aux, div_op)
 
@@ -652,6 +661,8 @@ class SoftFloor(JaxRDDLCompilerWithGrad):
         aux['overriden'][id_] = __class__.__name__
         def mod_op(x, y, params):
             div = self.soft_floor(x / y, params[id_])
+            if self.use_floor_ste:
+                div = div + jax.lax.stop_gradient(jnp.floor_divide(x, y) - div)
             sample = x - y * div
             return sample, params
         return self._jax_binary_helper_with_param(expr, aux, mod_op)
@@ -660,13 +671,16 @@ class SoftFloor(JaxRDDLCompilerWithGrad):
 class SoftRound(JaxRDDLCompilerWithGrad):
     '''Round operations approximated using soft operations.'''
     
-    def __init__(self, *args, round_weight: float=10., **kwargs) -> None:
+    def __init__(self, *args, round_weight: float=10., 
+                 use_round_ste: bool=True, **kwargs) -> None:
         super(SoftRound, self).__init__(*args, **kwargs)
         self.round_weight = float(round_weight)
+        self.use_round_ste = use_round_ste
     
     def get_kwargs(self) -> Dict[str, Any]:
         kwargs = super().get_kwargs()
         kwargs['round_weight'] = self.round_weight
+        kwargs['use_round_ste'] = self.use_round_ste
         return kwargs
 
     def _jax_round(self, expr, aux):
@@ -679,6 +693,8 @@ class SoftRound(JaxRDDLCompilerWithGrad):
             param = params[id_]
             m = jnp.floor(x) + 0.5
             sample = m + 0.5 * stable_tanh(param * (x - m)) / stable_tanh(param / 2.)
+            if self.use_round_ste:
+                sample = sample + jax.lax.stop_gradient(jnp.round(x) - sample)
             return sample, params
         return self._jax_unary_helper_with_param(expr, aux, round_op)
 
