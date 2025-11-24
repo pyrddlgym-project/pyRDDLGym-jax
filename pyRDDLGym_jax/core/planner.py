@@ -2224,12 +2224,12 @@ class JaxBackpropPlanner:
                 )         
             
             # for enum types need to convert the string values to integer indices
+            value = np.reshape(value, np.shape(init_value))
             if value.dtype.type is np.str_:
                 value = rddl.object_string_to_index_array(rddl.variable_ranges[name], value)
             
             # train and test fluents have a batch dimension added, non-fluents do not
             # train fluents are also converted to float
-            value = np.reshape(value, np.shape(init_value))
             if name not in rddl.non_fluents:
                 train_value = np.repeat(value[np.newaxis, ...], repeats=n_train, axis=0)
                 init_train_fls[name] = np.asarray(train_value, dtype=self.compiled.REAL)
