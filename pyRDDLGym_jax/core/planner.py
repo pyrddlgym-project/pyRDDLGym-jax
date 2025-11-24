@@ -2567,6 +2567,7 @@ class JaxBackpropPlanner:
         best_params = pytree_at(policy_params, 0)
         best_loss, pbest_loss, best_grad = np.inf, np.inf, None
         best_index = 0
+        best_reward_arr = None
         last_iter_improve = 0
         rolling_test_loss = RollingMean(test_rolling_window)
         status = JaxPlannerStatus.NORMAL
@@ -2680,6 +2681,7 @@ class JaxBackpropPlanner:
                 best_params = pytree_at(policy_params, best_index)
                 best_grad = pytree_at(train_log['grad'], best_index)
                 best_loss = test_loss_smooth[best_index]
+                best_reward_arr = test_log['reward'][best_index]
                 last_iter_improve = it
             pbest_loss = np.minimum(pbest_loss, test_loss_smooth)
                         
@@ -2808,8 +2810,10 @@ class JaxBackpropPlanner:
             grad_norm = jax.tree_util.tree_map(lambda x: np.linalg.norm(x).item(), best_grad)
             grad_norms = jax.tree_util.tree_leaves(grad_norm)
             max_grad_norm = max(grad_norms) if grad_norms else np.nan
-            returns = np.sum(test_log['reward'][best_index], axis=-1)
-            rlo, rhi = self.ci_bootstrap(returns)            
+            if best_reward_arr is None:
+                mean = rlo = rhi = np.nan
+            else:
+                mean, rlo, rhi = self.ci_bootstrap(np.sum(best_reward_arr, axis=-1))            
 
             diagnosis = self._perform_diagnosis(
                 last_iter_improve, -np.min(train_loss), -np.min(test_loss_smooth), 
@@ -2822,7 +2826,7 @@ class JaxBackpropPlanner:
                 f'    iterations:       {it}\n'
                 f'    best objective:   {-best_loss:.6f}\n'
                 f'    best grad norm:   {max_grad_norm:.6f}\n'
-                f'    best cuml reward: Mean = {np.mean(returns):.6f}, 95% CI [{rlo:.6f}, {rhi:.6f}]\n'
+                f'    best cuml reward: Mean = {mean:.6f}, 95% CI [{rlo:.6f}, {rhi:.6f}]\n'
                 f'    diagnosis:        {diagnosis}\n'
             )
     
@@ -2833,7 +2837,8 @@ class JaxBackpropPlanner:
             means[i] = np.mean(np.random.choice(returns, size=len(returns), replace=True))
         lower = np.percentile(means, (1 - confidence) / 2 * 100)
         upper = np.percentile(means, (1 + confidence) / 2 * 100)
-        return lower, upper
+        mean = np.mean(returns)
+        return mean, lower, upper
 
     def _perform_diagnosis(self, last_iter_improve, train_return, test_return, best_return, 
                            max_grad_norm):
