@@ -2567,7 +2567,6 @@ class JaxBackpropPlanner:
         best_params = pytree_at(policy_params, 0)
         best_loss, pbest_loss, best_grad = np.inf, np.inf, None
         best_index = 0
-        best_reward_arr = None
         last_iter_improve = 0
         rolling_test_loss = RollingMean(test_rolling_window)
         status = JaxPlannerStatus.NORMAL
@@ -2681,7 +2680,6 @@ class JaxBackpropPlanner:
                 best_params = pytree_at(policy_params, best_index)
                 best_grad = pytree_at(train_log['grad'], best_index)
                 best_loss = test_loss_smooth[best_index]
-                best_reward_arr = test_log['reward'][best_index]
                 last_iter_improve = it
             pbest_loss = np.minimum(pbest_loss, test_loss_smooth)
                         
@@ -2807,14 +2805,21 @@ class JaxBackpropPlanner:
         
         # summarize and test for convergence
         if print_summary:
+
+            # calculate gradient norm
             grad_norm = jax.tree_util.tree_map(lambda x: np.linalg.norm(x).item(), best_grad)
             grad_norms = jax.tree_util.tree_leaves(grad_norm)
             max_grad_norm = max(grad_norms) if grad_norms else np.nan
-            if best_reward_arr is None:
-                mean = rlo = rhi = np.nan
-            else:
-                mean, rlo, rhi = self.ci_bootstrap(np.sum(best_reward_arr, axis=-1))            
 
+            # calculate best policy return
+            _, (final_log, _) = self.test_loss(
+                key, self._broadcast_pytree(best_params), policy_hyperparams, 
+                *test_subs, model_params_test
+            )
+            best_returns = np.ravel(np.sum(final_log['reward'], axis=2))
+            mean, rlo, rhi = self.ci_bootstrap(best_returns)            
+
+            # diagnosis
             diagnosis = self._perform_diagnosis(
                 last_iter_improve, -np.min(train_loss), -np.min(test_loss_smooth), 
                 -best_loss, max_grad_norm
@@ -2824,9 +2829,9 @@ class JaxBackpropPlanner:
                 f'    status:           {status}\n'
                 f'    time:             {elapsed:.2f} seconds\n'
                 f'    iterations:       {it}\n'
-                f'    best objective:   {-best_loss:.6f}\n'
-                f'    best grad norm:   {max_grad_norm:.6f}\n'
-                f'    best cuml reward: Mean = {mean:.6f}, 95% CI [{rlo:.6f}, {rhi:.6f}]\n'
+                f'    best objective:   {-best_loss:.5f}\n'
+                f'    best grad norm:   {max_grad_norm:.5f}\n'
+                f'    best cuml reward: Mean = {mean:.5f}, 95% CI [{rlo:.5f}, {rhi:.5f}]\n'
                 f'    diagnosis:        {diagnosis}\n'
             )
     
