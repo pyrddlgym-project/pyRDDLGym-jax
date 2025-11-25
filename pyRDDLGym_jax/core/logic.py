@@ -1139,11 +1139,10 @@ class GumbelSoftmaxBinomial(JaxRDDLCompilerWithGrad):
         std = jnp.sqrt(trials * prob * (1.0 - prob))
         return mean + std * normal
     
-    @staticmethod
-    def gumbel_softmax_approx_to_binomial(key: random.PRNGKey, 
+    def gumbel_softmax_approx_to_binomial(self, key: random.PRNGKey, 
                                           trials: jnp.ndarray, prob: jnp.ndarray, 
-                                          bins: int, w: float, eps: float):
-        ks = jnp.arange(bins)[(jnp.newaxis,) * jnp.ndim(trials) + (...,)]
+                                          w: float, eps: float):
+        ks = jnp.arange(self.binomial_nbins)[(jnp.newaxis,) * jnp.ndim(trials) + (...,)]
         trials = trials[..., jnp.newaxis]
         prob = prob[..., jnp.newaxis]
         in_support = ks <= trials
@@ -1164,12 +1163,11 @@ class GumbelSoftmaxBinomial(JaxRDDLCompilerWithGrad):
 
         # if prob is non-fluent, always use the exact operation
         if not self.traced.cached_is_fluent(arg_trials) \
-            and not self.traced.cached_is_fluent(arg_prob):
+        and not self.traced.cached_is_fluent(arg_prob):
             return super()._jax_binomial(expr, aux)
         
         id_ = expr.id
-        aux['params'][id_] = (
-            self.binomial_nbins, self.binomial_softmax_weight, self.binomial_eps)
+        aux['params'][id_] = (self.binomial_softmax_weight, self.binomial_eps)
         aux['overriden'][id_] = __class__.__name__
         
         # recursively compile arguments
@@ -1185,10 +1183,9 @@ class GumbelSoftmaxBinomial(JaxRDDLCompilerWithGrad):
 
             # use the gumbel-softmax trick for small population size
             # use the normal approximation for large population size
-            bins, w, eps = params[id_]
-            small_trials = jax.lax.stop_gradient(trials < bins)
+            small_trials = jax.lax.stop_gradient(trials < self.binomial_nbins)
             small_sample = self.gumbel_softmax_approx_to_binomial(
-                subkey, trials, prob, bins, w, eps)
+                subkey, trials, prob, *params[id_])
             large_sample = self.normal_approx_to_binomial(subkey, trials, prob)
             sample = jnp.where(small_trials, small_sample, large_sample)
 
@@ -1257,23 +1254,20 @@ class ExponentialPoisson(JaxRDDLCompilerWithGrad):
         kwargs['poisson_min_cdf'] = self.poisson_min_cdf
         return kwargs
 
-    @staticmethod
-    def exponential_approx_to_poisson(key: random.PRNGKey, 
-                                      rate: jnp.ndarray, 
-                                      bins: int, w: float) -> jnp.ndarray:
-        exp = random.exponential(key=key, shape=(bins,) + jnp.shape(rate), dtype=rate.dtype)
+    def exponential_approx_to_poisson(self, key: random.PRNGKey, 
+                                      rate: jnp.ndarray, w: float) -> jnp.ndarray:
+        exp = random.exponential(
+            key=key, shape=(self.poisson_nbins,) + jnp.shape(rate), dtype=rate.dtype)
         delta_t = exp / rate[jnp.newaxis, ...]
         times = jnp.cumsum(delta_t, axis=0)
         indicator = stable_sigmoid(w * (1. - times))
         return jnp.sum(indicator, axis=0)
 
-    @staticmethod
-    def branched_approx_to_poisson(key: random.PRNGKey, 
-                                   rate: jnp.ndarray, 
-                                   bins: int, w: float, min_cdf: float) -> jnp.ndarray:
-        cuml_prob = scipy.stats.poisson.cdf(bins, rate)
+    def branched_approx_to_poisson(self, key: random.PRNGKey, 
+                                   rate: jnp.ndarray, w: float, min_cdf: float) -> jnp.ndarray:
+        cuml_prob = scipy.stats.poisson.cdf(self.poisson_nbins, rate)
         small_rate = jax.lax.stop_gradient(cuml_prob >= min_cdf)
-        small_sample = ExponentialPoisson.exponential_approx_to_poisson(key, rate, bins, w)
+        small_sample = self.exponential_approx_to_poisson(key, rate, w)
         normal = random.normal(key=key, shape=jnp.shape(rate), dtype=rate.dtype)
         large_sample = rate + jnp.sqrt(rate) * normal
         return jnp.where(small_rate, small_sample, large_sample)
@@ -1288,8 +1282,7 @@ class ExponentialPoisson(JaxRDDLCompilerWithGrad):
             return super()._jax_poisson(expr, aux)
         
         id_ = expr.id
-        aux['params'][id_] = (
-            self.poisson_nbins, self.poisson_comparison_weight, self.poisson_min_cdf)
+        aux['params'][id_] = (self.poisson_comparison_weight, self.poisson_min_cdf)
         aux['overriden'][id_] = __class__.__name__
         
         jax_rate = self._jax(arg_rate, aux)
@@ -1316,9 +1309,7 @@ class ExponentialPoisson(JaxRDDLCompilerWithGrad):
             return super()._jax_negative_binomial(expr, aux)
         
         id_ = expr.id
-        aux['params'][id_] = (
-            self.poisson_nbins, self.poisson_comparison_weight, self.poisson_min_cdf
-        )
+        aux['params'][id_] = (self.poisson_comparison_weight, self.poisson_min_cdf)
         aux['overriden'][id_] = __class__.__name__
 
         jax_trials = self._jax(arg_trials, aux)
@@ -1356,28 +1347,26 @@ class GumbelSoftmaxPoisson(JaxRDDLCompilerWithGrad):
     
     def get_kwargs(self) -> Dict[str, Any]:
         kwargs = super().get_kwargs()
+        kwargs['poisson_nbins'] = self.poisson_nbins
         kwargs['poisson_softmax_weight'] = self.poisson_softmax_weight
         kwargs['poisson_min_cdf'] = self.poisson_min_cdf
         kwargs['poisson_eps'] = self.poisson_eps
         return kwargs
 
-    @staticmethod
-    def gumbel_softmax_poisson(key: random.PRNGKey, 
-                               rate: jnp.ndarray, 
-                               bins: int, w: float, eps: float) -> jnp.ndarray:
-        ks = jnp.arange(bins)[(jnp.newaxis,) * jnp.ndim(rate) + (...,)]
+    def gumbel_softmax_poisson(self, key: random.PRNGKey, 
+                               rate: jnp.ndarray, w: float, eps: float) -> jnp.ndarray:
+        ks = jnp.arange(self.poisson_nbins)[(jnp.newaxis,) * jnp.ndim(rate) + (...,)]
         rate = rate[..., jnp.newaxis]
         log_prob = ks * jnp.log(rate + eps) - rate - scipy.special.gammaln(ks + 1)
         g = random.gumbel(key=key, shape=jnp.shape(log_prob), dtype=rate.dtype)
         return SoftmaxArgmax.soft_argmax(g + log_prob, w=w, axes=-1)
     
-    @staticmethod
-    def branched_approx_to_poisson(key: random.PRNGKey, 
+    def branched_approx_to_poisson(self, key: random.PRNGKey, 
                                    rate: jnp.ndarray, 
-                                   bins: int, w: float, min_cdf: float, eps: float) -> jnp.ndarray:
-        cuml_prob = scipy.stats.poisson.cdf(bins, rate)
+                                   w: float, min_cdf: float, eps: float) -> jnp.ndarray:
+        cuml_prob = scipy.stats.poisson.cdf(self.poisson_nbins, rate)
         small_rate = jax.lax.stop_gradient(cuml_prob >= min_cdf)
-        small_sample = GumbelSoftmaxPoisson.gumbel_softmax_poisson(key, rate, bins, w, eps)
+        small_sample = self.gumbel_softmax_poisson(key, rate, w, eps)
         normal = random.normal(key=key, shape=jnp.shape(rate), dtype=rate.dtype)
         large_sample = rate + jnp.sqrt(rate) * normal
         return jnp.where(small_rate, small_sample, large_sample)
@@ -1392,9 +1381,7 @@ class GumbelSoftmaxPoisson(JaxRDDLCompilerWithGrad):
             return super()._jax_poisson(expr, aux)
         
         id_ = expr.id
-        aux['params'][id_] = (
-            self.poisson_nbins, self.poisson_softmax_weight, self.poisson_min_cdf,
-            self.poisson_eps)
+        aux['params'][id_] = (self.poisson_softmax_weight, self.poisson_min_cdf, self.poisson_eps)
         aux['overriden'][id_] = __class__.__name__
 
         jax_rate = self._jax(arg_rate, aux)
@@ -1421,10 +1408,7 @@ class GumbelSoftmaxPoisson(JaxRDDLCompilerWithGrad):
             return super()._jax_negative_binomial(expr, aux)
         
         id_ = expr.id
-        aux['params'][id_] = (
-            self.poisson_nbins, self.poisson_softmax_weight, self.poisson_min_cdf,
-            self.poisson_eps
-        )
+        aux['params'][id_] = (self.poisson_softmax_weight, self.poisson_min_cdf, self.poisson_eps)
         aux['overriden'][id_] = __class__.__name__
         
         jax_trials = self._jax(arg_trials, aux)
