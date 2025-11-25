@@ -706,11 +706,14 @@ class SoftRound(JaxRDDLCompilerWithGrad):
 class LinearIfElse(JaxRDDLCompilerWithGrad):
     '''Approximate if else statement as a linear combination.'''
 
-    def __init__(self, *args, **kwargs) -> None:
+    def __init__(self, *args, use_if_else_ste: bool=True, **kwargs) -> None:
         super(LinearIfElse, self).__init__(*args, **kwargs)
+        self.use_if_else_ste = use_if_else_ste
 
     def get_kwargs(self) -> Dict[str, Any]:
-        return super().get_kwargs()
+        kwargs = super().get_kwargs()
+        kwargs['use_if_else_ste'] = self.use_if_else_ste
+        return kwargs
 
     def _jax_if(self, expr, aux):
         JaxRDDLCompilerWithGrad._check_num_args(expr, 3)
@@ -730,6 +733,9 @@ class LinearIfElse(JaxRDDLCompilerWithGrad):
             sample_pred, key, err1, params = jax_pred(fls, nfls, params, key)
             sample_true, key, err2, params = jax_true(fls, nfls, params, key)
             sample_false, key, err3, params = jax_false(fls, nfls, params, key)
+            if self.use_if_else_ste:
+                hard_pred = (sample_pred > 0.5).astype(sample_pred.dtype)
+                sample_pred = sample_pred + jax.lax.stop_gradient(hard_pred - sample_pred)
             sample = sample_pred * sample_true + (1 - sample_pred) * sample_false
             err = err1 | err2 | err3
             return sample, key, err, params
