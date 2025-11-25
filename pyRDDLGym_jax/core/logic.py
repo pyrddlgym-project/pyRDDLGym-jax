@@ -1136,7 +1136,7 @@ class GumbelSoftmaxBinomial(JaxRDDLCompilerWithGrad):
                                   trials: jnp.ndarray, prob: jnp.ndarray) -> jnp.ndarray:
         normal = random.normal(key=key, shape=jnp.shape(trials), dtype=prob.dtype)
         mean = trials * prob
-        std = jnp.sqrt(trials * prob * (1.0 - prob))
+        std = jnp.sqrt(trials * jnp.clip(prob * (1.0 - prob), 0.0, 1.0))
         return mean + std * normal
     
     def gumbel_softmax_approx_to_binomial(self, key: random.PRNGKey, 
@@ -1183,11 +1183,11 @@ class GumbelSoftmaxBinomial(JaxRDDLCompilerWithGrad):
 
             # use the gumbel-softmax trick for small population size
             # use the normal approximation for large population size
-            small_trials = jax.lax.stop_gradient(trials < self.binomial_nbins)
-            small_sample = self.gumbel_softmax_approx_to_binomial(
-                subkey, trials, prob, *params[id_])
-            large_sample = self.normal_approx_to_binomial(subkey, trials, prob)
-            sample = jnp.where(small_trials, small_sample, large_sample)
+            sample = jnp.where(
+                jax.lax.stop_gradient(trials < self.binomial_nbins), 
+                self.gumbel_softmax_approx_to_binomial(subkey, trials, prob, *params[id_]), 
+                self.normal_approx_to_binomial(subkey, trials, prob)
+            )
 
             out_of_bounds = jnp.logical_not(jnp.all(
                 jnp.logical_and(jnp.logical_and(prob >= 0, prob <= 1), trials >= 0)))
@@ -1266,11 +1266,12 @@ class ExponentialPoisson(JaxRDDLCompilerWithGrad):
     def branched_approx_to_poisson(self, key: random.PRNGKey, 
                                    rate: jnp.ndarray, w: float, min_cdf: float) -> jnp.ndarray:
         cuml_prob = scipy.stats.poisson.cdf(self.poisson_nbins, rate)
-        small_rate = jax.lax.stop_gradient(cuml_prob >= min_cdf)
-        small_sample = self.exponential_approx_to_poisson(key, rate, w)
-        normal = random.normal(key=key, shape=jnp.shape(rate), dtype=rate.dtype)
-        large_sample = rate + jnp.sqrt(rate) * normal
-        return jnp.where(small_rate, small_sample, large_sample)
+        z = random.normal(key=key, shape=jnp.shape(rate), dtype=rate.dtype)
+        return jnp.where(
+            jax.lax.stop_gradient(cuml_prob >= min_cdf), 
+            self.exponential_approx_to_poisson(key, rate, w), 
+            rate + jnp.sqrt(rate) * z
+        )
 
     def _jax_poisson(self, expr, aux):
         ERR = JaxRDDLCompilerWithGrad.ERROR_CODES['INVALID_PARAM_POISSON']
@@ -1365,11 +1366,12 @@ class GumbelSoftmaxPoisson(JaxRDDLCompilerWithGrad):
                                    rate: jnp.ndarray, 
                                    w: float, min_cdf: float, eps: float) -> jnp.ndarray:
         cuml_prob = scipy.stats.poisson.cdf(self.poisson_nbins, rate)
-        small_rate = jax.lax.stop_gradient(cuml_prob >= min_cdf)
-        small_sample = self.gumbel_softmax_poisson(key, rate, w, eps)
-        normal = random.normal(key=key, shape=jnp.shape(rate), dtype=rate.dtype)
-        large_sample = rate + jnp.sqrt(rate) * normal
-        return jnp.where(small_rate, small_sample, large_sample)
+        z = random.normal(key=key, shape=jnp.shape(rate), dtype=rate.dtype)
+        return jnp.where(
+            jax.lax.stop_gradient(cuml_prob >= min_cdf), 
+            self.gumbel_softmax_poisson(key, rate, w, eps), 
+            rate + jnp.sqrt(rate) * z
+        )
         
     def _jax_poisson(self, expr, aux):
         ERR = JaxRDDLCompilerWithGrad.ERROR_CODES['INVALID_PARAM_POISSON']
