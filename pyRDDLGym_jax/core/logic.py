@@ -212,7 +212,7 @@ class SigmoidRelational(JaxRDDLCompilerWithGrad):
     '''Comparison operations approximated using sigmoid functions.'''
     
     def __init__(self, *args, sigmoid_weight: float=10., 
-                 use_sigmoid_ste: bool=True, use_tanh_ste: bool=True, 
+                 use_sigmoid_ste: bool=False, use_tanh_ste: bool=False, 
                  **kwargs) -> None:
         super(SigmoidRelational, self).__init__(*args, **kwargs)
         self.sigmoid_weight = float(sigmoid_weight)
@@ -597,7 +597,7 @@ class SoftFloor(JaxRDDLCompilerWithGrad):
     '''Floor and ceil operations approximated using soft operations.'''
     
     def __init__(self, *args, floor_weight: float=10., 
-                 use_floor_ste: bool=True, **kwargs) -> None:
+                 use_floor_ste: bool=False, **kwargs) -> None:
         super(SoftFloor, self).__init__(*args, **kwargs)
         self.floor_weight = float(floor_weight)
         self.use_floor_ste = use_floor_ste
@@ -672,7 +672,7 @@ class SoftRound(JaxRDDLCompilerWithGrad):
     '''Round operations approximated using soft operations.'''
     
     def __init__(self, *args, round_weight: float=10., 
-                 use_round_ste: bool=True, **kwargs) -> None:
+                 use_round_ste: bool=False, **kwargs) -> None:
         super(SoftRound, self).__init__(*args, **kwargs)
         self.round_weight = float(round_weight)
         self.use_round_ste = use_round_ste
@@ -706,7 +706,7 @@ class SoftRound(JaxRDDLCompilerWithGrad):
 class LinearIfElse(JaxRDDLCompilerWithGrad):
     '''Approximate if else statement as a linear combination.'''
 
-    def __init__(self, *args, use_if_else_ste: bool=True, **kwargs) -> None:
+    def __init__(self, *args, use_if_else_ste: bool=False, **kwargs) -> None:
         super(LinearIfElse, self).__init__(*args, **kwargs)
         self.use_if_else_ste = use_if_else_ste
 
