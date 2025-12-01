@@ -1650,9 +1650,8 @@ class GaussianPGPE(PGPE):
             ent = start_entropy_coeff * jnp.power(entropy_coeff_decay, progress)
             mu_grad, sigma_grad, new_r_max = _jax_wrapped_pgpe_grad_batched(
                 key, pgpe_params, r_max, ent, policy_hyperparams, fls, nfls, model_params)
-            new_mu, new_sigma, new_mu_state, new_sigma_state = \
-                _jax_wrapped_pgpe_update_helper(mu, sigma, mu_grad, sigma_grad, 
-                                                mu_state, sigma_state)
+            new_mu, new_sigma, new_mu_state, new_sigma_state = _jax_wrapped_pgpe_update_helper(
+                mu, sigma, mu_grad, sigma_grad, mu_state, sigma_state)
             
             # respect KL divergence contraint with old parameters
             if max_kl is not None:
@@ -1664,9 +1663,8 @@ class GaussianPGPE(PGPE):
                 kl_reduction = jnp.minimum(1.0, jnp.sqrt(max_kl / total_kl))
                 mu_state.hyperparams['learning_rate'] = old_mu_lr * kl_reduction
                 sigma_state.hyperparams['learning_rate'] = old_sigma_lr * kl_reduction
-                new_mu, new_sigma, new_mu_state, new_sigma_state = \
-                    _jax_wrapped_pgpe_update_helper(mu, sigma, mu_grad, sigma_grad, 
-                                                    mu_state, sigma_state)
+                new_mu, new_sigma, new_mu_state, new_sigma_state = _jax_wrapped_pgpe_update_helper(
+                    mu, sigma, mu_grad, sigma_grad, mu_state, sigma_state)
                 new_mu_state.hyperparams['learning_rate'] = old_mu_lr
                 new_sigma_state.hyperparams['learning_rate'] = old_sigma_lr
 
@@ -2175,8 +2173,8 @@ class JaxBackpropPlanner:
             log['grad'] = grad
             log['updates'] = updates
             zero_grads = _jax_wrapped_zero_gradients(grad)
-            return policy_params, converged, opt_state, opt_aux, \
-                loss_val, log, model_params, zero_grads
+            return (policy_params, converged, opt_state, opt_aux, 
+                    loss_val, log, model_params, zero_grads)
         
         # for parallel policy update, just do each policy update in parallel
         def _jax_wrapped_batched_plan_update(key, policy_params, policy_hyperparams,
@@ -2642,12 +2640,10 @@ class JaxBackpropPlanner:
 
                 # pgpe update of the plan
                 key, subkey = random.split(key)
-                pgpe_params, r_max, pgpe_opt_state, pgpe_param, pgpe_converged = \
-                    self.pgpe.update(
-                        subkey, pgpe_params, r_max, progress_percent, 
-                        policy_hyperparams, *test_subs, model_params_test, 
-                        pgpe_opt_state
-                    )
+                pgpe_params, r_max, pgpe_opt_state, pgpe_param, pgpe_converged = self.pgpe.update(
+                    subkey, pgpe_params, r_max, progress_percent, 
+                    policy_hyperparams, *test_subs, model_params_test, pgpe_opt_state
+                )
                 
                 # evaluate
                 pgpe_loss, _ = self.test_loss(
@@ -2659,12 +2655,11 @@ class JaxBackpropPlanner:
                 # replace JaxPlan with PGPE if new minimum reached or train loss invalid
                 pgpe_mask = (pgpe_loss_smooth < pbest_loss) | ~np.isfinite(train_loss)
                 if np.any(pgpe_mask):
-                    policy_params, test_loss, test_loss_smooth, converged = \
-                        self.merge_pgpe(
-                            pgpe_mask, pgpe_param, policy_params, 
-                            pgpe_loss, test_loss, pgpe_loss_smooth, test_loss_smooth, 
-                            pgpe_converged, converged
-                        )
+                    policy_params, test_loss, test_loss_smooth, converged = self.merge_pgpe(
+                        pgpe_mask, pgpe_param, policy_params, 
+                        pgpe_loss, test_loss, pgpe_loss_smooth, test_loss_smooth, 
+                        pgpe_converged, converged
+                    )
                     pgpe_improve = True
                     total_pgpe_it += 1  
             else:

@@ -212,7 +212,7 @@ class SigmoidRelational(JaxRDDLCompilerWithGrad):
     '''Comparison operations approximated using sigmoid functions.'''
     
     def __init__(self, *args, sigmoid_weight: float=10., 
-                 use_sigmoid_ste: bool=False, use_tanh_ste: bool=False, 
+                 use_sigmoid_ste: bool=True, use_tanh_ste: bool=True, 
                  **kwargs) -> None:
         super(SigmoidRelational, self).__init__(*args, **kwargs)
         self.sigmoid_weight = float(sigmoid_weight)
@@ -597,7 +597,7 @@ class SoftFloor(JaxRDDLCompilerWithGrad):
     '''Floor and ceil operations approximated using soft operations.'''
     
     def __init__(self, *args, floor_weight: float=10., 
-                 use_floor_ste: bool=False, **kwargs) -> None:
+                 use_floor_ste: bool=True, **kwargs) -> None:
         super(SoftFloor, self).__init__(*args, **kwargs)
         self.floor_weight = float(floor_weight)
         self.use_floor_ste = use_floor_ste
@@ -672,7 +672,7 @@ class SoftRound(JaxRDDLCompilerWithGrad):
     '''Round operations approximated using soft operations.'''
     
     def __init__(self, *args, round_weight: float=10., 
-                 use_round_ste: bool=False, **kwargs) -> None:
+                 use_round_ste: bool=True, **kwargs) -> None:
         super(SoftRound, self).__init__(*args, **kwargs)
         self.round_weight = float(round_weight)
         self.use_round_ste = use_round_ste
@@ -706,7 +706,7 @@ class SoftRound(JaxRDDLCompilerWithGrad):
 class LinearIfElse(JaxRDDLCompilerWithGrad):
     '''Approximate if else statement as a linear combination.'''
 
-    def __init__(self, *args, use_if_else_ste: bool=False, **kwargs) -> None:
+    def __init__(self, *args, use_if_else_ste: bool=True, **kwargs) -> None:
         super(LinearIfElse, self).__init__(*args, **kwargs)
         self.use_if_else_ste = use_if_else_ste
 
@@ -1168,8 +1168,8 @@ class GumbelSoftmaxBinomial(JaxRDDLCompilerWithGrad):
         arg_trials, arg_prob = expr.args
 
         # if prob is non-fluent, always use the exact operation
-        if not self.traced.cached_is_fluent(arg_trials) \
-        and not self.traced.cached_is_fluent(arg_prob):
+        if (not self.traced.cached_is_fluent(arg_trials) and 
+            not self.traced.cached_is_fluent(arg_prob)):
             return super()._jax_binomial(expr, aux)
         
         id_ = expr.id
@@ -1216,8 +1216,8 @@ class DeterminizedBinomial(JaxRDDLCompilerWithGrad):
         arg_trials, arg_prob = expr.args
 
         # if prob is non-fluent, always use the exact operation
-        if not self.traced.cached_is_fluent(arg_trials) \
-        and not self.traced.cached_is_fluent(arg_prob):
+        if (not self.traced.cached_is_fluent(arg_trials) and 
+            not self.traced.cached_is_fluent(arg_prob)):
             return super()._jax_binomial(expr, aux)
         
         aux['overriden'][expr.id] = __class__.__name__
@@ -1311,8 +1311,8 @@ class ExponentialPoisson(JaxRDDLCompilerWithGrad):
         arg_trials, arg_prob = expr.args
 
         # if prob and trials is non-fluent, always use the exact operation
-        if not self.traced.cached_is_fluent(arg_trials) \
-        and not self.traced.cached_is_fluent(arg_prob):
+        if (not self.traced.cached_is_fluent(arg_trials) and 
+            not self.traced.cached_is_fluent(arg_prob)):
             return super()._jax_negative_binomial(expr, aux)
         
         id_ = expr.id
@@ -1411,8 +1411,8 @@ class GumbelSoftmaxPoisson(JaxRDDLCompilerWithGrad):
         arg_trials, arg_prob = expr.args
 
         # if prob and trials is non-fluent, always use the exact operation
-        if not self.traced.cached_is_fluent(arg_trials) \
-        and not self.traced.cached_is_fluent(arg_prob):
+        if (not self.traced.cached_is_fluent(arg_trials) and 
+            not self.traced.cached_is_fluent(arg_prob)):
             return super()._jax_negative_binomial(expr, aux)
         
         id_ = expr.id
@@ -1474,8 +1474,8 @@ class DeterminizedPoisson(JaxRDDLCompilerWithGrad):
         arg_trials, arg_prob = expr.args
 
         # if prob and trials is non-fluent, always use the exact operation
-        if not self.traced.cached_is_fluent(arg_trials) \
-        and not self.traced.cached_is_fluent(arg_prob):
+        if (not self.traced.cached_is_fluent(arg_trials) and 
+            not self.traced.cached_is_fluent(arg_prob)):
             return super()._jax_negative_binomial(expr, aux)
         
         aux['overriden'][expr.id] = __class__.__name__
