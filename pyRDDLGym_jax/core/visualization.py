@@ -1513,8 +1513,7 @@ class JaxPlannerDashboard:
         if not optimizer.res: return
         
         self.tuning_gp_targets = optimizer.space.target.reshape((-1,))
-        self.tuning_gp_predicted = \
-            optimizer._gp.predict(optimizer.space.params).reshape((-1,))
+        self.tuning_gp_predicted = optimizer._gp.predict(optimizer.space.params).reshape((-1,))
         self.tuning_gp_params = {name: optimizer.space.params[:, i] 
                                  for (i, name) in enumerate(optimizer.space.keys)}
         
