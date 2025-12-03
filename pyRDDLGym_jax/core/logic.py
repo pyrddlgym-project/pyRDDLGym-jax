@@ -371,162 +371,37 @@ class SoftmaxArgmax(JaxRDDLCompilerWithGrad):
 class ProductNormLogical(JaxRDDLCompilerWithGrad):
     '''Product t-norm given by the expression (x, y) -> x * y.'''
     
-    def __init__(self, *args, **kwargs) -> None:
+    def __init__(self, *args, use_logic_ste: bool=False, **kwargs) -> None:
         super(ProductNormLogical, self).__init__(*args, **kwargs)
+        self.use_logic_ste = use_logic_ste
 
     def get_kwargs(self) -> Dict[str, Any]:
-        return super().get_kwargs()
+        kwargs = super().get_kwargs()
+        kwargs['use_logic_ste'] = self.use_logic_ste
+        return kwargs
 
     def _jax_not(self, expr, aux):
         if not self.traced.cached_is_fluent(expr):
             return super()._jax_not(expr, aux)
         aux['overriden'][expr.id] = __class__.__name__
         def not_op(x):
-            return 1. - x
+            sample = 1. - x
+            if self.use_logic_ste:
+                hard_sample = jnp.asarray(x <= 0.5, dtype=self.REAL)
+                sample = sample + jax.lax.stop_gradient(hard_sample - sample)
+            return sample
         return self._jax_unary_helper(expr, aux, not_op)
 
-    def _jax_and(self, expr, aux):
-        if not self.traced.cached_is_fluent(expr):
-            return super()._jax_and(expr, aux)
-        aux['overriden'][expr.id] = __class__.__name__
-        return self._jax_nary_helper(expr, aux, jnp.multiply)
-
-    def _jax_or(self, expr, aux):
-        if not self.traced.cached_is_fluent(expr):
-            return super()._jax_or(expr, aux)
-        aux['overriden'][expr.id] = __class__.__name__
-        def or_op(x, y):
-            return 1. - (1. - x) * (1. - y)
-        return self._jax_nary_helper(expr, aux, or_op)
-
-    def _jax_xor(self, expr, aux):
-        if not self.traced.cached_is_fluent(expr):
-            return super()._jax_xor(expr, aux)
-        aux['overriden'][expr.id] = __class__.__name__
-        def xor_op(x, y):
-            return (1. - (1. - x) * (1. - y)) * (1. - x * y)
-        return self._jax_binary_helper(expr, aux, xor_op)
-
-    def _jax_implies(self, expr, aux):
-        if not self.traced.cached_is_fluent(expr):
-            return super()._jax_implies(expr, aux)
-        aux['overriden'][expr.id] = __class__.__name__
-        def implies_op(x, y):
-            return 1. - x * (1. - y)
-        return self._jax_binary_helper(expr, aux, implies_op)
-
-    def _jax_equiv(self, expr, aux):
-        if not self.traced.cached_is_fluent(expr):
-            return super()._jax_equiv(expr, aux)
-        aux['overriden'][expr.id] = __class__.__name__
-        def equiv_op(x, y):
-            return (1. - x * (1. - y)) * (1. - y * (1. - x))
-        return self._jax_binary_helper(expr, aux, equiv_op)
-    
-    def _jax_forall(self, expr, aux):
-        if not self.traced.cached_is_fluent(expr):
-            return super()._jax_forall(expr, aux)
-        aux['overriden'][expr.id] = __class__.__name__
-        return self._jax_aggregation_helper(expr, aux, jnp.prod)
-    
-    def _jax_exists(self, expr, aux):
-        if not self.traced.cached_is_fluent(expr):
-            return super()._jax_exists(expr, aux)
-        aux['overriden'][expr.id] = __class__.__name__
-        def exists_op(x, axis):
-            return 1. - jnp.prod(1. - x, axis=axis)
-        return self._jax_aggregation_helper(expr, aux, exists_op)
-        
-
-class GodelNormLogical(JaxRDDLCompilerWithGrad):
-    '''Godel t-norm given by the expression (x, y) -> min(x, y).'''
-    
-    def __init__(self, *args, **kwargs) -> None:
-        super(GodelNormLogical, self).__init__(*args, **kwargs)
-        
-    def get_kwargs(self) -> Dict[str, Any]:
-        return super().get_kwargs()
-
-    def _jax_not(self, expr, aux):
-        if not self.traced.cached_is_fluent(expr):
-            return super()._jax_not(expr, aux)
-        aux['overriden'][expr.id] = __class__.__name__
-        def not_op(x):
-            return 1. - x
-        return self._jax_unary_helper(expr, aux, not_op)
-    
-    def _jax_and(self, expr, aux):
-        if not self.traced.cached_is_fluent(expr):
-            return super()._jax_and(expr, aux)
-        aux['overriden'][expr.id] = __class__.__name__
-        return self._jax_nary_helper(expr, aux, jnp.minimum)
-
-    def _jax_or(self, expr, aux):
-        if not self.traced.cached_is_fluent(expr):
-            return super()._jax_or(expr, aux)
-        aux['overriden'][expr.id] = __class__.__name__
-        return self._jax_nary_helper(expr, aux, jnp.maximum)
-
-    def _jax_xor(self, expr, aux):
-        if not self.traced.cached_is_fluent(expr):
-            return super()._jax_xor(expr, aux)
-        aux['overriden'][expr.id] = __class__.__name__
-        def xor_op(x, y):
-            return jnp.minimum(jnp.maximum(x, y), 1. - jnp.minimum(x, y))
-        return self._jax_binary_helper(expr, aux, xor_op)
-
-    def _jax_implies(self, expr, aux):
-        if not self.traced.cached_is_fluent(expr):
-            return super()._jax_implies(expr, aux)
-        aux['overriden'][expr.id] = __class__.__name__
-        def implies_op(x, y):
-            return jnp.maximum(1. - x, y)
-        return self._jax_binary_helper(expr, aux, implies_op)
-
-    def _jax_equiv(self, expr, aux):
-        if not self.traced.cached_is_fluent(expr):
-            return super()._jax_equiv(expr, aux)
-        aux['overriden'][expr.id] = __class__.__name__
-        def equiv_op(x, y):
-            return jnp.minimum(jnp.maximum(1. - x, y), jnp.maximum(1. - y, x))
-        return self._jax_binary_helper(expr, aux, equiv_op)
-    
-    def _jax_forall(self, expr, aux):
-        if not self.traced.cached_is_fluent(expr):
-            return super()._jax_forall(expr, aux)
-        aux['overriden'][expr.id] = __class__.__name__
-        return self._jax_aggregation_helper(expr, aux, jnp.min)
-    
-    def _jax_exists(self, expr, aux):
-        if not self.traced.cached_is_fluent(expr):
-            return super()._jax_exists(expr, aux)
-        aux['overriden'][expr.id] = __class__.__name__
-        return self._jax_aggregation_helper(expr, aux, jnp.max)
-        
-
-class LukasiewiczNormLogical(JaxRDDLCompilerWithGrad):
-    '''Lukasiewicz t-norm given by the expression (x, y) -> max(x + y - 1, 0).'''
-    
-    def __init__(self, *args, **kwargs) -> None:
-        super(LukasiewiczNormLogical, self).__init__(*args, **kwargs)
-
-    def get_kwargs(self) -> Dict[str, Any]:
-        return super().get_kwargs()
-
-    def _jax_not(self, expr, aux):
-        if not self.traced.cached_is_fluent(expr):
-            return super()._jax_not(expr, aux)
-        aux['overriden'][expr.id] = __class__.__name__
-        def not_op(x):
-            return 1. - x
-        return self._jax_unary_helper(expr, aux, not_op)
-    
     def _jax_and(self, expr, aux):
         if not self.traced.cached_is_fluent(expr):
             return super()._jax_and(expr, aux)
         aux['overriden'][expr.id] = __class__.__name__
         def and_op(x, y):
-            return jax.nn.relu(x + y - 1.)
+            sample = jnp.multiply(x, y)
+            if self.use_logic_ste:
+                hard_sample = jnp.asarray(jnp.logical_and(x > 0.5, y > 0.5), dtype=self.REAL)
+                sample = sample + jax.lax.stop_gradient(hard_sample - sample)
+            return sample
         return self._jax_nary_helper(expr, aux, and_op)
 
     def _jax_or(self, expr, aux):
@@ -534,7 +409,11 @@ class LukasiewiczNormLogical(JaxRDDLCompilerWithGrad):
             return super()._jax_or(expr, aux)
         aux['overriden'][expr.id] = __class__.__name__
         def or_op(x, y):
-            return 1. - jax.nn.relu(1. - x - y)
+            sample = 1. - (1. - x) * (1. - y)
+            if self.use_logic_ste:
+                hard_sample = jnp.asarray(jnp.logical_or(x > 0.5, y > 0.5), dtype=self.REAL)
+                sample = sample + jax.lax.stop_gradient(hard_sample - sample)
+            return sample
         return self._jax_nary_helper(expr, aux, or_op)
 
     def _jax_xor(self, expr, aux):
@@ -542,7 +421,11 @@ class LukasiewiczNormLogical(JaxRDDLCompilerWithGrad):
             return super()._jax_xor(expr, aux)
         aux['overriden'][expr.id] = __class__.__name__
         def xor_op(x, y):
-            return jax.nn.relu(1. - jnp.abs(1. - x - y))
+            sample = (1. - (1. - x) * (1. - y)) * (1. - x * y)
+            if self.use_logic_ste:
+                hard_sample = jnp.asarray(jnp.logical_xor(x > 0.5, y > 0.5), dtype=self.REAL)
+                sample = sample + jax.lax.stop_gradient(hard_sample - sample)
+            return sample
         return self._jax_binary_helper(expr, aux, xor_op)
 
     def _jax_implies(self, expr, aux):
@@ -550,7 +433,11 @@ class LukasiewiczNormLogical(JaxRDDLCompilerWithGrad):
             return super()._jax_implies(expr, aux)
         aux['overriden'][expr.id] = __class__.__name__
         def implies_op(x, y):
-            return 1. - jax.nn.relu(x - y)
+            sample = 1. - x * (1. - y)
+            if self.use_logic_ste:
+                hard_sample = jnp.asarray(jnp.logical_or(x <= 0.5, y > 0.5), dtype=self.REAL)
+                sample = sample + jax.lax.stop_gradient(hard_sample - sample)
+            return sample
         return self._jax_binary_helper(expr, aux, implies_op)
 
     def _jax_equiv(self, expr, aux):
@@ -558,7 +445,13 @@ class LukasiewiczNormLogical(JaxRDDLCompilerWithGrad):
             return super()._jax_equiv(expr, aux)
         aux['overriden'][expr.id] = __class__.__name__
         def equiv_op(x, y):
-            return jax.nn.relu(1. - jnp.abs(x - y))
+            sample = (1. - x * (1. - y)) * (1. - y * (1. - x))
+            if self.use_logic_ste:
+                hard_sample = jnp.logical_and(
+                    jnp.logical_or(x <= 0.5, y > 0.5), jnp.logical_or(y <= 0.5, x > 0.5))
+                hard_sample = jnp.asarray(hard_sample, dtype=self.REAL)
+                sample = sample + jax.lax.stop_gradient(hard_sample - sample)
+            return sample
         return self._jax_binary_helper(expr, aux, equiv_op)
     
     def _jax_forall(self, expr, aux):
@@ -566,9 +459,247 @@ class LukasiewiczNormLogical(JaxRDDLCompilerWithGrad):
             return super()._jax_forall(expr, aux)
         aux['overriden'][expr.id] = __class__.__name__
         def forall_op(x, axis):
-            return jax.nn.relu(jnp.sum(x - 1., axis=axis) + 1.)
+            sample = jnp.prod(x, axis=axis)
+            if self.use_logic_ste:
+                hard_sample = jnp.all(x, axis=axis)
+                sample = sample + jax.lax.stop_gradient(hard_sample - sample)
+            return sample
         return self._jax_aggregation_helper(expr, aux, forall_op)
-       
+    
+    def _jax_exists(self, expr, aux):
+        if not self.traced.cached_is_fluent(expr):
+            return super()._jax_exists(expr, aux)
+        aux['overriden'][expr.id] = __class__.__name__
+        def exists_op(x, axis):
+            sample = 1. - jnp.prod(1. - x, axis=axis)
+            if self.use_logic_ste:
+                hard_sample = jnp.any(x, axis=axis)
+                sample = sample + jax.lax.stop_gradient(hard_sample - sample)
+            return sample
+        return self._jax_aggregation_helper(expr, aux, exists_op)
+        
+
+class GodelNormLogical(JaxRDDLCompilerWithGrad):
+    '''Godel t-norm given by the expression (x, y) -> min(x, y).'''
+    
+    def __init__(self, *args, use_logic_ste: bool=False, **kwargs) -> None:
+        super(GodelNormLogical, self).__init__(*args, **kwargs)
+        self.use_logic_ste = use_logic_ste
+        
+    def get_kwargs(self) -> Dict[str, Any]:
+        kwargs = super().get_kwargs()
+        kwargs['use_logic_ste'] = self.use_logic_ste
+        return kwargs
+
+    def _jax_not(self, expr, aux):
+        if not self.traced.cached_is_fluent(expr):
+            return super()._jax_not(expr, aux)
+        aux['overriden'][expr.id] = __class__.__name__
+        def not_op(x):
+            sample = 1. - x
+            if self.use_logic_ste:
+                hard_sample = jnp.asarray(x <= 0.5, dtype=self.REAL)
+                sample = sample + jax.lax.stop_gradient(hard_sample - sample)
+            return sample
+        return self._jax_unary_helper(expr, aux, not_op)
+    
+    def _jax_and(self, expr, aux):
+        if not self.traced.cached_is_fluent(expr):
+            return super()._jax_and(expr, aux)
+        aux['overriden'][expr.id] = __class__.__name__
+        def and_op(x, y):
+            sample = jnp.minimum(x, y)
+            if self.use_logic_ste:
+                hard_sample = jnp.asarray(jnp.logical_and(x > 0.5, y > 0.5), dtype=self.REAL)
+                sample = sample + jax.lax.stop_gradient(hard_sample - sample)
+            return sample
+        return self._jax_nary_helper(expr, aux, and_op)
+
+    def _jax_or(self, expr, aux):
+        if not self.traced.cached_is_fluent(expr):
+            return super()._jax_or(expr, aux)
+        aux['overriden'][expr.id] = __class__.__name__
+        def or_op(x, y):
+            sample = jnp.maximum(x, y)
+            if self.use_logic_ste:
+                hard_sample = jnp.asarray(jnp.logical_or(x > 0.5, y > 0.5), dtype=self.REAL)
+                sample = sample + jax.lax.stop_gradient(hard_sample - sample)
+            return sample
+        return self._jax_nary_helper(expr, aux, or_op)
+
+    def _jax_xor(self, expr, aux):
+        if not self.traced.cached_is_fluent(expr):
+            return super()._jax_xor(expr, aux)
+        aux['overriden'][expr.id] = __class__.__name__
+        def xor_op(x, y):
+            sample = jnp.minimum(jnp.maximum(x, y), 1. - jnp.minimum(x, y))
+            if self.use_logic_ste:
+                hard_sample = jnp.asarray(jnp.logical_xor(x > 0.5, y > 0.5), dtype=self.REAL)
+                sample = sample + jax.lax.stop_gradient(hard_sample - sample)
+            return sample
+        return self._jax_binary_helper(expr, aux, xor_op)
+
+    def _jax_implies(self, expr, aux):
+        if not self.traced.cached_is_fluent(expr):
+            return super()._jax_implies(expr, aux)
+        aux['overriden'][expr.id] = __class__.__name__
+        def implies_op(x, y):
+            sample = jnp.maximum(1. - x, y)
+            if self.use_logic_ste:
+                hard_sample = jnp.asarray(jnp.logical_or(x <= 0.5, y > 0.5), dtype=self.REAL)
+                sample = sample + jax.lax.stop_gradient(hard_sample - sample)
+            return sample
+        return self._jax_binary_helper(expr, aux, implies_op)
+
+    def _jax_equiv(self, expr, aux):
+        if not self.traced.cached_is_fluent(expr):
+            return super()._jax_equiv(expr, aux)
+        aux['overriden'][expr.id] = __class__.__name__
+        def equiv_op(x, y):
+            sample = jnp.minimum(jnp.maximum(1. - x, y), jnp.maximum(1. - y, x))
+            if self.use_logic_ste:
+                hard_sample = jnp.logical_and(
+                    jnp.logical_or(x <= 0.5, y > 0.5), jnp.logical_or(y <= 0.5, x > 0.5))
+                hard_sample = jnp.asarray(hard_sample, dtype=self.REAL)
+                sample = sample + jax.lax.stop_gradient(hard_sample - sample)
+            return sample
+        return self._jax_binary_helper(expr, aux, equiv_op)
+    
+    def _jax_forall(self, expr, aux):
+        if not self.traced.cached_is_fluent(expr):
+            return super()._jax_forall(expr, aux)
+        aux['overriden'][expr.id] = __class__.__name__
+        def all_op(x, axis):
+            sample = jnp.min(x, axis=axis)
+            if self.use_logic_ste:
+                hard_sample = jnp.all(x, axis=axis)
+                sample = sample + jax.lax.stop_gradient(hard_sample - sample)
+            return sample
+        return self._jax_aggregation_helper(expr, aux, all_op)
+    
+    def _jax_exists(self, expr, aux):
+        if not self.traced.cached_is_fluent(expr):
+            return super()._jax_exists(expr, aux)
+        aux['overriden'][expr.id] = __class__.__name__
+        def exists_op(x, axis):
+            sample = jnp.max(x, axis=axis)
+            if self.use_logic_ste:
+                hard_sample = jnp.any(x, axis=axis)
+                sample = sample + jax.lax.stop_gradient(hard_sample - sample)
+            return sample
+        return self._jax_aggregation_helper(expr, aux, exists_op)
+        
+
+class LukasiewiczNormLogical(JaxRDDLCompilerWithGrad):
+    '''Lukasiewicz t-norm given by the expression (x, y) -> max(x + y - 1, 0).'''
+    
+    def __init__(self, *args, use_logic_ste: bool=False, **kwargs) -> None:
+        super(LukasiewiczNormLogical, self).__init__(*args, **kwargs)
+        self.use_logic_ste = use_logic_ste
+
+    def get_kwargs(self) -> Dict[str, Any]:
+        kwargs = super().get_kwargs()
+        kwargs['use_logic_ste'] = self.use_logic_ste
+        return kwargs
+
+    def _jax_not(self, expr, aux):
+        if not self.traced.cached_is_fluent(expr):
+            return super()._jax_not(expr, aux)
+        aux['overriden'][expr.id] = __class__.__name__
+        def not_op(x):
+            sample = 1. - x
+            if self.use_logic_ste:
+                hard_sample = jnp.asarray(x <= 0.5, dtype=self.REAL)
+                sample = sample + jax.lax.stop_gradient(hard_sample - sample)
+            return sample
+        return self._jax_unary_helper(expr, aux, not_op)
+    
+    def _jax_and(self, expr, aux):
+        if not self.traced.cached_is_fluent(expr):
+            return super()._jax_and(expr, aux)
+        aux['overriden'][expr.id] = __class__.__name__
+        def and_op(x, y):
+            sample = jax.nn.relu(x + y - 1.)
+            if self.use_logic_ste:
+                hard_sample = jnp.asarray(jnp.logical_and(x > 0.5, y > 0.5), dtype=self.REAL)
+                sample = sample + jax.lax.stop_gradient(hard_sample - sample)
+            return sample
+        return self._jax_nary_helper(expr, aux, and_op)
+
+    def _jax_or(self, expr, aux):
+        if not self.traced.cached_is_fluent(expr):
+            return super()._jax_or(expr, aux)
+        aux['overriden'][expr.id] = __class__.__name__
+        def or_op(x, y):
+            sample = 1. - jax.nn.relu(1. - x - y)
+            if self.use_logic_ste:
+                hard_sample = jnp.asarray(jnp.logical_or(x > 0.5, y > 0.5), dtype=self.REAL)
+                sample = sample + jax.lax.stop_gradient(hard_sample - sample)
+            return sample
+        return self._jax_nary_helper(expr, aux, or_op)
+
+    def _jax_xor(self, expr, aux):
+        if not self.traced.cached_is_fluent(expr):
+            return super()._jax_xor(expr, aux)
+        aux['overriden'][expr.id] = __class__.__name__
+        def xor_op(x, y):
+            sample = jax.nn.relu(1. - jnp.abs(1. - x - y))
+            if self.use_logic_ste:
+                hard_sample = jnp.asarray(jnp.logical_xor(x > 0.5, y > 0.5), dtype=self.REAL)
+                sample = sample + jax.lax.stop_gradient(hard_sample - sample)
+            return sample
+        return self._jax_binary_helper(expr, aux, xor_op)
+
+    def _jax_implies(self, expr, aux):
+        if not self.traced.cached_is_fluent(expr):
+            return super()._jax_implies(expr, aux)
+        aux['overriden'][expr.id] = __class__.__name__
+        def implies_op(x, y):
+            sample = 1. - jax.nn.relu(x - y)
+            if self.use_logic_ste:
+                hard_sample = jnp.asarray(jnp.logical_or(x <= 0.5, y > 0.5), dtype=self.REAL)
+                sample = sample + jax.lax.stop_gradient(hard_sample - sample)
+            return sample
+        return self._jax_binary_helper(expr, aux, implies_op)
+
+    def _jax_equiv(self, expr, aux):
+        if not self.traced.cached_is_fluent(expr):
+            return super()._jax_equiv(expr, aux)
+        aux['overriden'][expr.id] = __class__.__name__
+        def equiv_op(x, y):
+            sample = jax.nn.relu(1. - jnp.abs(x - y))
+            if self.use_logic_ste:
+                hard_sample = jnp.logical_and(
+                    jnp.logical_or(x <= 0.5, y > 0.5), jnp.logical_or(y <= 0.5, x > 0.5))
+                hard_sample = jnp.asarray(hard_sample, dtype=self.REAL)
+                sample = sample + jax.lax.stop_gradient(hard_sample - sample)
+            return sample
+        return self._jax_binary_helper(expr, aux, equiv_op)
+    
+    def _jax_forall(self, expr, aux):
+        if not self.traced.cached_is_fluent(expr):
+            return super()._jax_forall(expr, aux)
+        aux['overriden'][expr.id] = __class__.__name__
+        def forall_op(x, axis):
+            sample = jax.nn.relu(jnp.sum(x - 1., axis=axis) + 1.)
+            if self.use_logic_ste:
+                hard_sample = jnp.all(x, axis=axis)
+                sample = sample + jax.lax.stop_gradient(hard_sample - sample)
+            return sample
+        return self._jax_aggregation_helper(expr, aux, forall_op)
+    
+    def _jax_exists(self, expr, aux):
+        if not self.traced.cached_is_fluent(expr):
+            return super()._jax_exists(expr, aux)
+        aux['overriden'][expr.id] = __class__.__name__
+        def exists_op(x, axis):
+            sample = 1. - jax.nn.relu(jnp.sum(-x, axis=axis) + 1.)
+            if self.use_logic_ste:
+                hard_sample = jnp.any(x, axis=axis)
+                sample = sample + jax.lax.stop_gradient(hard_sample - sample)
+            return sample
+        return self._jax_aggregation_helper(expr, aux, exists_op)
+
 
 # ===============================================================================
 # function relaxations
