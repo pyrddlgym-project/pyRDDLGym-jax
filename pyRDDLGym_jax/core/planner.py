@@ -2222,6 +2222,8 @@ class JaxBackpropPlanner:
                 )         
             
             # for enum types need to convert the string values to integer indices
+            if np.size(value) != np.size(init_value):
+                value = init_value
             value = np.reshape(value, np.shape(init_value))
             if value.dtype.type is np.str_:
                 value = rddl.object_string_to_index_array(rddl.variable_ranges[name], value)
