@@ -288,7 +288,7 @@ class JaxPlannerDashboard:
                              dbc.DropdownMenuItem("10", id='10pp'),
                              dbc.DropdownMenuItem("25", id='25pp'),
                              dbc.DropdownMenuItem("50", id='50pp')],
-                            label="Exp. Per Page: 10",
+                            label="Results Per Page: 10",
                             id='experiment-num-per-page-dropdown',
                             nav=True
                         )
@@ -620,7 +620,7 @@ class JaxPlannerDashboard:
             [Input('experiment-num-per-page', 'data')]
         )
         def update_experiments_per_page(selected_num):
-            return f'Exp. Per Page: {selected_num}'
+            return f'Results Per Page: {selected_num}'
         
         # update the experiment table
         @app.callback(
