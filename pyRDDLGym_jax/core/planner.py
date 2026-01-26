@@ -43,8 +43,7 @@ import pickle
 import sys
 import time
 import traceback
-from typing import Any, Callable, Dict, Generator, Optional, Set, Sequence, Type, Tuple, \
-    Union
+from typing import Any, Callable, Dict, Generator, Optional, Sequence, Type, Tuple, Union
 
 import haiku as hk
 import jax
@@ -70,16 +69,18 @@ from pyRDDLGym.core.debug.exception import (
 from pyRDDLGym.core.policy import BaseAgent
 
 from pyRDDLGym_jax import __version__
-from pyRDDLGym_jax.core import logic
 from pyRDDLGym_jax.core.compiler import JaxRDDLCompiler
-from pyRDDLGym_jax.core.logic import Logic, FuzzyLogic
+from pyRDDLGym_jax.core import logic
+from pyRDDLGym_jax.core.logic import (
+    JaxRDDLCompilerWithGrad, DefaultJaxRDDLCompilerWithGrad, stable_sigmoid
+)
 
 # try to load the dash board
 try:
     from pyRDDLGym_jax.core.visualization import JaxPlannerDashboard
 except Exception:
     raise_warning('Failed to load the dashboard visualization tool: '
-                  'please make sure you have installed the required packages.', 'red')
+                  'ensure all prerequisite packages are installed.', 'red')
     traceback.print_exc()
     JaxPlannerDashboard = None
 
@@ -128,33 +129,15 @@ def _getattr_any(packages, item):
 
 
 def _load_config(config, args):
-    model_args = {k: args['Model'][k] for (k, _) in config.items('Model')}
-    planner_args = {k: args['Optimizer'][k] for (k, _) in config.items('Optimizer')}
-    train_args = {k: args['Training'][k] for (k, _) in config.items('Training')}    
+    compiler_kwargs = {k: args['Compiler'][k] for (k, _) in config.items('Compiler')}
+    planner_args = {k: args['Planner'][k] for (k, _) in config.items('Planner')}
+    train_args = {k: args['Optimize'][k] for (k, _) in config.items('Optimize')}    
     
-    # read the model settings
-    logic_name = model_args.get('logic', 'FuzzyLogic')
-    logic_kwargs = model_args.get('logic_kwargs', {})
-    if logic_name == 'FuzzyLogic':
-        tnorm_name = model_args.get('tnorm', 'ProductTNorm')
-        tnorm_kwargs = model_args.get('tnorm_kwargs', {})
-        comp_name = model_args.get('complement', 'StandardComplement')
-        comp_kwargs = model_args.get('complement_kwargs', {})
-        compare_name = model_args.get('comparison', 'SigmoidComparison')
-        compare_kwargs = model_args.get('comparison_kwargs', {})
-        sampling_name = model_args.get('sampling', 'SoftRandomSampling')
-        sampling_kwargs = model_args.get('sampling_kwargs', {})
-        rounding_name = model_args.get('rounding', 'SoftRounding')
-        rounding_kwargs = model_args.get('rounding_kwargs', {})
-        control_name = model_args.get('control', 'SoftControlFlow')
-        control_kwargs = model_args.get('control_kwargs', {})
-        logic_kwargs['tnorm'] = getattr(logic, tnorm_name)(**tnorm_kwargs)
-        logic_kwargs['complement'] = getattr(logic, comp_name)(**comp_kwargs)
-        logic_kwargs['comparison'] = getattr(logic, compare_name)(**compare_kwargs)
-        logic_kwargs['sampling'] = getattr(logic, sampling_name)(**sampling_kwargs)
-        logic_kwargs['rounding'] = getattr(logic, rounding_name)(**rounding_kwargs)
-        logic_kwargs['control'] = getattr(logic, control_name)(**control_kwargs)
-    
+    # read the compiler settings
+    compiler_name = compiler_kwargs.pop('method', 'DefaultJaxRDDLCompilerWithGrad')
+    planner_args['compiler'] = getattr(logic, compiler_name)
+    planner_args['compiler_kwargs'] = compiler_kwargs
+
     # read the policy settings
     plan_method = planner_args.pop('method')
     plan_kwargs = planner_args.pop('method_kwargs', {})  
@@ -183,7 +166,6 @@ def _load_config(config, args):
             plan_kwargs['activation'] = activation
     
     # read the planner settings
-    planner_args['logic'] = getattr(logic, logic_name)(**logic_kwargs)
     planner_args['plan'] = getattr(sys.modules[__name__], plan_method)(**plan_kwargs)
     
     # planner optimizer
@@ -220,11 +202,11 @@ def _load_config(config, args):
         train_args['key'] = random.PRNGKey(planner_key)
     
     # dashboard
-    dashboard_key = train_args.get('dashboard', None)
+    dashboard_key = planner_args.get('dashboard', None)
     if dashboard_key is not None and dashboard_key and JaxPlannerDashboard is not None:
-        train_args['dashboard'] = JaxPlannerDashboard()
+        planner_args['dashboard'] = JaxPlannerDashboard()
     elif dashboard_key is not None:
-        del train_args['dashboard']        
+        del planner_args['dashboard']        
     
     # optimize call stopping rule
     stopping_rule = train_args.get('stopping_rule', None)
@@ -253,102 +235,6 @@ def load_config_from_string(value: str) -> Tuple[Kwargs, ...]:
     config, args = _parse_config_string(value)
     return _load_config(config, args)
     
-    
-# ***********************************************************************
-# MODEL RELAXATIONS
-# 
-# - replace discrete ops in state dynamics/reward with differentiable ones
-#
-# ***********************************************************************
-
-
-class JaxRDDLCompilerWithGrad(JaxRDDLCompiler):
-    '''Compiles a RDDL AST representation to an equivalent JAX representation. 
-    Unlike its parent class, this class treats all fluents as real-valued, and
-    replaces all mathematical operations by equivalent ones with a well defined 
-    (e.g. non-zero) gradient where appropriate. 
-    '''
-    
-    def __init__(self, *args,
-                 logic: Logic=FuzzyLogic(),
-                 cpfs_without_grad: Optional[Set[str]]=None,
-                 print_warnings: bool=True,
-                 **kwargs) -> None:
-        '''Creates a new RDDL to Jax compiler, where operations that are not
-        differentiable are converted to approximate forms that have defined gradients.
-        
-        :param *args: arguments to pass to base compiler
-        :param logic: Fuzzy logic object that specifies how exact operations
-        are converted to their approximate forms: this class may be subclassed
-        to customize these operations
-        :param cpfs_without_grad: which CPFs do not have gradients (use straight
-        through gradient trick)
-        :param print_warnings: whether to print warnings
-        :param *kwargs: keyword arguments to pass to base compiler
-        '''
-        super(JaxRDDLCompilerWithGrad, self).__init__(*args, **kwargs)
-        
-        self.logic = logic
-        self.logic.set_use64bit(self.use64bit)
-        if cpfs_without_grad is None:
-            cpfs_without_grad = set()
-        self.cpfs_without_grad = cpfs_without_grad
-        self.print_warnings = print_warnings
-        
-        # actions and CPFs must be continuous
-        pvars_cast = set()
-        for (var, values) in self.init_values.items():
-            self.init_values[var] = np.asarray(values, dtype=self.REAL) 
-            if not np.issubdtype(np.result_type(values), np.floating):
-                pvars_cast.add(var)
-        if self.print_warnings and pvars_cast:
-            message = termcolor.colored(
-                f'[INFO] JAX gradient compiler will cast p-vars {pvars_cast} to float.', 
-                'green')
-            print(message)
-        
-        # overwrite basic operations with fuzzy ones
-        self.OPS = logic.get_operator_dicts()
-        
-    def _jax_stop_grad(self, jax_expr):        
-        def _jax_wrapped_stop_grad(x, params, key):
-            sample, key, error, params = jax_expr(x, params, key)
-            sample = jax.lax.stop_gradient(sample)
-            return sample, key, error, params
-        return _jax_wrapped_stop_grad
-        
-    def _compile_cpfs(self, init_params):
-
-        # cpfs will all be cast to float
-        cpfs_cast = set()   
-        jax_cpfs = {}
-        for (_, cpfs) in self.levels.items():
-            for cpf in cpfs:
-                _, expr = self.rddl.cpfs[cpf]
-                jax_cpfs[cpf] = self._jax(expr, init_params, dtype=self.REAL)
-                if self.rddl.variable_ranges[cpf] != 'real':
-                    cpfs_cast.add(cpf)
-                if cpf in self.cpfs_without_grad:
-                    jax_cpfs[cpf] = self._jax_stop_grad(jax_cpfs[cpf])
-                    
-        if self.print_warnings and cpfs_cast:
-            message = termcolor.colored(
-                f'[INFO] JAX gradient compiler will cast CPFs {cpfs_cast} to float.', 
-                'green') 
-            print(message)
-        if self.print_warnings and self.cpfs_without_grad:
-            message = termcolor.colored(
-                f'[INFO] Gradients will not flow through CPFs {self.cpfs_without_grad}.', 
-                'green')    
-            print(message)
- 
-        return jax_cpfs
-    
-    def _jax_kron(self, expr, init_params):       
-        arg, = expr.args
-        arg = self._jax(arg, init_params)
-        return arg
-
 
 # ***********************************************************************
 # ALL VERSIONS OF STATE PREPROCESSING FOR DRP
@@ -369,15 +255,15 @@ class Preprocessor(metaclass=ABCMeta):
         self._transform = None
 
     @property
-    def initialize(self):
+    def initialize(self) -> Callable:
         return self._initializer
 
     @property
-    def update(self):
+    def update(self) -> Callable:
         return self._update
     
     @property
-    def transform(self):
+    def transform(self) -> Callable:
         return self._transform
     
     @abstractmethod
@@ -421,26 +307,25 @@ class StaticNormalizer(Preprocessor):
         self._initializer = jax.jit(_jax_wrapped_normalizer_init)
 
         # static bounds
-        def _jax_wrapped_normalizer_update(subs, stats):
-            stats = {var: (jnp.asarray(lower, dtype=compiled.REAL), 
-                           jnp.asarray(upper, dtype=compiled.REAL)) 
-                     for (var, (lower, upper)) in bounded_vars.items()}     
-            return stats   
+        def _jax_wrapped_normalizer_update(fls, stats):
+            return {var: (jnp.asarray(lower, dtype=compiled.REAL), 
+                          jnp.asarray(upper, dtype=compiled.REAL)) 
+                    for (var, (lower, upper)) in bounded_vars.items()}
         self._update = jax.jit(_jax_wrapped_normalizer_update)
 
         # apply min max scaling
-        def _jax_wrapped_normalizer_transform(subs, stats):
-            new_subs = {}
-            for (var, values) in subs.items():
+        def _jax_wrapped_normalizer_transform(fls, stats):
+            new_fls = {}
+            for (var, values) in fls.items():
                 if var in stats:
                     lower, upper = stats[var]
                     new_dims = jnp.ndim(values) - jnp.ndim(lower)
                     lower = lower[(jnp.newaxis,) * new_dims + (...,)]
                     upper = upper[(jnp.newaxis,) * new_dims + (...,)]
-                    new_subs[var] = (values - lower) / (upper - lower)
+                    new_fls[var] = (values - lower) / (upper - lower)
                 else:
-                    new_subs[var] = values
-            return new_subs
+                    new_fls[var] = values
+            return new_fls
         self._transform = jax.jit(_jax_wrapped_normalizer_transform)
 
 
@@ -478,40 +363,38 @@ class JaxPlan(metaclass=ABCMeta):
         pass
     
     @property
-    def initializer(self):
+    def initializer(self) -> Callable:
         return self._initializer
 
     @initializer.setter
-    def initializer(self, value):
+    def initializer(self, value: Callable) -> None:
         self._initializer = value
     
     @property
-    def train_policy(self):
+    def train_policy(self) -> Callable:
         return self._train_policy
 
     @train_policy.setter
-    def train_policy(self, value):
+    def train_policy(self, value: Callable) -> None:
         self._train_policy = value
         
     @property
-    def test_policy(self):
+    def test_policy(self) -> Callable:
         return self._test_policy
 
     @test_policy.setter
-    def test_policy(self, value):
+    def test_policy(self, value: Callable) -> None:
         self._test_policy = value
          
     @property
-    def projection(self):
+    def projection(self) -> Callable:
         return self._projection
 
     @projection.setter
-    def projection(self, value):
+    def projection(self, value: Callable) -> None:
         self._projection = value
     
-    def _calculate_action_info(self, compiled: JaxRDDLCompilerWithGrad,
-                               user_bounds: Bounds,
-                               horizon: int):
+    def _calculate_action_info(self, compiled, user_bounds, horizon):
         shapes, bounds, bounds_safe, cond_lists = {}, {}, {}, {}
         for (name, prange) in compiled.rddl.variable_ranges.items():
             if compiled.rddl.variable_types[name] != 'action-fluent':
@@ -522,7 +405,8 @@ class JaxPlan(metaclass=ABCMeta):
                 keys = list(compiled.JAX_TYPES.keys()) + list(compiled.rddl.enum_types)
                 raise RDDLTypeError(
                     f'Invalid range <{prange}> of action-fluent <{name}>, '
-                    f'must be one of {keys}.')
+                    f'must be one of {keys}.'
+                )
                 
             # clip boolean to (0, 1), otherwise use the RDDL action bounds
             # or the user defined action bounds if provided
@@ -557,21 +441,171 @@ class JaxPlan(metaclass=ABCMeta):
             bounds[name] = (lower, upper)
 
             if compiled.print_warnings:
-                message = termcolor.colored(
+                print(termcolor.colored(
                     f'[INFO] Bounds of action-fluent <{name}> set to {bounds[name]}.', 
-                    'green')
-                print(message)
-
+                    'dark_grey'
+                ))
         return shapes, bounds, bounds_safe, cond_lists
     
-    def _count_bool_actions(self, rddl: RDDLLiftedModel):
+    def _count_bool_actions(self, rddl):
         constraint = rddl.max_allowed_actions
         num_bool_actions = sum(np.size(values)
                                for (var, values) in rddl.action_fluents.items()
                                if rddl.variable_ranges[var] == 'bool')
         return num_bool_actions, constraint
 
+
+class JaxActionProjection(metaclass=ABCMeta):
+    '''Base of all straight-line plan action projections.'''
+
+    @abstractmethod
+    def compile(self, *args, **kwargs) -> Callable:
+        pass
     
+
+class JaxSortingActionProjection(JaxActionProjection):
+    '''Action projection using sorting method.'''
+
+    def compile(self, ranges: Dict[str, str], noop: Dict[str, Any], 
+                wrap_sigmoid: bool, allowed_actions: int, bool_threshold: float, 
+                jax_bool_to_box: Callable, *args, **kwargs) -> Callable:
+
+        # shift the boolean actions uniformly, clipping at the min/max values
+        # the amount to move is such that only top allowed_actions actions
+        # are still active (e.g. not equal to noop) after the shift
+        def _jax_wrapped_sorting_project(params, hyperparams):
+            
+            # find the amount to shift action parameters: if noop=True reflect parameter
+            scores = []
+            for (var, param) in params.items():
+                if ranges[var] == 'bool':
+                    param_flat = jnp.ravel(param, order='C')
+                    if noop[var]:
+                        if wrap_sigmoid:
+                            param_flat = -param_flat
+                        else:
+                            param_flat = 1.0 - param_flat
+                    scores.append(param_flat)
+            scores = jnp.concatenate(scores)
+            descending = jnp.sort(scores)[::-1]
+            kplus1st_greatest = descending[allowed_actions]
+            surplus = jnp.maximum(kplus1st_greatest - bool_threshold, 0.0)
+                
+            # perform the shift
+            new_params = {}
+            for (var, param) in params.items():
+                if ranges[var] == 'bool':
+                    if noop[var]:
+                        new_param = param + surplus
+                    else:
+                        new_param = param - surplus
+                    new_params[var] = jax_bool_to_box(var, new_param, hyperparams)
+                else:
+                    new_params[var] = param
+            converged = jnp.array(True, dtype=jnp.bool_)
+            return new_params, converged
+        return _jax_wrapped_sorting_project
+
+
+class JaxSogbofaActionProjection(JaxActionProjection):
+    '''Action projection using the SOGBOFA method.'''
+
+    def compile(self, ranges: Dict[str, str], noop: Dict[str, Any], 
+                allowed_actions: int, max_constraint_iter: int, 
+                jax_param_to_action: Callable, jax_action_to_param: Callable, 
+                min_action: float, max_action: float, real_dtype: type, *args, **kwargs) -> Callable:
+        
+        # calculate the surplus of actions above max-nondef-actions
+        def _jax_wrapped_sogbofa_surplus(actions):
+            sum_action = jnp.array(0.0, dtype=real_dtype)
+            k = jnp.array(0, dtype=jnp.int32)
+            for (var, action) in actions.items():
+                if ranges[var] == 'bool':
+                    if noop[var]:
+                        action = 1 - action                       
+                    sum_action = sum_action + jnp.sum(action)
+                    k = k + jnp.count_nonzero(action)
+            surplus = jnp.maximum(sum_action - allowed_actions, 0.0)
+            return surplus, k
+            
+        # return whether the surplus is positive or reached compute limit    
+        def _jax_wrapped_sogbofa_continue(values):
+            it, _, surplus, k = values
+            return jnp.logical_and(
+                it < max_constraint_iter, jnp.logical_and(surplus > 0, k > 0))
+            
+        # reduce all bool action values by the surplus clipping at minimum
+        # for no-op = True, do the opposite, i.e. increase all
+        # bool action values by surplus clipping at maximum
+        def _jax_wrapped_sogbofa_subtract_surplus(values):
+            it, actions, surplus, k = values
+            amount = surplus / k
+            new_actions = {}
+            for (var, action) in actions.items():
+                if ranges[var] == 'bool':
+                    if noop[var]:
+                        new_actions[var] = jnp.minimum(action + amount, 1)
+                    else:
+                        new_actions[var] = jnp.maximum(action - amount, 0)
+                else:
+                    new_actions[var] = action
+            new_surplus, new_k = _jax_wrapped_sogbofa_surplus(new_actions)
+            new_it = it + 1
+            return new_it, new_actions, new_surplus, new_k
+            
+        # apply the surplus to the actions until it becomes zero
+        def _jax_wrapped_sogbofa_project(params, hyperparams):
+
+            # convert parameters to actions
+            actions = {}
+            for (var, param) in params.items():
+                if ranges[var] == 'bool':
+                    actions[var] = jax_param_to_action(var, param, hyperparams)
+                else:
+                    actions[var] = param
+            
+            # run SOGBOFA loop on the actions to get adjusted actions
+            surplus, k = _jax_wrapped_sogbofa_surplus(actions)
+            _, actions, surplus, k = jax.lax.while_loop(
+                cond_fun=_jax_wrapped_sogbofa_continue,
+                body_fun=_jax_wrapped_sogbofa_subtract_surplus,
+                init_val=(0, actions, surplus, k)
+            )
+            converged = jnp.logical_not(surplus > 0)
+
+            # check for any remaining constraint violation
+            total_bool = jnp.array(0, dtype=jnp.int32)
+            for (var, action) in actions.items():
+                if ranges[var] == 'bool':
+                    if noop[var]:
+                        total_bool = total_bool + jnp.count_nonzero(action < 0.5)
+                    else:
+                        total_bool = total_bool + jnp.count_nonzero(action > 0.5)
+            excess = jnp.maximum(total_bool - allowed_actions, 0)
+            
+            # convert the adjusted actions back to parameters
+            # reduce the excess number of parameters that are non-noop above constraint
+            new_params = {}            
+            for (var, action) in actions.items():
+                if ranges[var] == 'bool':
+                    action = jnp.clip(action, min_action, max_action)
+                    flat_action = jnp.ravel(action, order='C')
+                    if noop[var]:
+                        ranks = jnp.cumsum(flat_action < 0.5)
+                        replace_mask = (flat_action < 0.5) & (ranks <= excess)
+                    else:
+                        ranks = jnp.cumsum(flat_action > 0.5)
+                        replace_mask = (flat_action > 0.5) & (ranks <= excess)
+                    flat_action = jnp.where(replace_mask, 0.5, flat_action)
+                    action = jnp.reshape(flat_action, jnp.shape(action))
+                    new_params[var] = jax_action_to_param(var, action, hyperparams)
+                    excess = jnp.maximum(excess - jnp.count_nonzero(replace_mask), 0)
+                else:
+                    new_params[var] = action              
+            return new_params, converged
+        return _jax_wrapped_sogbofa_project
+
+
 class JaxStraightLinePlan(JaxPlan):
     '''A straight line plan implementation in JAX'''
     
@@ -616,7 +650,7 @@ class JaxStraightLinePlan(JaxPlan):
     def __str__(self) -> str:
         bounds = '\n        '.join(
             map(lambda kv: f'{kv[0]}: {kv[1]}', self.bounds.items()))
-        return (f'policy hyper-parameters:\n'
+        return (f'[INFO] policy hyper-parameters:\n'
                 f'    initializer={self._initializer_base}\n'
                 f'    constraint-sat strategy (simple):\n'
                 f'        parsed_action_bounds =\n        {bounds}\n'
@@ -639,17 +673,6 @@ class JaxStraightLinePlan(JaxPlan):
             compiled, _bounds, horizon)
         self.bounds = bounds
         
-        # enable constraint satisfaction subroutines during optimization 
-        # if there are nontrivial concurrency constraints in the problem description 
-        bool_action_count, allowed_actions = self._count_bool_actions(rddl)
-        use_constraint_satisfaction = allowed_actions < bool_action_count        
-        if compiled.print_warnings and use_constraint_satisfaction: 
-            message = termcolor.colored(
-                f'[INFO] SLP will use projected gradient to satisfy '
-                f'max_nondef_actions since total boolean actions '
-                f'{bool_action_count} > max_nondef_actions {allowed_actions}.', 'green')
-            print(message)
-        
         # get the noop action values
         noop = {var: (values[0] if isinstance(values, list) else values)
                 for (var, values) in rddl.action_fluents.items()}
@@ -671,7 +694,7 @@ class JaxStraightLinePlan(JaxPlan):
         def _jax_bool_param_to_action(var, param, hyperparams):
             if wrap_sigmoid:
                 weight = hyperparams[var]
-                return jax.nn.sigmoid(weight * param)
+                return stable_sigmoid(weight * param)
             else:
                 return param 
         
@@ -693,44 +716,18 @@ class JaxStraightLinePlan(JaxPlan):
                 mb, ml, mu, mn = [jnp.asarray(mask, dtype=compiled.REAL) 
                                   for mask in cond_lists[var]]       
                 action = (
-                    mb * (lower + (upper - lower) * jax.nn.sigmoid(param)) + 
-                    ml * (lower + (jax.nn.elu(param) + 1.0)) + 
-                    mu * (upper - (jax.nn.elu(-param) + 1.0)) + 
+                    mb * (lower + (upper - lower) * stable_sigmoid(param)) + 
+                    ml * (lower + jax.nn.softplus(param)) + 
+                    mu * (upper - jax.nn.softplus(-param)) + 
                     mn * param
                 )
             else:
                 action = param
             return action
-        
-        # if the user wants min/max values for clipping boolean action parameters
-        # this might be a good idea to avoid saturation of action-fluents since the
-        # gradient could vanish as a result  
-        min_action = self._min_action_prob
-        max_action = 1.0 - min_action
-        
-        def _jax_project_bool_to_box(var, param, hyperparams):
-            lower = _jax_bool_action_to_param(var, min_action, hyperparams)
-            upper = _jax_bool_action_to_param(var, max_action, hyperparams)
-            valid_param = jnp.clip(param, lower, upper)
-            return valid_param
-        
-        ranges = rddl.variable_ranges
-        
-        def _jax_wrapped_slp_project_to_box(params, hyperparams):
-            new_params = {}
-            for (var, param) in params.items():
-                if var == bool_key:
-                    new_params[var] = param
-                elif ranges[var] == 'bool':
-                    new_params[var] = _jax_project_bool_to_box(var, param, hyperparams)
-                elif wrap_non_bool:
-                    new_params[var] = param
-                else:
-                    new_params[var] = jnp.clip(param, *bounds[var])
-            return new_params, True
-        
+                
         # a different option to handle boolean action concurrency constraints with |A| = 1
         # is to use a softmax activation layer over pooled action parameters
+        ranges = rddl.variable_ranges
         action_sizes = {var: np.prod(shape[1:], dtype=np.int64) 
                         for (var, shape) in shapes.items()
                         if ranges[var] == 'bool'}
@@ -746,12 +743,12 @@ class JaxStraightLinePlan(JaxPlan):
                 if noop[name]:
                     action = 1.0 - action
                 actions[name] = action
-                start += size
+                start = start + size
             return actions
                 
         # the main subroutine to compute the trainable rddl actions from the trainable
         # parameters (TODO: implement one-hot for integer actions)        
-        def _jax_wrapped_slp_predict_train(key, params, hyperparams, step, subs):
+        def _jax_wrapped_slp_predict_train(key, params, hyperparams, step, fls):
             actions = {}
             for (var, param) in params.items():
                 action = jnp.asarray(param[step, ...], dtype=compiled.REAL)
@@ -764,11 +761,12 @@ class JaxStraightLinePlan(JaxPlan):
                 else:
                     actions[var] = _jax_non_bool_param_to_action(var, action, hyperparams)
             return actions
+        self.train_policy = _jax_wrapped_slp_predict_train
         
         # the main subroutine to compute the test rddl actions from the trainable 
         # parameters: the difference here is that actions are converted to their required
         # types (i.e. bool, int, float)
-        def _jax_wrapped_slp_predict_test(key, params, hyperparams, step, subs):
+        def _jax_wrapped_slp_predict_test(key, params, hyperparams, step, fls):
             actions = {}
             for (var, param) in params.items():
                 action = jnp.asarray(param[step, ...], dtype=compiled.REAL)
@@ -786,8 +784,6 @@ class JaxStraightLinePlan(JaxPlan):
                         action = jnp.asarray(jnp.round(action), dtype=compiled.INT)
                     actions[var] = action
             return actions
-        
-        self.train_policy = _jax_wrapped_slp_predict_train
         self.test_policy = _jax_wrapped_slp_predict_test
         
         # ***********************************************************************
@@ -795,148 +791,76 @@ class JaxStraightLinePlan(JaxPlan):
         #
         # ***********************************************************************
         
-        # use a softmax output activation
+        # if the user wants min/max values for clipping boolean action parameters
+        # this might be a good idea to avoid saturation of action-fluents since the
+        # gradient could vanish as a result  
+        min_action = self._min_action_prob
+        max_action = 1.0 - min_action
+        
+        def _jax_project_bool_to_box(var, param, hyperparams):
+            lower = _jax_bool_action_to_param(var, min_action, hyperparams)
+            upper = _jax_bool_action_to_param(var, max_action, hyperparams)
+            return jnp.clip(param, lower, upper)
+        
+        def _jax_wrapped_slp_project_to_box(params, hyperparams):
+            new_params = {}
+            for (var, param) in params.items():
+                if var == bool_key:
+                    new_params[var] = param
+                elif ranges[var] == 'bool':
+                    new_params[var] = _jax_project_bool_to_box(var, param, hyperparams)
+                elif wrap_non_bool:
+                    new_params[var] = param
+                else:
+                    new_params[var] = jnp.clip(param, *bounds[var])
+            converged = jnp.array(True, dtype=jnp.bool_)
+            return new_params, converged
+        
+        # enable constraint satisfaction subroutines during optimization 
+        # if there are nontrivial concurrency constraints in the problem description 
+        bool_action_count, allowed_actions = self._count_bool_actions(rddl)
+        use_constraint_satisfaction = allowed_actions < bool_action_count        
+        if compiled.print_warnings and use_constraint_satisfaction: 
+            print(termcolor.colored(
+                f'[INFO] Number of boolean actions {bool_action_count} '
+                f'> max_nondef_actions {allowed_actions}: enabling projected gradient to '
+                f'satisfy constraints on action-fluents.', 'dark_grey'
+            ))
+        
+        # use a softmax output activation: only allow one action non-noop for now
         if use_constraint_satisfaction and self._wrap_softmax:
-            
-            # only allow one action non-noop for now
             if 1 < allowed_actions < bool_action_count:
                 raise RDDLNotImplementedError(
                     f'SLPs with wrap_softmax currently '
-                    f'do not support max-nondef-actions {allowed_actions} > 1.')
-                
-            # potentially apply projection but to non-bool actions only
+                    f'do not support max-nondef-actions {allowed_actions} > 1.'
+                )
             self.projection = _jax_wrapped_slp_project_to_box
             
-        # use new gradient projection method...
+        # use new gradient projection method
         elif use_constraint_satisfaction and self._use_new_projection:
-            
-            # shift the boolean actions uniformly, clipping at the min/max values
-            # the amount to move is such that only top allowed_actions actions
-            # are still active (e.g. not equal to noop) after the shift
-            def _jax_wrapped_sorting_project(params, hyperparams):
-                
-                # find the amount to shift action parameters
-                # if noop is True pretend it is False and reflect the parameter
-                scores = []
-                for (var, param) in params.items():
-                    if ranges[var] == 'bool':
-                        param_flat = jnp.ravel(param, order='C')
-                        if noop[var]:
-                            if wrap_sigmoid:
-                                param_flat = -param_flat
-                            else:
-                                param_flat = 1.0 - param_flat
-                        scores.append(param_flat)
-                scores = jnp.concatenate(scores)
-                descending = jnp.sort(scores)[::-1]
-                kplus1st_greatest = descending[allowed_actions]
-                surplus = jnp.maximum(kplus1st_greatest - bool_threshold, 0.0)
-                    
-                # perform the shift
-                new_params = {}
-                for (var, param) in params.items():
-                    if ranges[var] == 'bool':
-                        if noop[var]:
-                            new_param = param + surplus
-                        else:
-                            new_param = param - surplus
-                        new_param = _jax_project_bool_to_box(var, new_param, hyperparams)
-                    else:
-                        new_param = param
-                    new_params[var] = new_param
-                return new_params, True
-                
+            jax_project_fn = JaxSortingActionProjection().compile(
+                ranges, noop, wrap_sigmoid, allowed_actions, bool_threshold, 
+                _jax_project_bool_to_box
+            )
+
             # clip actions to valid bounds and satisfy constraint on max actions
             def _jax_wrapped_slp_project_to_max_constraint(params, hyperparams):
                 params, _ = _jax_wrapped_slp_project_to_box(params, hyperparams)
-                project_over_horizon = jax.vmap(
-                    _jax_wrapped_sorting_project, in_axes=(0, None)
-                )(params, hyperparams)
-                return project_over_horizon
-            
+                return jax.vmap(jax_project_fn, in_axes=(0, None))(params, hyperparams)
             self.projection = _jax_wrapped_slp_project_to_max_constraint
         
-        # use SOGBOFA projection method...
+        # use SOGBOFA projection method
         elif use_constraint_satisfaction and not self._use_new_projection:
+            jax_project_fn = JaxSogbofaActionProjection().compile(
+                ranges, noop, allowed_actions, self._max_constraint_iter, 
+                _jax_bool_param_to_action, _jax_bool_action_to_param, 
+                min_action, max_action, compiled.REAL
+            )
             
-            # calculate the surplus of actions above max-nondef-actions
-            def _jax_wrapped_sogbofa_surplus(actions):
-                sum_action, k = 0.0, 0
-                for (var, action) in actions.items():
-                    if ranges[var] == 'bool':
-                        if noop[var]:
-                            action = 1 - action                       
-                        sum_action += jnp.sum(action)
-                        k += jnp.count_nonzero(action)
-                surplus = jnp.maximum(sum_action - allowed_actions, 0.0)
-                return surplus, k
-                
-            # return whether the surplus is positive or reached compute limit
-            max_constraint_iter = self._max_constraint_iter
-        
-            def _jax_wrapped_sogbofa_continue(values):
-                it, _, surplus, k = values
-                return jnp.logical_and(
-                    it < max_constraint_iter, jnp.logical_and(surplus > 0, k > 0))
-                
-            # reduce all bool action values by the surplus clipping at minimum
-            # for no-op = True, do the opposite, i.e. increase all
-            # bool action values by surplus clipping at maximum
-            def _jax_wrapped_sogbofa_subtract_surplus(values):
-                it, actions, surplus, k = values
-                amount = surplus / k
-                new_actions = {}
-                for (var, action) in actions.items():
-                    if ranges[var] == 'bool':
-                        if noop[var]:
-                            new_actions[var] = jnp.minimum(action + amount, 1)
-                        else:
-                            new_actions[var] = jnp.maximum(action - amount, 0)
-                    else:
-                        new_actions[var] = action
-                new_surplus, new_k = _jax_wrapped_sogbofa_surplus(new_actions)
-                new_it = it + 1
-                return new_it, new_actions, new_surplus, new_k
-                
-            # apply the surplus to the actions until it becomes zero
-            def _jax_wrapped_sogbofa_project(params, hyperparams):
-
-                # convert parameters to actions
-                actions = {}
-                for (var, param) in params.items():
-                    if ranges[var] == 'bool':
-                        actions[var] = _jax_bool_param_to_action(var, param, hyperparams)
-                    else:
-                        actions[var] = param
-                
-                # run SOGBOFA loop on the actions to get adjusted actions
-                surplus, k = _jax_wrapped_sogbofa_surplus(actions)
-                _, actions, surplus, k = jax.lax.while_loop(
-                    cond_fun=_jax_wrapped_sogbofa_continue,
-                    body_fun=_jax_wrapped_sogbofa_subtract_surplus,
-                    init_val=(0, actions, surplus, k)
-                )
-                converged = jnp.logical_not(surplus > 0)
-
-                # convert the adjusted actions back to parameters
-                new_params = {}
-                for (var, action) in actions.items():
-                    if ranges[var] == 'bool':
-                        action = jnp.clip(action, min_action, max_action)
-                        param = _jax_bool_action_to_param(var, action, hyperparams)
-                        new_params[var] = param
-                    else:
-                        new_params[var] = action                        
-                return new_params, converged
-                
             # clip actions to valid bounds and satisfy constraint on max actions
             def _jax_wrapped_slp_project_to_max_constraint(params, hyperparams):
                 params, _ = _jax_wrapped_slp_project_to_box(params, hyperparams)
-                project_over_horizon = jax.vmap(
-                    _jax_wrapped_sogbofa_project, in_axes=(0, None)
-                )(params, hyperparams)
-                return project_over_horizon
-            
+                return jax.vmap(jax_project_fn, in_axes=(0, None))(params, hyperparams)
             self.projection = _jax_wrapped_slp_project_to_max_constraint
         
         # just project to box constraints
@@ -952,23 +876,21 @@ class JaxStraightLinePlan(JaxPlan):
         stack_bool_params = use_constraint_satisfaction and self._wrap_softmax
         
         # use the user required initializer and project actions to feasible range
-        def _jax_wrapped_slp_init(key, hyperparams, subs):
+        def _jax_wrapped_slp_init(key, hyperparams, fls):
             params = {}
             for (var, shape) in shapes.items():
                 if ranges[var] != 'bool' or not stack_bool_params: 
                     key, subkey = random.split(key)
                     param = init(key=subkey, shape=shape, dtype=compiled.REAL)
                     if ranges[var] == 'bool':
-                        param += bool_threshold
+                        param = param + bool_threshold
                     params[var] = param
             if stack_bool_params:
                 key, subkey = random.split(key)
                 bool_shape = (horizon, bool_action_count)
-                bool_param = init(key=subkey, shape=bool_shape, dtype=compiled.REAL)
-                params[bool_key] = bool_param
+                params[bool_key] = init(key=subkey, shape=bool_shape, dtype=compiled.REAL)
             params, _ = _jax_wrapped_slp_project_to_box(params, hyperparams)
             return params
-        
         self.initializer = _jax_wrapped_slp_init
     
     @staticmethod
@@ -978,8 +900,7 @@ class JaxStraightLinePlan(JaxPlan):
 
     def guess_next_epoch(self, params: Pytree) -> Pytree:
         # "progress" the plan one step forward and set last action to second-last
-        next_fn = JaxStraightLinePlan._guess_next_epoch
-        return jax.tree_util.tree_map(next_fn, params)
+        return jax.tree_util.tree_map(JaxStraightLinePlan._guess_next_epoch, params)
 
 
 class JaxDeepReactivePolicy(JaxPlan):
@@ -1024,7 +945,7 @@ class JaxDeepReactivePolicy(JaxPlan):
     def __str__(self) -> str:
         bounds = '\n        '.join(
             map(lambda kv: f'{kv[0]}: {kv[1]}', self.bounds.items()))
-        return (f'policy hyper-parameters:\n'
+        return (f'[INFO] policy hyper-parameters:\n'
                 f'    topology     ={self._topology}\n'
                 f'    activation_fn={self._activations[0].__name__}\n'
                 f'    initializer  ={type(self._initializer_base).__name__}\n'
@@ -1055,7 +976,8 @@ class JaxDeepReactivePolicy(JaxPlan):
         bool_action_count, allowed_actions = self._count_bool_actions(rddl)
         if 1 < allowed_actions < bool_action_count:
             raise RDDLNotImplementedError(
-                f'DRPs currently do not support max-nondef-actions {allowed_actions} > 1.')
+                f'DRPs currently do not support max-nondef-actions {allowed_actions} > 1.'
+            )
         use_constraint_satisfaction = allowed_actions < bool_action_count
         
         # get the noop action values
@@ -1095,33 +1017,33 @@ class JaxDeepReactivePolicy(JaxPlan):
                     value_size = np.size(values)
                     if normalize_per_layer and value_size == 1:
                         if compiled.print_warnings:
-                            message = termcolor.colored(
+                            print(termcolor.colored(
                                 f'[WARN] Cannot apply layer norm to state-fluent <{var}> '
-                                f'of size 1: setting normalize_per_layer = False.', 'yellow')
-                            print(message)
+                                f'of size 1: setting normalize_per_layer = False.', 'yellow'
+                            ))
                         normalize_per_layer = False
                     non_bool_dims += value_size
             if not normalize_per_layer and non_bool_dims == 1:
                 if compiled.print_warnings:
-                    message = termcolor.colored(
+                    print(termcolor.colored(
                         '[WARN] Cannot apply layer norm to state-fluents of total size 1: '
-                        'setting normalize = False.', 'yellow')
-                    print(message)
+                        'setting normalize = False.', 'yellow'
+                    ))
                 normalize = False
         
-        # convert subs dictionary into a state vector to feed to the MLP
-        def _jax_wrapped_policy_input(subs, hyperparams):
+        # convert fluents dictionary into a state vector to feed to the MLP
+        def _jax_wrapped_policy_input(fls, hyperparams):
 
             # optional state preprocessing
             if preprocessor is not None:
                 stats = hyperparams[preprocessor.HYPERPARAMS_KEY]
-                subs = preprocessor.transform(subs, stats)
+                fls = preprocessor.transform(fls, stats)
             
             # concatenate all state variables into a single vector
             # optionally apply layer norm to each input tensor
             states_bool, states_non_bool = [], []
             non_bool_dims = 0
-            for (var, value) in subs.items():
+            for (var, value) in fls.items():
                 if var in observed_vars:
                     state = jnp.ravel(value, order='C')
                     if ranges[var] == 'bool':
@@ -1136,7 +1058,7 @@ class JaxDeepReactivePolicy(JaxPlan):
                             )
                             state = normalizer(state)
                         states_non_bool.append(state)
-                        non_bool_dims += state.size
+                        non_bool_dims = non_bool_dims + state.size
             state = jnp.concatenate(states_non_bool + states_bool)
             
             # optionally perform layer normalization on the non-bool inputs
@@ -1152,8 +1074,8 @@ class JaxDeepReactivePolicy(JaxPlan):
             return state
             
         # predict actions from the policy network for current state
-        def _jax_wrapped_policy_network_predict(subs, hyperparams):
-            state = _jax_wrapped_policy_input(subs, hyperparams)
+        def _jax_wrapped_policy_network_predict(fls, hyperparams):
+            state = _jax_wrapped_policy_input(fls, hyperparams)
             
             # feed state vector through hidden layers
             hidden = state
@@ -1175,29 +1097,26 @@ class JaxDeepReactivePolicy(JaxPlan):
                 # project action output to valid box constraints following Bueno et. al.
                 if ranges[var] == 'bool':
                     if not use_constraint_satisfaction:
-                        actions[var] = jax.nn.sigmoid(output)
+                        actions[var] = stable_sigmoid(output)
                 else:
                     if wrap_non_bool:
                         lower, upper = bounds_safe[var]
                         mb, ml, mu, mn = [jnp.asarray(mask, dtype=compiled.REAL) 
                                           for mask in cond_lists[var]]       
-                        action = (
-                            mb * (lower + (upper - lower) * jax.nn.sigmoid(output)) + 
-                            ml * (lower + (jax.nn.elu(output) + 1.0)) + 
-                            mu * (upper - (jax.nn.elu(-output) + 1.0)) + 
+                        actions[var] = (
+                            mb * (lower + (upper - lower) * stable_sigmoid(output)) + 
+                            ml * (lower + jax.nn.softplus(output)) + 
+                            mu * (upper - jax.nn.softplus(-output)) + 
                             mn * output
                         )
                     else:
-                        action = output
-                    actions[var] = action
+                        actions[var] = output
             
             # for constraint satisfaction wrap bool actions with softmax:
             # this only works when |A| = 1
             if use_constraint_satisfaction:
                 linear = hk.Linear(bool_action_count, name='output_bool', w_init=init)
-                output = jax.nn.softmax(linear(hidden))
-                actions[bool_key] = output
-             
+                actions[bool_key] = jax.nn.softmax(linear(hidden))
             return actions
         
         # we need pure JAX functions for the policy network prediction
@@ -1216,13 +1135,13 @@ class JaxDeepReactivePolicy(JaxPlan):
                     if noop[name]:
                         action = 1.0 - action
                     actions[name] = action
-                    start += size
+                    start = start + size
             return actions
         
         # the main subroutine to compute the trainable rddl actions from the trainable
         # parameters and the current state/obs dictionary       
-        def _jax_wrapped_drp_predict_train(key, params, hyperparams, step, subs):
-            actions = predict_fn.apply(params, subs, hyperparams)
+        def _jax_wrapped_drp_predict_train(key, params, hyperparams, step, fls):
+            actions = predict_fn.apply(params, fls, hyperparams)
             if not wrap_non_bool:
                 for (var, action) in actions.items():
                     if var != bool_key and ranges[var] != 'bool':
@@ -1232,12 +1151,13 @@ class JaxDeepReactivePolicy(JaxPlan):
                 actions.update(bool_actions)
                 del actions[bool_key]
             return actions
+        self.train_policy = _jax_wrapped_drp_predict_train
         
         # the main subroutine to compute the test rddl actions from the trainable 
         # parameters and state/obs dict: the difference here is that actions are converted 
         # to their required types (i.e. bool, int, float)
-        def _jax_wrapped_drp_predict_test(key, params, hyperparams, step, subs):
-            actions = _jax_wrapped_drp_predict_train(key, params, hyperparams, step, subs)
+        def _jax_wrapped_drp_predict_test(key, params, hyperparams, step, fls):
+            actions = _jax_wrapped_drp_predict_train(key, params, hyperparams, step, fls)
             new_actions = {}
             for (var, action) in actions.items():
                 prange = ranges[var]
@@ -1250,8 +1170,6 @@ class JaxDeepReactivePolicy(JaxPlan):
                     new_action = jnp.clip(action, *bounds[var])
                 new_actions[var] = new_action
             return new_actions
-        
-        self.train_policy = _jax_wrapped_drp_predict_train
         self.test_policy = _jax_wrapped_drp_predict_test
         
         # ***********************************************************************
@@ -1261,8 +1179,8 @@ class JaxDeepReactivePolicy(JaxPlan):
         
         # no projection applied since the actions are already constrained
         def _jax_wrapped_drp_no_projection(params, hyperparams):
-            return params, True
-        
+            converged = jnp.array(True, dtype=jnp.bool_)
+            return params, converged
         self.projection = _jax_wrapped_drp_no_projection
     
         # ***********************************************************************
@@ -1271,13 +1189,11 @@ class JaxDeepReactivePolicy(JaxPlan):
         # ***********************************************************************
         
         # initialize policy parameters according to user-desired weight initializer
-        def _jax_wrapped_drp_init(key, hyperparams, subs):
-            subs = {var: value[0, ...] 
-                    for (var, value) in subs.items()
-                    if var in observed_vars}
-            params = predict_fn.init(key, subs, hyperparams)
-            return params
-        
+        def _jax_wrapped_drp_init(key, hyperparams, fls):
+            obs_vars = {var: value[0, ...] 
+                        for (var, value) in fls.items()
+                        if var in observed_vars}
+            return predict_fn.init(key, obs_vars, hyperparams)
         self.initializer = _jax_wrapped_drp_init
         
     def guess_next_epoch(self, params: Pytree) -> Pytree:
@@ -1380,17 +1296,16 @@ class PGPE(metaclass=ABCMeta):
         self._update = None
 
     @property
-    def initialize(self):
+    def initialize(self) -> Callable:
         return self._initializer
 
     @property
-    def update(self):
+    def update(self) -> Callable:
         return self._update
 
     @abstractmethod
     def compile(self, loss_fn: Callable, projection: Callable, real_dtype: Type,
-                print_warnings: bool,
-                parallel_updates: Optional[int]=None) -> None:
+                print_warnings: bool, parallel_updates: int=1) -> None:
         pass
 
 
@@ -1455,11 +1370,10 @@ class GaussianPGPE(PGPE):
             mu_optimizer = optax.inject_hyperparams(optimizer)(**optimizer_kwargs_mu)
             sigma_optimizer = optax.inject_hyperparams(optimizer)(**optimizer_kwargs_sigma)
         except Exception as _:
-            message = termcolor.colored(
-                '[FAIL] Failed to inject hyperparameters into PGPE optimizer, '
-                'rolling back to safer method: '
-                'kl-divergence constraint will be disabled.', 'red')
-            print(message)
+            print(termcolor.colored(
+                '[WARN] Could not inject hyperparameters into PGPE optimizer: '
+                'kl-divergence constraint will be disabled.', 'yellow'
+            ))
             mu_optimizer = optimizer(**optimizer_kwargs_mu)   
             sigma_optimizer = optimizer(**optimizer_kwargs_sigma) 
             max_kl_update = None
@@ -1467,7 +1381,7 @@ class GaussianPGPE(PGPE):
         self.max_kl = max_kl_update
     
     def __str__(self) -> str:
-        return (f'PGPE hyper-parameters:\n'
+        return (f'[INFO] PGPE hyper-parameters:\n'
                 f'    method             ={self.__class__.__name__}\n'
                 f'    batch_size         ={self.batch_size}\n'
                 f'    init_sigma         ={self.init_sigma}\n'
@@ -1485,9 +1399,11 @@ class GaussianPGPE(PGPE):
                 f'    max_kl_update      ={self.max_kl}\n'
         )
 
-    def compile(self, loss_fn: Callable, projection: Callable, real_dtype: Type,
+    def compile(self, loss_fn: Callable, 
+                projection: Callable, 
+                real_dtype: Type,
                 print_warnings: bool,
-                parallel_updates: Optional[int]=None) -> None:
+                parallel_updates: int=1) -> None:
         sigma0 = self.init_sigma
         sigma_lo, sigma_hi = self.sigma_range
         scale_reward = self.scale_reward
@@ -1523,14 +1439,11 @@ class GaussianPGPE(PGPE):
         
         # for parallel policy update, initialize multiple indepdendent (mean, sigma)
         # gaussians that will be optimized in parallel
-        if parallel_updates is None:
-            self._initializer = jax.jit(_jax_wrapped_pgpe_init)
-        else:
-            def _jax_wrapped_pgpe_inits(key, policy_params):
-                keys = jnp.asarray(random.split(key, num=parallel_updates))
-                return jax.vmap(_jax_wrapped_pgpe_init, in_axes=0)(keys, policy_params)
-            
-            self._initializer = jax.jit(_jax_wrapped_pgpe_inits)
+        def _jax_wrapped_batched_pgpe_init(key, policy_params):
+            keys = random.split(key, num=parallel_updates)
+            return jax.vmap(_jax_wrapped_pgpe_init, in_axes=0)(keys, policy_params)
+    
+        self._initializer = jax.jit(_jax_wrapped_batched_pgpe_init)
 
         # ***********************************************************************
         # PARAMETER SAMPLING FUNCTIONS
@@ -1550,14 +1463,13 @@ class GaussianPGPE(PGPE):
 
             # more accurate formula
             if super_symmetric_accurate:
-                c1, c2, c3 = -0.06655, -0.9706, 0.124
                 aa = jnp.abs(a)
-                aa3 = jnp.power(aa, 3)
-                epsilon_star = jnp.sign(epsilon) * phi * jnp.where(
-                    a <= 0,
-                    jnp.exp(c1 * (aa3 - aa) / jnp.log(aa + 1e-10) + c2 * aa),
-                    jnp.exp(aa - c3 * aa * jnp.log(1.0 - aa3 + 1e-10))
-                )
+                atol = 1e-10
+                c1, c2, c3 = -0.06655, -0.9706, 0.124
+                term_neg_log = c1 * (aa * aa - 1.) / jnp.log(aa + atol) + c2
+                term_pos_log = 1. - c3 * jnp.log1p(-aa ** 3 + atol)
+                epsilon_star = jnp.sign(epsilon) * phi * jnp.exp(
+                    aa * jnp.where(a <= 0, term_neg_log, term_pos_log))
             
             # less accurate and simple formula
             else:
@@ -1640,19 +1552,18 @@ class GaussianPGPE(PGPE):
                     scale = 1.0
                 r_sigma = (r1 + r2) / (2 * scale)
 
-            grad = -(r_sigma * s + ent / sigma)
-            return grad
+            return -(r_sigma * s + ent / sigma)
             
         # calculate the policy gradients
         def _jax_wrapped_pgpe_grad(key, mu, sigma, r_max, ent,
-                                   policy_hyperparams, subs, model_params):
+                                   policy_hyperparams, fls, nfls, model_params):
             
             # basic pgpe sampling with return estimation
             key, subkey = random.split(key)
             p1, p2, p3, p4, epsilon, epsilon_star = _jax_wrapped_sample_params(
                 key, mu, sigma)
-            r1 = -loss_fn(subkey, p1, policy_hyperparams, subs, model_params)[0]
-            r2 = -loss_fn(subkey, p2, policy_hyperparams, subs, model_params)[0]
+            r1 = -loss_fn(subkey, p1, policy_hyperparams, fls, nfls, model_params)[0]
+            r2 = -loss_fn(subkey, p2, policy_hyperparams, fls, nfls, model_params)[0]
 
             # do a return normalization for optimizer stability
             r_max = jnp.maximum(r_max, r1)
@@ -1660,8 +1571,8 @@ class GaussianPGPE(PGPE):
 
             # super symmetric sampling requires two more trajectories and their returns
             if super_symmetric:
-                r3 = -loss_fn(subkey, p3, policy_hyperparams, subs, model_params)[0]
-                r4 = -loss_fn(subkey, p4, policy_hyperparams, subs, model_params)[0]
+                r3 = -loss_fn(subkey, p3, policy_hyperparams, fls, nfls, model_params)[0]
+                r4 = -loss_fn(subkey, p4, policy_hyperparams, fls, nfls, model_params)[0]
                 r_max = jnp.maximum(r_max, r3)
                 r_max = jnp.maximum(r_max, r4)       
             else:
@@ -1683,23 +1594,22 @@ class GaussianPGPE(PGPE):
 
         # calculate the policy gradients with batching on the first dimension
         def _jax_wrapped_pgpe_grad_batched(key, pgpe_params, r_max, ent,
-                                           policy_hyperparams, subs, model_params):
+                                           policy_hyperparams, fls, nfls, model_params):
             mu, sigma = pgpe_params
 
             # no batching required
             if batch_size == 1:
                 mu_grad, sigma_grad, new_r_max = _jax_wrapped_pgpe_grad(
-                    key, mu, sigma, r_max, ent, policy_hyperparams, subs, model_params)
+                    key, mu, sigma, r_max, ent, policy_hyperparams, fls, nfls, model_params)
             
             # for batching need to handle how meta-gradients of mean, sigma are aggregated
             else:
-
                 # do the batched calculation of mean and sigma gradients
                 keys = random.split(key, num=batch_size)
                 mu_grads, sigma_grads, r_maxs = jax.vmap(
                     _jax_wrapped_pgpe_grad, 
-                    in_axes=(0, None, None, None, None, None, None, None)
-                )(keys, mu, sigma, r_max, ent, policy_hyperparams, subs, model_params)
+                    in_axes=(0, None, None, None, None, None, None, None, None)
+                )(keys, mu, sigma, r_max, ent, policy_hyperparams, fls, nfls, model_params)
 
                 # calculate the average gradient for aggregation
                 mu_grad, sigma_grad = jax.tree_util.tree_map(
@@ -1732,16 +1642,16 @@ class GaussianPGPE(PGPE):
             return new_mu, new_sigma, new_mu_state, new_sigma_state
 
         def _jax_wrapped_pgpe_update(key, pgpe_params, r_max, progress,
-                                     policy_hyperparams, subs, model_params, pgpe_opt_state):
+                                     policy_hyperparams, fls, nfls, model_params, 
+                                     pgpe_opt_state):
             # regular update for pgpe
             mu, sigma = pgpe_params
             mu_state, sigma_state = pgpe_opt_state
             ent = start_entropy_coeff * jnp.power(entropy_coeff_decay, progress)
             mu_grad, sigma_grad, new_r_max = _jax_wrapped_pgpe_grad_batched(
-                key, pgpe_params, r_max, ent, policy_hyperparams, subs, model_params)
-            new_mu, new_sigma, new_mu_state, new_sigma_state = \
-                _jax_wrapped_pgpe_update_helper(mu, sigma, mu_grad, sigma_grad, 
-                                                mu_state, sigma_state)
+                key, pgpe_params, r_max, ent, policy_hyperparams, fls, nfls, model_params)
+            new_mu, new_sigma, new_mu_state, new_sigma_state = _jax_wrapped_pgpe_update_helper(
+                mu, sigma, mu_grad, sigma_grad, mu_state, sigma_state)
             
             # respect KL divergence contraint with old parameters
             if max_kl is not None:
@@ -1753,9 +1663,8 @@ class GaussianPGPE(PGPE):
                 kl_reduction = jnp.minimum(1.0, jnp.sqrt(max_kl / total_kl))
                 mu_state.hyperparams['learning_rate'] = old_mu_lr * kl_reduction
                 sigma_state.hyperparams['learning_rate'] = old_sigma_lr * kl_reduction
-                new_mu, new_sigma, new_mu_state, new_sigma_state = \
-                    _jax_wrapped_pgpe_update_helper(mu, sigma, mu_grad, sigma_grad, 
-                                                    mu_state, sigma_state)
+                new_mu, new_sigma, new_mu_state, new_sigma_state = _jax_wrapped_pgpe_update_helper(
+                    mu, sigma, mu_grad, sigma_grad, mu_state, sigma_state)
                 new_mu_state.hyperparams['learning_rate'] = old_mu_lr
                 new_sigma_state.hyperparams['learning_rate'] = old_sigma_lr
 
@@ -1767,20 +1676,17 @@ class GaussianPGPE(PGPE):
             policy_params = new_mu
             return new_pgpe_params, new_r_max, new_pgpe_opt_state, policy_params, converged
 
-        if parallel_updates is None:
-            self._update = jax.jit(_jax_wrapped_pgpe_update)
-        else:
-            # for parallel policy update
-            def _jax_wrapped_pgpe_updates(key, pgpe_params, r_max, progress,
-                                          policy_hyperparams, subs, model_params, 
-                                          pgpe_opt_state):
-                keys = jnp.asarray(random.split(key, num=parallel_updates))
-                return jax.vmap(
-                    _jax_wrapped_pgpe_update, in_axes=(0, 0, 0, None, None, None, 0, 0)
-                )(keys, pgpe_params, r_max, progress, policy_hyperparams, subs, 
-                  model_params, pgpe_opt_state)
-            
-            self._update = jax.jit(_jax_wrapped_pgpe_updates)
+        # for parallel policy update
+        def _jax_wrapped_batched_pgpe_updates(key, pgpe_params, r_max, progress,
+                                              policy_hyperparams, fls, nfls, model_params, 
+                                              pgpe_opt_state):
+            keys = random.split(key, num=parallel_updates)
+            return jax.vmap(
+                _jax_wrapped_pgpe_update, in_axes=(0, 0, 0, None, None, None, None, 0, 0)
+            )(keys, pgpe_params, r_max, progress, policy_hyperparams, fls, nfls, 
+              model_params, pgpe_opt_state)
+        
+        self._update = jax.jit(_jax_wrapped_batched_pgpe_updates)
 
 
 # ***********************************************************************
@@ -1842,7 +1748,7 @@ def var_utility(returns: jnp.ndarray, alpha: float) -> float:
 def cvar_utility(returns: jnp.ndarray, alpha: float) -> float:
     var = jnp.percentile(returns, q=100 * alpha)
     mask = returns <= var
-    return jnp.sum(returns * mask) / jnp.maximum(1, jnp.sum(mask))
+    return jnp.sum(returns * mask) / jnp.maximum(1, jnp.count_nonzero(mask))
 
 
 # set of all currently valid built-in utility functions
@@ -1869,7 +1775,7 @@ UTILITY_LOOKUP = {
 
 
 @jax.jit
-def pytree_at(tree, i):
+def pytree_at(tree: Pytree, i: int) -> Pytree:
     return jax.tree_util.tree_map(lambda x: x[i], tree)
 
 
@@ -1882,7 +1788,7 @@ class JaxBackpropPlanner:
                  batch_size_train: int=32,
                  batch_size_test: Optional[int]=None,
                  rollout_horizon: Optional[int]=None,
-                 use64bit: bool=False,
+                 parallel_updates: int=1,
                  action_bounds: Optional[Bounds]=None,
                  optimizer: Callable[..., optax.GradientTransformation]=optax.rmsprop,
                  optimizer_kwargs: Optional[Kwargs]=None,
@@ -1891,22 +1797,20 @@ class JaxBackpropPlanner:
                  noise_kwargs: Optional[Kwargs]=None,
                  ema_decay: Optional[float]=None,
                  pgpe: Optional[PGPE]=GaussianPGPE(),
-                 logic: Logic=FuzzyLogic(),
+                 compiler: JaxRDDLCompilerWithGrad=DefaultJaxRDDLCompilerWithGrad,
+                 compiler_kwargs: Optional[Kwargs]=None,
                  use_symlog_reward: bool=False,
                  utility: Union[Callable[[jnp.ndarray], float], str]='mean',
                  utility_kwargs: Optional[Kwargs]=None,
-                 cpfs_without_grad: Optional[Set[str]]=None,
-                 compile_non_fluent_exact: bool=True,
                  logger: Optional[Logger]=None,
+                 dashboard: Optional[Any]=None,
                  dashboard_viz: Optional[Any]=None,
-                 print_warnings: bool=True,
-                 parallel_updates: Optional[int]=None,
                  preprocessor: Optional[Preprocessor]=None,
                  python_functions: Optional[Dict[str, Callable]]=None) -> None:
         '''Creates a new gradient-based algorithm for optimizing action sequences
         (plan) in the given RDDL. Some operations will be converted to their
         differentiable counterparts; the specific operations can be customized
-        by providing a subclass of FuzzyLogic.
+        by providing a tailored compiler instance.
         
         :param rddl: the RDDL domain to optimize
         :param plan: the policy/plan representation to optimize
@@ -1914,9 +1818,8 @@ class JaxBackpropPlanner:
         step
         :param batch_size_test: how many rollouts to use to test the plan at each
         optimization step
-        :param rollout_horizon: lookahead planning horizon: None uses the
-        :param use64bit: whether to perform arithmetic in 64 bit
-        horizon parameter in the RDDL instance
+        :param rollout_horizon: lookahead planning horizon: None uses the env horizon
+        :param parallel_updates: how many optimizers to run independently in parallel
         :param action_bounds: box constraints on actions
         :param optimizer: a factory for an optax SGD algorithm
         :param optimizer_kwargs: a dictionary of parameters to pass to the SGD
@@ -1927,8 +1830,8 @@ class JaxBackpropPlanner:
         :param noise_kwargs: parameters of optional gradient noise
         :param ema_decay: optional exponential moving average of past parameters
         :param pgpe: optional policy gradient to run alongside the planner
-        :param logic: a subclass of Logic for mapping exact mathematical
-        operations to their differentiable counterparts 
+        :param compiler: compiler instance to use for planning
+        :param compiler_kwargs: compiler instances kwargs for initialization
         :param use_symlog_reward: whether to use the symlog transform on the 
         reward as a form of normalization
         :param utility: how to aggregate return observations to compute utility
@@ -1936,15 +1839,10 @@ class JaxBackpropPlanner:
         scalar, or a a string identifying the utility function by name
         :param utility_kwargs: additional keyword arguments to pass hyper-
         parameters to the utility function call
-        :param cpfs_without_grad: which CPFs do not have gradients (use straight
-        through gradient trick)
-        :param compile_non_fluent_exact: whether non-fluent expressions 
-        are always compiled using exact JAX expressions
         :param logger: to log information about compilation to file
+        :param dashboard: optional dashboard to display training progress and results
         :param dashboard_viz: optional visualizer object from the environment
         to pass to the dashboard to visualize the policy
-        :param print_warnings: whether to print warnings
-        :param parallel_updates: how many optimizers to run independently in parallel
         :param preprocessor: optional preprocessor for state inputs to plan
         :param python_functions: dictionary of external Python functions to call from RDDL
         '''
@@ -1961,7 +1859,6 @@ class JaxBackpropPlanner:
         if action_bounds is None:
             action_bounds = {}
         self._action_bounds = action_bounds
-        self.use64bit = use64bit
         self.optimizer_name = optimizer
         if optimizer_kwargs is None:
             optimizer_kwargs = {'learning_rate': 0.1}
@@ -1972,7 +1869,6 @@ class JaxBackpropPlanner:
         self.ema_decay = ema_decay
         self.pgpe = pgpe
         self.use_pgpe = pgpe is not None
-        self.print_warnings = print_warnings
         self.preprocessor = preprocessor
         if python_functions is None:
             python_functions = {}
@@ -1982,11 +1878,10 @@ class JaxBackpropPlanner:
         try:
             optimizer = optax.inject_hyperparams(optimizer)(**optimizer_kwargs)
         except Exception as _:
-            message = termcolor.colored(
-                '[FAIL] Failed to inject hyperparameters into JaxPlan optimizer, '
-                'rolling back to safer method: please note that runtime modification of '
-                'hyperparameters will be disabled.', 'red')
-            print(message)
+            print(termcolor.colored(
+                '[WARN] Could not inject hyperparameters into JaxPlan optimizer: '
+                'runtime modification of hyperparameters will be disabled.', 'yellow'
+            ))
             optimizer = optimizer(**optimizer_kwargs)   
         
         # apply optimizer chain of transformations
@@ -2009,95 +1904,69 @@ class JaxBackpropPlanner:
             if utility_fn is None:
                 raise RDDLNotImplementedError(
                     f'Utility function <{utility}> is not supported, '
-                    f'must be one of {list(UTILITY_LOOKUP.keys())}.')
+                    f'must be one of {list(UTILITY_LOOKUP.keys())}.'
+                )
         else:
             utility_fn = utility
         self.utility = utility_fn
-        
         if utility_kwargs is None:
             utility_kwargs = {}
         self.utility_kwargs = utility_kwargs    
         
-        self.logic = logic
-        self.logic.set_use64bit(self.use64bit)
+        if compiler_kwargs is None:
+            compiler_kwargs = {}
+        self.compiler_type = compiler
+        self.compiler_kwargs = compiler_kwargs
         self.use_symlog_reward = use_symlog_reward
-        if cpfs_without_grad is None:
-            cpfs_without_grad = set()
-        self.cpfs_without_grad = cpfs_without_grad
-        self.compile_non_fluent_exact = compile_non_fluent_exact
 
         self.logger = logger
+        self.dashboard = dashboard
         self.dashboard_viz = dashboard_viz
         
-        self._jax_compile_rddl()        
-        self._jax_compile_optimizer()
+        self._jax_compile_graph()
     
     @staticmethod
     def summarize_system() -> str:
         '''Returns a string containing information about the system, Python version 
         and jax-related packages that are relevant to the current planner.
-        '''
-        try:
-            jaxlib_version = jax._src.lib.version_str
-        except Exception as _:
-            jaxlib_version = 'N/A'
-        try:
-            devices_short = ', '.join(
-                map(str, jax._src.xla_bridge.devices())).replace('\n', '')
-        except Exception as _:
-            devices_short = 'N/A'
-        LOGO = \
-r"""
-   __   ______   __  __   ______  __       ______   __   __    
-  /\ \ /\  __ \ /\_\_\_\ /\  == \/\ \     /\  __ \ /\ "-.\ \   
- _\_\ \\ \  __ \\/_/\_\/_\ \  _-/\ \ \____\ \  __ \\ \ \-.  \  
-/\_____\\ \_\ \_\ /\_\/\_\\ \_\   \ \_____\\ \_\ \_\\ \_\\"\_\ 
-\/_____/ \/_/\/_/ \/_/\/_/ \/_/    \/_____/ \/_/\/_/ \/_/ \/_/ 
-"""
-                   
-        return (f'\n'
-                f'{LOGO}\n'
-                f'Version {__version__}\n' 
-                f'Python {sys.version}\n'
-                f'jax {jax.version.__version__}, jaxlib {jaxlib_version}, '
-                f'optax {optax.__version__}, haiku {hk.__version__}, '
-                f'numpy {np.__version__}\n'
-                f'devices: {devices_short}\n')
+        '''         
+        devices = jax.devices()
+        default_device = devices[0] if devices else 'n/a'
+        return termcolor.colored(
+            '\n'
+            f'Starting JaxPlan v{__version__} '
+            f'on device {default_device.platform}{default_device.id}\n', attrs=['bold']
+        )
     
     def summarize_relaxations(self) -> str:
         '''Returns a summary table containing all non-differentiable operators
         and their relaxations.
         '''
         result = ''
-        if self.compiled.model_params:
-            result += ('Some RDDL operations are non-differentiable '
+        overriden_ops_info = self.compiled.overriden_ops_info()
+        if overriden_ops_info:
+            result += ('[INFO] Some RDDL operations are non-differentiable '
                        'and will be approximated as follows:' + '\n')
-            exprs_by_rddl_op, values_by_rddl_op = {}, {}
-            for info in self.compiled.model_parameter_info().values():
-                rddl_op = info['rddl_op']
-                exprs_by_rddl_op.setdefault(rddl_op, []).append(info['id'])
-                values_by_rddl_op.setdefault(rddl_op, []).append(info['init_value'])
-            for rddl_op in sorted(exprs_by_rddl_op.keys()):
-                result += (f'    {rddl_op}:\n'
-                           f'        addresses  ={exprs_by_rddl_op[rddl_op]}\n'
-                           f'        init_values={values_by_rddl_op[rddl_op]}\n')
+            for (class_, op_to_ids_dict) in overriden_ops_info.items():
+                result += f'    {class_}:\n'
+                for (op, ids) in op_to_ids_dict.items():
+                    result += (
+                        f'        {op} ' + 
+                        termcolor.colored(f'[{len(ids)} occurences]\n', 'dark_grey')
+                    )
         return result
         
     def summarize_hyperparameters(self) -> str:
         '''Returns a string summarizing the hyper-parameters of the current planner 
         instance.
         '''
-        result = (f'objective hyper-parameters:\n'
+        result = (f'[INFO] objective hyper-parameters:\n'
                   f'    utility_fn        ={self.utility.__name__}\n'
                   f'    utility args      ={self.utility_kwargs}\n'
                   f'    use_symlog        ={self.use_symlog_reward}\n'
                   f'    lookahead         ={self.horizon}\n'
                   f'    user_action_bounds={self._action_bounds}\n'
-                  f'    fuzzy logic type  ={type(self.logic).__name__}\n'
-                  f'    non_fluents exact ={self.compile_non_fluent_exact}\n'
-                  f'    cpfs_no_gradient  ={self.cpfs_without_grad}\n'
-                  f'optimizer hyper-parameters:\n'
-                  f'    use_64_bit        ={self.use64bit}\n'
+                  f'[INFO] optimizer hyper-parameters:\n'
                   f'    optimizer         ={self.optimizer_name}\n'
                   f'    optimizer args    ={self.optimizer_kwargs}\n'
                   f'    clip_gradient     ={self.clip_grad}\n'
@@ -2111,90 +1980,78 @@ r"""
         result += str(self.plan)
         if self.use_pgpe:
             result += str(self.pgpe)
-        result += str(self.logic)
+        result += 'test compiler:\n'
+        for k, v in self.test_compiled.get_kwargs().items():
+            result += f'    {k}={v}\n'
+        result += 'train compiler:\n'
+        for k, v in self.compiled.get_kwargs().items():
+            result += f'    {k}={v}\n'
         return result
         
     # ===========================================================================
-    # COMPILATION SUBROUTINES
+    # COMPILE RDDL
     # ===========================================================================
 
     def _jax_compile_rddl(self):
-        rddl = self.rddl
-        
-        # Jax compilation of the differentiable RDDL for training
-        self.compiled = JaxRDDLCompilerWithGrad(
-            rddl=rddl,
-            logic=self.logic,
+        self.compiled = self.compiler_type(
+            rddl=self.rddl,
             logger=self.logger,
-            use64bit=self.use64bit,
-            cpfs_without_grad=self.cpfs_without_grad,
-            compile_non_fluent_exact=self.compile_non_fluent_exact,
-            print_warnings=self.print_warnings,
-            python_functions=self.python_functions
+            python_functions=self.python_functions,
+            **self.compiler_kwargs
         )
+        self.print_warnings = self.compiled.print_warnings
         self.compiled.compile(log_jax_expr=True, heading='RELAXED MODEL')
-        
-        # Jax compilation of the exact RDDL for testing
+    
         self.test_compiled = JaxRDDLCompiler(
-            rddl=rddl,
+            rddl=self.rddl,
+            allow_synchronous_state=True,
             logger=self.logger,
-            use64bit=self.use64bit,
+            use64bit=self.compiled.use64bit,
             python_functions=self.python_functions
         )
         self.test_compiled.compile(log_jax_expr=True, heading='EXACT MODEL')
-        
-    def _jax_compile_optimizer(self):
-        
-        # preprocessor
+
+    def _jax_compile_policy(self):
         if self.preprocessor is not None:
             self.preprocessor.compile(self.compiled)   
-
-        # policy
         self.plan.compile(self.compiled,
                           _bounds=self._action_bounds,
                           horizon=self.horizon,
                           preprocessor=self.preprocessor)
         self.train_policy = jax.jit(self.plan.train_policy)
         self.test_policy = jax.jit(self.plan.test_policy)
-        
-        # training rollouts
-        train_rollouts = self.compiled.compile_rollouts(
+
+    def _jax_compile_rollouts(self):
+        self.train_rollouts = self.compiled.compile_rollouts(
             policy=self.plan.train_policy,
             n_steps=self.horizon,
             n_batch=self.batch_size_train,
-            cache_path_info=self.preprocessor is not None
+            cache_path_info=self.preprocessor is not None or self.dashboard is not None
         )
-        self.train_rollouts = train_rollouts
-        
-        # testing rollouts
         test_rollouts = self.test_compiled.compile_rollouts(
             policy=self.plan.test_policy,
             n_steps=self.horizon,
             n_batch=self.batch_size_test,
-            cache_path_info=False
+            cache_path_info=self.dashboard is not None
         )
         self.test_rollouts = jax.jit(test_rollouts)
-        
-        # initialization
-        self.initialize, self.init_optimizer = self._jax_init()
-        
-        # training loss
-        train_loss = self._jax_loss(train_rollouts, use_symlog=self.use_symlog_reward)
 
-        # testing loss
-        test_loss = self._jax_loss(test_rollouts, use_symlog=False)
-        if self.parallel_updates is None:
-            self.test_loss = jax.jit(test_loss)
-        else:
-            self.test_loss = jax.jit(jax.vmap(test_loss, in_axes=(None, 0, None, None, 0)))
-        
-        # optimization
+    def _jax_compile_train_update(self):
+        self.initialize, self.init_optimizer = self._jax_init_optimizer()
+        train_loss = self._jax_loss(self.train_rollouts, use_symlog=self.use_symlog_reward)
+        self.single_train_loss = train_loss
         self.update = self._jax_update(train_loss)
+    
+    def _jax_compile_test_loss(self):
+        test_loss = self._jax_loss(self.test_rollouts, use_symlog=False)
+        self.single_test_loss = test_loss
+        self.test_loss = jax.jit(jax.vmap(
+            test_loss, in_axes=(None, 0, None, None, None, 0)))
 
-        # pgpe option
+    def _jax_compile_pgpe(self):
         if self.use_pgpe:
             self.pgpe.compile(
-                loss_fn=test_loss, 
+                loss_fn=self.single_test_loss, 
                 projection=self.plan.projection, 
                 real_dtype=self.test_compiled.REAL,
                 print_warnings=self.print_warnings,
@@ -2204,6 +2061,14 @@ r"""
         else:
             self.merge_pgpe = None
     
+    def _jax_compile_graph(self):
+        self._jax_compile_rddl()
+        self._jax_compile_policy()
+        self._jax_compile_rollouts()
+        self._jax_compile_train_update()
+        self._jax_compile_test_loss()
+        self._jax_compile_pgpe()
+
     def _jax_return(self, use_symlog):
         gamma = self.rddl.discount
         
@@ -2215,9 +2080,8 @@ r"""
                 rewards = rewards * discount[jnp.newaxis, ...]
             returns = jnp.sum(rewards, axis=1)
             if use_symlog:
-                returns = jnp.sign(returns) * jnp.log(1.0 + jnp.abs(returns))
+                returns = jnp.sign(returns) * jnp.log1p(jnp.abs(returns))
             return returns
-        
         return _jax_wrapped_returns
         
     def _jax_loss(self, rollouts, use_symlog=False): 
@@ -2228,48 +2092,42 @@ r"""
         # the loss is the average cumulative reward across all roll-outs
         # but applies a utility function if requested to each return observation:
         # by default, the utility function is the mean
-        def _jax_wrapped_plan_loss(key, policy_params, policy_hyperparams,
-                                   subs, model_params):
+        def _jax_wrapped_plan_loss(key, policy_params, policy_hyperparams, fls, nfls, 
+                                   model_params):
             log, model_params = rollouts(
-                key, policy_params, policy_hyperparams, subs, model_params)
+                key, policy_params, policy_hyperparams, fls, nfls, model_params)
             rewards = log['reward']
             returns = _jax_wrapped_returns(rewards)
             utility = utility_fn(returns, **utility_kwargs)
             loss = -utility
             aux = (log, model_params)
             return loss, aux
-        
         return _jax_wrapped_plan_loss
     
-    def _jax_init(self):
+    def _jax_init_optimizer(self):
         init = self.plan.initializer
         optimizer = self.optimizer
         num_parallel = self.parallel_updates
         
         # initialize both the policy and its optimizer
-        def _jax_wrapped_init_policy(key, policy_hyperparams, subs):
-            policy_params = init(key, policy_hyperparams, subs)
+        def _jax_wrapped_init_policy(key, policy_hyperparams, fls):
+            policy_params = init(key, policy_hyperparams, fls)
             opt_state = optimizer.init(policy_params)
             return policy_params, opt_state, {}    
         
         # initialize just the optimizer from the policy
         def _jax_wrapped_init_opt(policy_params):
-            if num_parallel is None:
-                opt_state = optimizer.init(policy_params)
-            else:
-                opt_state = jax.vmap(optimizer.init, in_axes=0)(policy_params)
+            opt_state = jax.vmap(optimizer.init, in_axes=0)(policy_params)
             return opt_state, {}
 
-        if num_parallel is None:
-            return jax.jit(_jax_wrapped_init_policy), jax.jit(_jax_wrapped_init_opt)
-        
         # initialize multiple policies to be optimized in parallel
-        def _jax_wrapped_init_policies(key, policy_hyperparams, subs):
-            keys = jnp.asarray(random.split(key, num=num_parallel))
-            return jax.vmap(_jax_wrapped_init_policy, in_axes=(0, None, None))(
-                keys, policy_hyperparams, subs)      
+        def _jax_wrapped_batched_init_policy(key, policy_hyperparams, fls):
+            keys = random.split(key, num=num_parallel)
+            return jax.vmap(
+                _jax_wrapped_init_policy, in_axes=(0, None, None)
+            )(keys, policy_hyperparams, fls)      
           
-        return jax.jit(_jax_wrapped_init_policies), jax.jit(_jax_wrapped_init_opt)
+        return jax.jit(_jax_wrapped_batched_init_policy), jax.jit(_jax_wrapped_init_opt)
         
     def _jax_update(self, loss):
         optimizer = self.optimizer
@@ -2285,28 +2143,28 @@ r"""
         
         # calculate the plan gradient w.r.t. return loss and update optimizer
         # also perform a projection step to satisfy constraints on actions
-        def _jax_wrapped_loss_swapped(policy_params, key, policy_hyperparams,
-                                      subs, model_params):
-            return loss(key, policy_params, policy_hyperparams, subs, model_params)[0]
+        def _jax_wrapped_loss_swapped(policy_params, key, policy_hyperparams, fls, nfls, 
+                                      model_params):
+            return loss(key, policy_params, policy_hyperparams, fls, nfls, model_params)[0]
             
-        def _jax_wrapped_plan_update(key, policy_params, policy_hyperparams,
-                                     subs, model_params, opt_state, opt_aux):
+        def _jax_wrapped_plan_update(key, policy_params, policy_hyperparams, fls, nfls, 
+                                     model_params, opt_state, opt_aux):
             
             # calculate the gradient of the loss with respect to the policy
             grad_fn = jax.value_and_grad(loss, argnums=1, has_aux=True)
             (loss_val, (log, model_params)), grad = grad_fn(
-                key, policy_params, policy_hyperparams, subs, model_params)
+                key, policy_params, policy_hyperparams, fls, nfls, model_params)
             
             # require a slightly different update if line search is used
             if use_ls:
                 updates, opt_state = optimizer.update(
                     grad, opt_state, params=policy_params, 
                     value=loss_val, grad=grad, value_fn=_jax_wrapped_loss_swapped,
-                    key=key, policy_hyperparams=policy_hyperparams, subs=subs,
-                    model_params=model_params)
+                    key=key, policy_hyperparams=policy_hyperparams, fls=fls, nfls=nfls,
+                    model_params=model_params
+                )
             else:
-                updates, opt_state = optimizer.update(
-                    grad, opt_state, params=policy_params) 
+                updates, opt_state = optimizer.update(grad, opt_state, params=policy_params) 
 
             # apply optimizer and optional policy projection
             policy_params = optax.apply_updates(policy_params, updates)
@@ -2315,95 +2173,86 @@ r"""
             log['grad'] = grad
             log['updates'] = updates
             zero_grads = _jax_wrapped_zero_gradients(grad)
-            return policy_params, converged, opt_state, opt_aux, \
-                loss_val, log, model_params, zero_grads
+            return (policy_params, converged, opt_state, opt_aux, 
+                    loss_val, log, model_params, zero_grads)
         
-        if num_parallel is None:
-            return jax.jit(_jax_wrapped_plan_update)
-
         # for parallel policy update, just do each policy update in parallel
-        def _jax_wrapped_plan_updates(key, policy_params, policy_hyperparams,
-                                      subs, model_params, opt_state, opt_aux):
-            keys = jnp.asarray(random.split(key, num=num_parallel))
+        def _jax_wrapped_batched_plan_update(key, policy_params, policy_hyperparams,
+                                             fls, nfls, model_params, opt_state, opt_aux):
+            keys = random.split(key, num=num_parallel)
             return jax.vmap(
-                _jax_wrapped_plan_update, in_axes=(0, 0, None, None, 0, 0, 0)
-            )(keys, policy_params, policy_hyperparams, subs, model_params, 
+                _jax_wrapped_plan_update, in_axes=(0, 0, None, None, None, 0, 0, 0)
+            )(keys, policy_params, policy_hyperparams, fls, nfls, model_params,
               opt_state, opt_aux)
-        
-        return jax.jit(_jax_wrapped_plan_updates)
+        return jax.jit(_jax_wrapped_batched_plan_update)
             
     def _jax_merge_pgpe_jaxplan(self):
-        if self.parallel_updates is None:
-            return None
-        
-        # for parallel policy update:
+
         # currently implements a hard replacement where the jaxplan parameter
         # is replaced by the PGPE parameter if the latter is an improvement
-        def _jax_wrapped_pgpe_jaxplan_merge(pgpe_mask, pgpe_param, policy_params, 
+        def _jax_wrapped_batched_pgpe_merge(pgpe_mask, pgpe_param, policy_params, 
                                             pgpe_loss, test_loss, 
                                             pgpe_loss_smooth, test_loss_smooth, 
                                             pgpe_converged, converged):
-            def select_fn(leaf1, leaf2):
-                expanded_mask = pgpe_mask[(...,) + (jnp.newaxis,) * (jnp.ndim(leaf1) - 1)]
-                return jnp.where(expanded_mask, leaf1, leaf2)
-            policy_params = jax.tree_util.tree_map(select_fn, pgpe_param, policy_params)
+            mask_tree = jax.tree_util.tree_map(
+                lambda leaf: pgpe_mask[(...,) + (jnp.newaxis,) * (jnp.ndim(leaf) - 1)],
+                pgpe_param)
+            policy_params = jax.tree_util.tree_map(
+                jnp.where, mask_tree, pgpe_param, policy_params)
             test_loss = jnp.where(pgpe_mask, pgpe_loss, test_loss)
             test_loss_smooth = jnp.where(pgpe_mask, pgpe_loss_smooth, test_loss_smooth)
-            expanded_mask = pgpe_mask[(...,) + (jnp.newaxis,) * (jnp.ndim(converged) - 1)]
-            converged = jnp.where(expanded_mask, pgpe_converged, converged)
+            converged = jnp.where(pgpe_mask, pgpe_converged, converged)
             return policy_params, test_loss, test_loss_smooth, converged
+        return jax.jit(_jax_wrapped_batched_pgpe_merge)
 
-        return jax.jit(_jax_wrapped_pgpe_jaxplan_merge)
-
-    def _batched_init_subs(self, subs): 
+    def _batched_init_subs(self, init_values): 
         rddl = self.rddl
         n_train, n_test = self.batch_size_train, self.batch_size_test
         
-        # batched subs
-        init_train, init_test = {}, {}
-        for (name, value) in subs.items():
+        init_train_fls, init_train_nfls, init_test_fls, init_test_nfls = {}, {}, {}, {}
+        for (name, value) in init_values.items():
 
             # get the initial fluent values and check validity
             init_value = self.test_compiled.init_values.get(name, None)
             if init_value is None:
                 raise RDDLUndefinedVariableError(
-                    f'Variable <{name}> in subs argument is not a '
+                    f'Variable <{name}> in init_values argument is not a '
                     f'valid p-variable, must be one of '
-                    f'{set(self.test_compiled.init_values.keys())}.')
-            value = np.reshape(value, np.shape(init_value))[np.newaxis, ...]            
+                    f'{set(self.test_compiled.init_values.keys())}.'
+                )         
             
             # for enum types need to convert the string values to integer indices
+            if np.size(value) != np.size(init_value):
+                value = init_value
+            value = np.reshape(value, np.shape(init_value))
             if value.dtype.type is np.str_:
                 value = rddl.object_string_to_index_array(rddl.variable_ranges[name], value)
             
-            # training initial fluent values are repeated along batch dimension
-            # and converted to float as required by JAX
-            train_value = np.repeat(value, repeats=n_train, axis=0)
-            train_value = np.asarray(train_value, dtype=self.compiled.REAL)
-            init_train[name] = train_value
+            # train and test fluents have a batch dimension added, non-fluents do not
+            # train fluents are also converted to float
+            if name not in rddl.non_fluents:
+                train_value = np.repeat(value[np.newaxis, ...], repeats=n_train, axis=0)
+                init_train_fls[name] = np.asarray(train_value, dtype=self.compiled.REAL)
+                init_test_fls[name] = np.repeat(value[np.newaxis, ...], repeats=n_test, axis=0)
+            else:
+                init_train_nfls[name] = np.asarray(value, dtype=self.compiled.REAL)
+                init_test_nfls[name] = value
 
-            # testing initial fluent values are repeated along batch dimension
-            # but otherwise unmodified
-            init_test[name] = np.repeat(value, repeats=n_test, axis=0)
-
-            # safely cast test subs variable to required type in case the type is wrong
+            # safely cast test variable to required type in case the type is wrong
             if name in rddl.variable_ranges:
                 required_type = RDDLValueInitializer.NUMPY_TYPES.get(
                     rddl.variable_ranges[name], RDDLValueInitializer.INT)
+                init_test = init_test_nfls if name in rddl.non_fluents else init_test_fls
                 if np.result_type(init_test[name]) != required_type:
                     init_test[name] = np.asarray(init_test[name], dtype=required_type)
         
         # make sure next-state fluents are also set
         for (state, next_state) in rddl.next_state.items():
-            init_train[next_state] = init_train[state]
-            init_test[next_state] = init_test[state]
-        return init_train, init_test
+            init_train_fls[next_state] = init_train_fls[state]
+            init_test_fls[next_state] = init_test_fls[state]
+        return (init_train_fls, init_train_nfls), (init_test_fls, init_test_nfls)
     
     def _broadcast_pytree(self, pytree):
-        if self.parallel_updates is None:
-            return pytree
-        
-        # for parallel policy update
         def make_batched(x):
             x = np.asarray(x)
             x = np.broadcast_to(
@@ -2440,7 +2289,7 @@ r"""
         '''
 
         # make sure parallel updates are disabled
-        if self.parallel_updates is not None:
+        if self.parallel_updates > 1:
             raise ValueError('Cannot compile static optimization problem '
                              'when parallel_updates is not None.')
         
@@ -2449,40 +2298,40 @@ r"""
             key = random.PRNGKey(round(time.time() * 1000))
             
         # initialize the initial fluents, model parameters, policy hyper-params
-        subs = self.test_compiled.init_values
-        train_subs, _ = self._batched_init_subs(subs)
-        model_params = self.compiled.model_params
+        (fls, nfls), _ = self._batched_init_subs(self.test_compiled.init_values)
+        model_params = self.compiled.model_aux['params']
         if policy_hyperparams is None:
             if self.print_warnings:
-                message = termcolor.colored(
-                    '[WARN] policy_hyperparams is not set, setting 1.0 for '
-                    'all action-fluents which could be suboptimal.', 'yellow')
-                print(message)
-            policy_hyperparams = {action: 1.0 
-                                  for action in self.rddl.action_fluents}
+                print(termcolor.colored(
+                    '[WARN] policy_hyperparams is not set: setting values to 1.0 for '
+                    'all action-fluents, which could be suboptimal.', 'yellow'
+                ))
+            policy_hyperparams = {action: 1. for action in self.rddl.action_fluents}
                 
         # initialize the policy parameters
-        params_guess, *_ = self.initialize(key, policy_hyperparams, train_subs)
+        params_guess = self.initialize(key, policy_hyperparams, fls)[0]
+        params_guess = pytree_at(params_guess, 0)
+
+        # get the params mapping to a 1D vector
         guess_1d, unravel_fn = jax.flatten_util.ravel_pytree(params_guess)  
         guess_1d = np.asarray(guess_1d)      
         
-        # computes the training loss function and its 1D gradient
-        loss_fn = self._jax_loss(self.train_rollouts)
-        
-        # JAX requires an RNG seed for each evaluation as part of the pure function def
+        # computes the training loss function in a 1D vector
         @jax.jit
         def _loss_with_key(key, params_1d, model_params):
             policy_params = unravel_fn(params_1d)
-            loss_val, (_, model_params) = loss_fn(
-                key, policy_params, policy_hyperparams, train_subs, model_params)
+            loss_val, (_, model_params) = self.single_train_loss(
+                key, policy_params, policy_hyperparams, fls, nfls, model_params)
             return loss_val, model_params
         
+        # computes the training loss gradient function in a 1D vector
+        grad_fn = jax.grad(self.single_train_loss, argnums=1, has_aux=True)
+
         @jax.jit
         def _grad_with_key(key, params_1d, model_params):
             policy_params = unravel_fn(params_1d)
-            grad_fn = jax.grad(loss_fn, argnums=1, has_aux=True)
             grad_val, (_, model_params) = grad_fn(
-                key, policy_params, policy_hyperparams, train_subs, model_params)
+                key, policy_params, policy_hyperparams, fls, nfls, model_params)
             grad_val = jax.flatten_util.ravel_pytree(grad_val)[0]
             return grad_val, model_params 
         
@@ -2521,9 +2370,7 @@ r"""
         
         :param key: JAX PRNG key (derived from clock if not provided)
         :param epochs: the maximum number of steps of gradient descent
-        :param train_seconds: total time allocated for gradient descent               
-        :param dashboard: dashboard to display training results
-        :param dashboard_id: experiment id for the dashboard
+        :param train_seconds: total time allocated for gradient descent    
         :param model_params: optional model-parameters to override default
         :param policy_hyperparams: hyper-parameters for the policy/plan, such as
         weights for sigmoid wrapping boolean actions
@@ -2533,10 +2380,9 @@ r"""
         specified in this instance
         :param print_summary: whether to print planner header and diagnosis
         :param print_progress: whether to print the progress bar during training
-        :param print_hyperparams: whether to print list of hyper-parameter settings
+        :param print_hyperparams: whether to print list of hyper-parameter settings   
+        :param dashboard_id: experiment id for the dashboard
         :param stopping_rule: stopping criterion
-        :param restart_epochs: restart the optimizer from a random policy configuration
-        if there is no progress for this many consecutive iterations
         :param test_rolling_window: the test return is averaged on a rolling 
         window of the past test_rolling_window returns when updating the best
         parameters found so far
@@ -2561,8 +2407,6 @@ r"""
     def optimize_generator(self, key: Optional[random.PRNGKey]=None,
                            epochs: int=999999,
                            train_seconds: float=120.,
-                           dashboard: Optional[Any]=None,
-                           dashboard_id: Optional[str]=None,
                            model_params: Optional[Dict[str, Any]]=None,
                            policy_hyperparams: Optional[Dict[str, Any]]=None,
                            subs: Optional[Dict[str, Any]]=None,
@@ -2570,8 +2414,8 @@ r"""
                            print_summary: bool=True,
                            print_progress: bool=True,
                            print_hyperparams: bool=False,
+                           dashboard_id: Optional[str]=None,
                            stopping_rule: Optional[JaxPlannerStoppingRule]=None,
-                           restart_epochs: int=999999,
                            test_rolling_window: int=10,
                            tqdm_position: Optional[int]=None) -> Generator[Dict[str, Any], None, None]:
         '''Returns a generator for computing an optimal policy or plan. 
@@ -2580,9 +2424,7 @@ r"""
         
         :param key: JAX PRNG key (derived from clock if not provided)
         :param epochs: the maximum number of steps of gradient descent
-        :param train_seconds: total time allocated for gradient descent        
-        :param dashboard: dashboard to display training results
-        :param dashboard_id: experiment id for the dashboard
+        :param train_seconds: total time allocated for gradient descent 
         :param model_params: optional model-parameters to override default
         :param policy_hyperparams: hyper-parameters for the policy/plan, such as
         weights for sigmoid wrapping boolean actions
@@ -2593,17 +2435,15 @@ r"""
         :param print_summary: whether to print planner header and diagnosis
         :param print_progress: whether to print the progress bar during training
         :param print_hyperparams: whether to print list of hyper-parameter settings
+        :param dashboard_id: experiment id for the dashboard
         :param stopping_rule: stopping criterion
-        :param restart_epochs: restart the optimizer from a random policy configuration
-        if there is no progress for this many consecutive iterations
         :param test_rolling_window: the test return is averaged on a rolling 
         window of the past test_rolling_window returns when updating the best
         parameters found so far
         :param tqdm_position: position of tqdm progress bar (for multiprocessing)
         '''
 
-        # start measuring execution time here:
-        # we need to measure time spent outside loop so we can deduct it from total time
+        # start measuring execution time here, including time spent outside optimize loop
         start_time = time.time()
         elapsed_outside_loop = 0
         
@@ -2611,39 +2451,27 @@ r"""
         # INITIALIZATION OF HYPER-PARAMETERS
         # ======================================================================
 
-        # cannot run dashboard with parallel updates
-        if dashboard is not None and self.parallel_updates is not None:
-            if self.print_warnings:
-                message = termcolor.colored(
-                    '[WARN] Dashboard is unavailable if parallel_updates is not None: '
-                    'setting dashboard to None.', 'yellow')
-                print(message)
-            dashboard = None
-
         # if PRNG key is not provided
         if key is None:
             key = random.PRNGKey(round(time.time() * 1000))
+            if self.print_warnings:
+                print(termcolor.colored(
+                    '[WARN] PRNG key is not set: setting from clock.', 'yellow'
+                ))
         dash_key = key[1].item()
             
         # if policy_hyperparams is not provided
         if policy_hyperparams is None:
             if self.print_warnings:
-                message = termcolor.colored(
-                    '[WARN] policy_hyperparams is not set, setting 1.0 for '
-                    'all action-fluents which could be suboptimal.', 'yellow')
-                print(message)
-            policy_hyperparams = {action: 1.0 
-                                  for action in self.rddl.action_fluents}
+                print(termcolor.colored(
+                    '[WARN] policy_hyperparams is not set: setting values to 1.0 for '
+                    'all action-fluents, which could be suboptimal.', 'yellow'
+                ))
+            policy_hyperparams = {action: 1. for action in self.rddl.action_fluents}
         
         # if policy_hyperparams is a scalar
         elif isinstance(policy_hyperparams, (int, float, np.number)):
-            if self.print_warnings:
-                message = termcolor.colored(
-                    f'[INFO] policy_hyperparams is {policy_hyperparams}, '
-                    f'setting this value for all action-fluents.', 'green')
-                print(message)
-            hyperparam_value = float(policy_hyperparams)
-            policy_hyperparams = {action: hyperparam_value
+            policy_hyperparams = {action: float(policy_hyperparams) 
                                   for action in self.rddl.action_fluents}
         
         # fill in missing entries
@@ -2651,12 +2479,12 @@ r"""
             for action in self.rddl.action_fluents:
                 if action not in policy_hyperparams:
                     if self.print_warnings:
-                        message = termcolor.colored(
-                            f'[WARN] policy_hyperparams[{action}] is not set, '
-                            f'setting 1.0 for missing action-fluents '
-                            f'which could be suboptimal.', 'yellow')
-                        print(message)
-                    policy_hyperparams[action] = 1.0
+                        print(termcolor.colored(
+                            f'[WARN] policy_hyperparams[{action}] is not set: '
+                            f'setting values to 1.0 for missing action-fluents, '
+                            f'which could be suboptimal.', 'yellow'
+                        ))
+                    policy_hyperparams[action] = 1.
         
         # initialize preprocessor
         preproc_key = None
@@ -2670,21 +2498,21 @@ r"""
             print(self.summarize_relaxations())
         if print_hyperparams:
             print(self.summarize_hyperparameters())
-            print(f'optimize() call hyper-parameters:\n'
-                  f'    PRNG key           ={key}\n'
-                  f'    max_iterations     ={epochs}\n'
-                  f'    max_seconds        ={train_seconds}\n'
-                  f'    model_params       ={model_params}\n'
-                  f'    policy_hyper_params={policy_hyperparams}\n'
-                  f'    override_subs_dict ={subs is not None}\n'
-                  f'    provide_param_guess={guess is not None}\n'
-                  f'    test_rolling_window={test_rolling_window}\n' 
-                  f'    dashboard          ={dashboard is not None}\n'
-                  f'    dashboard_id       ={dashboard_id}\n'
-                  f'    print_summary      ={print_summary}\n'
-                  f'    print_progress     ={print_progress}\n'
-                  f'    stopping_rule      ={stopping_rule}\n'
-                  f'    restart_epochs     ={restart_epochs}\n')
+            print(
+                f'[INFO] optimize call hyper-parameters:\n'
+                f'    PRNG key           ={key}\n'
+                f'    max_iterations     ={epochs}\n'
+                f'    max_seconds        ={train_seconds}\n'
+                f'    model_params       ={model_params}\n'
+                f'    policy_hyper_params={policy_hyperparams}\n'
+                f'    override_subs_dict ={subs is not None}\n'
+                f'    provide_param_guess={guess is not None}\n'
+                f'    test_rolling_window={test_rolling_window}\n'
+                f'    print_summary      ={print_summary}\n'
+                f'    print_progress     ={print_progress}\n'
+                f'    dashboard_id       ={dashboard_id}\n'
+                f'    stopping_rule      ={stopping_rule}\n'
+            )
         
         # ======================================================================
         # INITIALIZATION OF STATE AND POLICY
@@ -2702,23 +2530,23 @@ r"""
                     subs[var] = value
                     added_pvars_to_subs.append(var)
             if self.print_warnings and added_pvars_to_subs:
-                message = termcolor.colored(
-                    f'[INFO] p-variables {added_pvars_to_subs} is not in '
-                    f'provided subs, using their initial values.', 'green')
-                print(message)
+                print(termcolor.colored(
+                    f'[INFO] p-variable(s) {added_pvars_to_subs} are not in '
+                    f'provided subs: using their initial values.', 'dark_grey'
+                ))
         train_subs, test_subs = self._batched_init_subs(subs)
         
         # initialize model parameters
         if model_params is None:
-            model_params = self.compiled.model_params
+            model_params = self.compiled.model_aux['params']
         model_params = self._broadcast_pytree(model_params)
-        model_params_test = self._broadcast_pytree(self.test_compiled.model_params)
+        model_params_test = self._broadcast_pytree(self.test_compiled.model_aux['params'])
         
         # initialize policy parameters
         if guess is None:
             key, subkey = random.split(key)
             policy_params, opt_state, opt_aux = self.initialize(
-                subkey, policy_hyperparams, train_subs)
+                subkey, policy_hyperparams, train_subs[0])
         else:
             policy_params = self._broadcast_pytree(guess)
             opt_state, opt_aux = self.init_optimizer(policy_params)
@@ -2728,8 +2556,7 @@ r"""
             pgpe_params, pgpe_opt_state, r_max = self.pgpe.initialize(key, policy_params)
             rolling_pgpe_loss = RollingMean(test_rolling_window)
         else:
-            pgpe_params, pgpe_opt_state, r_max = None, None, None
-            rolling_pgpe_loss = None
+            pgpe_params = pgpe_opt_state = r_max = rolling_pgpe_loss = None
         total_pgpe_it = 0
 
         # ======================================================================
@@ -2737,13 +2564,10 @@ r"""
         # ======================================================================
         
         # initialize running statistics
-        if self.parallel_updates is None:
-            best_params = policy_params
-        else:
-            best_params = pytree_at(policy_params, 0)
+        best_params = pytree_at(policy_params, 0)
         best_loss, pbest_loss, best_grad = np.inf, np.inf, None
+        best_index = 0
         last_iter_improve = 0
-        no_progress_count = 0
         rolling_test_loss = RollingMean(test_rolling_window)
         status = JaxPlannerStatus.NORMAL
         progress_percent = 0
@@ -2753,10 +2577,14 @@ r"""
             stopping_rule.reset()
             
         # initialize dashboard 
+        dashboard = self.dashboard
         if dashboard is not None:
             dashboard_id = dashboard.register_experiment(
-                dashboard_id, dashboard.get_planner_info(self), 
-                key=dash_key, viz=self.dashboard_viz)
+                dashboard_id, 
+                dashboard.get_planner_info(self), 
+                key=dash_key, 
+                viz=self.dashboard_viz
+            )
         
         # progress bar
         if print_progress:
@@ -2768,8 +2596,8 @@ r"""
 
         # error handlers (to avoid spam messaging)
         policy_constraint_msg_shown = False
-        jax_train_msg_shown = False
-        jax_test_msg_shown = False
+        jax_train_msg_shown = set()
+        jax_test_msg_shown = set()
         
         # ======================================================================
         # MAIN TRAINING LOOP BEGINS
@@ -2778,7 +2606,7 @@ r"""
         for it in range(epochs):
             
             # ==================================================================
-            # NEXT GRADIENT DESCENT STEP
+            # JAXPLAN GRADIENT DESCENT STEP
             # ==================================================================
             
             status = JaxPlannerStatus.NORMAL
@@ -2787,135 +2615,113 @@ r"""
             key, subkey = random.split(key)
             (policy_params, converged, opt_state, opt_aux, train_loss, train_log, 
              model_params, zero_grads) = self.update(
-                 subkey, policy_params, policy_hyperparams, train_subs, model_params, 
-                 opt_state, opt_aux)
+                 subkey, policy_params, policy_hyperparams, *train_subs, model_params, 
+                 opt_state, opt_aux
+            )
             
             # update the preprocessor
             if self.preprocessor is not None:                
                 policy_hyperparams[preproc_key] = self.preprocessor.update(
-                    train_log['fluents'], policy_hyperparams[preproc_key])
+                    train_log['fluents'], policy_hyperparams[preproc_key]
+                )
 
             # evaluate
             test_loss, (test_log, model_params_test) = self.test_loss(
-                subkey, policy_params, policy_hyperparams, test_subs, model_params_test)
-            if self.parallel_updates:
-                train_loss = np.asarray(train_loss)
-                test_loss = np.asarray(test_loss)
+                subkey, policy_params, policy_hyperparams, *test_subs, model_params_test
+            )
+            train_loss = np.asarray(train_loss)
+            test_loss = np.asarray(test_loss)
             test_loss_smooth = rolling_test_loss.update(test_loss)
 
-            # pgpe update of the plan
+            # ==================================================================
+            # PGPE GRADIENT DESCENT STEP
+            # ==================================================================
+            
             pgpe_improve = False
             if self.use_pgpe:
+
+                # pgpe update of the plan
                 key, subkey = random.split(key)
-                pgpe_params, r_max, pgpe_opt_state, pgpe_param, pgpe_converged = \
-                    self.pgpe.update(subkey, pgpe_params, r_max, progress_percent, 
-                                     policy_hyperparams, test_subs, model_params_test, 
-                                     pgpe_opt_state)
+                pgpe_params, r_max, pgpe_opt_state, pgpe_param, pgpe_converged = self.pgpe.update(
+                    subkey, pgpe_params, r_max, progress_percent, 
+                    policy_hyperparams, *test_subs, model_params_test, pgpe_opt_state
+                )
                 
                 # evaluate
                 pgpe_loss, _ = self.test_loss(
-                    subkey, pgpe_param, policy_hyperparams, test_subs, model_params_test)
-                if self.parallel_updates:
-                    pgpe_loss = np.asarray(pgpe_loss)
+                    subkey, pgpe_param, policy_hyperparams, *test_subs, model_params_test)
+                pgpe_loss = np.asarray(pgpe_loss)
                 pgpe_loss_smooth = rolling_pgpe_loss.update(pgpe_loss)
                 pgpe_return = -pgpe_loss_smooth
 
                 # replace JaxPlan with PGPE if new minimum reached or train loss invalid
-                if self.parallel_updates is None:
-                    if pgpe_loss_smooth < best_loss or not np.isfinite(train_loss):
-                        policy_params = pgpe_param
-                        test_loss, test_loss_smooth = pgpe_loss, pgpe_loss_smooth
-                        converged = pgpe_converged
-                        pgpe_improve = True
-                        total_pgpe_it += 1
-                else:
-                    pgpe_mask = (pgpe_loss_smooth < pbest_loss) | ~np.isfinite(train_loss)
-                    if np.any(pgpe_mask):
-                        policy_params, test_loss, test_loss_smooth, converged = \
-                            self.merge_pgpe(pgpe_mask, pgpe_param, policy_params, 
-                                            pgpe_loss, test_loss, 
-                                            pgpe_loss_smooth, test_loss_smooth, 
-                                            pgpe_converged, converged)
-                        pgpe_improve = True
-                        total_pgpe_it += 1                        
+                pgpe_mask = (pgpe_loss_smooth < pbest_loss) | ~np.isfinite(train_loss)
+                if np.any(pgpe_mask):
+                    policy_params, test_loss, test_loss_smooth, converged = self.merge_pgpe(
+                        pgpe_mask, pgpe_param, policy_params, 
+                        pgpe_loss, test_loss, pgpe_loss_smooth, test_loss_smooth, 
+                        pgpe_converged, converged
+                    )
+                    pgpe_improve = True
+                    total_pgpe_it += 1  
             else:
-                pgpe_loss, pgpe_loss_smooth, pgpe_return = None, None, None
+                pgpe_loss = pgpe_loss_smooth = pgpe_return = None
 
-            # evaluate test losses and record best parameters so far
-            if self.parallel_updates is None:
-                if test_loss_smooth < best_loss:
-                    best_params, best_loss, best_grad = \
-                        policy_params, test_loss_smooth, train_log['grad']
-                    pbest_loss = best_loss
-            else:
-                best_index = np.argmin(test_loss_smooth)
-                if test_loss_smooth[best_index] < best_loss:
-                    best_params = pytree_at(policy_params, best_index)
-                    best_grad = pytree_at(train_log['grad'], best_index)
-                    best_loss = test_loss_smooth[best_index]
-                pbest_loss = np.minimum(pbest_loss, test_loss_smooth)
-            
             # ==================================================================
             # STATUS CHECKS AND LOGGING
             # ==================================================================
-            
+
+            # evaluate test losses and record best parameters so far
+            best_index = np.argmin(test_loss_smooth)
+            if test_loss_smooth[best_index] < best_loss:
+                best_params = pytree_at(policy_params, best_index)
+                best_grad = pytree_at(train_log['grad'], best_index)
+                best_loss = test_loss_smooth[best_index]
+                last_iter_improve = it
+            pbest_loss = np.minimum(pbest_loss, test_loss_smooth)
+                        
             # no progress
-            no_progress_flag = (not pgpe_improve) and np.all(zero_grads)
-            if no_progress_flag:
+            if (not pgpe_improve) and np.all(zero_grads):
                 status = JaxPlannerStatus.NO_PROGRESS
             
             # constraint satisfaction problem
             if not np.all(converged):                
                 if progress_bar is not None and not policy_constraint_msg_shown:
-                    message = termcolor.colored(
-                        '[FAIL] Policy update failed to satisfy action constraints.',
-                        'red')
-                    progress_bar.write(message)
+                    progress_bar.write(termcolor.colored(
+                        '[FAIL] Policy update violated action constraints.', 'red'
+                    ))
                     policy_constraint_msg_shown = True
                 status = JaxPlannerStatus.PRECONDITION_POSSIBLY_UNSATISFIED
             
             # numerical error
+            invalid_loss = not np.any(np.isfinite(train_loss))
             if self.use_pgpe:
-                invalid_loss = not (np.any(np.isfinite(train_loss)) or 
-                                    np.any(np.isfinite(pgpe_loss)))
-            else:
-                invalid_loss = not np.any(np.isfinite(train_loss))
+                invalid_loss = invalid_loss and not np.any(np.isfinite(pgpe_loss))
             if invalid_loss:
                 if progress_bar is not None:
-                    message = termcolor.colored(
-                        f'[FAIL] Planner aborted due to invalid train loss {train_loss}.', 
-                        'red')
-                    progress_bar.write(message)
+                    progress_bar.write(termcolor.colored(
+                        f'[FAIL] Planner aborted early with train loss {train_loss}.', 'red'
+                    ))
                 status = JaxPlannerStatus.INVALID_GRADIENT
               
             # problem in the model compilation
             if progress_bar is not None:
 
                 # train model
-                if not jax_train_msg_shown:
-                    messages = set()
-                    for error_code in np.unique(train_log['error']):
-                        messages.update(JaxRDDLCompiler.get_error_messages(error_code))
-                    if messages:
-                        messages = '\n    '.join(messages)
-                        message = termcolor.colored(
-                            f'[FAIL] Compiler encountered the following '
-                            f'error(s) in the training model:\n    {messages}', 'red')
-                    progress_bar.write(message)  
-                    jax_train_msg_shown = True
+                for error_code in np.unique(train_log['error']):
+                    if error_code not in jax_train_msg_shown:
+                        jax_train_msg_shown.add(error_code)
+                        for message in JaxRDDLCompiler.get_error_messages(error_code):
+                            progress_bar.write(termcolor.colored(
+                                '[FAIL] Training model error: ' + message, 'red'))
 
                 # test model
-                if not jax_test_msg_shown:
-                    messages = set()
-                    for error_code in np.unique(test_log['error']):
-                        messages.update(JaxRDDLCompiler.get_error_messages(error_code))
-                    if messages:
-                        messages = '\n    '.join(messages)
-                        message = termcolor.colored(
-                            f'[FAIL] Compiler encountered the following '
-                            f'error(s) in the testing model:\n    {messages}', 'red')
-                        progress_bar.write(message)    
-                        jax_test_msg_shown = True      
+                for error_code in np.unique(test_log['error']):
+                    if error_code not in jax_test_msg_shown:
+                        jax_test_msg_shown.add(error_code)
+                        for message in JaxRDDLCompiler.get_error_messages(error_code):
+                            progress_bar.write(termcolor.colored(
+                                '[FAIL] Testing model error: ' + message, 'red'))
         
             # reached computation budget
             elapsed = time.time() - start_time - elapsed_outside_loop
@@ -2928,66 +2734,53 @@ r"""
             progress_percent = 100 * min(
                 1, max(0, elapsed / train_seconds, it / (epochs - 1)))
             callback = {
-                'status': status,
                 'iteration': it,
+                'elapsed_time': elapsed,
+                'progress': progress_percent,
+                'status': status,
+                'key': key,
                 'train_return':-train_loss,
                 'test_return':-test_loss_smooth,
                 'best_return':-best_loss,
                 'pgpe_return': pgpe_return,
-                'params': policy_params,
-                'best_params': best_params,
-                'pgpe_params': pgpe_params,
                 'last_iteration_improved': last_iter_improve,
                 'pgpe_improved': pgpe_improve,
+                'params': policy_params,
+                'best_params': best_params,
+                'best_index': best_index,
+                'pgpe_params': pgpe_params,
+                'model_params': model_params,
+                'policy_hyperparams': policy_hyperparams,
                 'grad': train_log['grad'],
                 'best_grad': best_grad,
-                'updates': train_log['updates'],
-                'elapsed_time': elapsed,
-                'key': key,
-                'model_params': model_params,
-                'progress': progress_percent,
                 'train_log': train_log,
-                'policy_hyperparams': policy_hyperparams,
-                **test_log
+                'test_log': test_log
             }
-
-            # hard restart
-            if guess is None and no_progress_flag:
-                no_progress_count += 1
-                if no_progress_count > restart_epochs:
-                    key, subkey = random.split(key)
-                    policy_params, opt_state, opt_aux = self.initialize(
-                        subkey, policy_hyperparams, train_subs)
-                    no_progress_count = 0
-                    if self.print_warnings and progress_bar is not None:
-                        message = termcolor.colored(
-                            f'[INFO] Optimizer restarted at iteration {it} '
-                            f'due to lack of progress.', 'green')
-                        progress_bar.write(message)
-            else:
-                no_progress_count = 0
 
             # stopping condition reached
             if stopping_rule is not None and stopping_rule.monitor(callback):
                 if self.print_warnings and progress_bar is not None:
-                    message = termcolor.colored(
-                        '[SUCC] Stopping rule has been reached.', 'green')
-                    progress_bar.write(message)
+                    progress_bar.write(termcolor.colored(
+                        '[SUCC] Stopping rule has been reached.', 'green'
+                    ))
                 callback['status'] = status = JaxPlannerStatus.STOPPING_RULE_REACHED  
             
             # if the progress bar is used
             if print_progress:
                 progress_bar.set_description(
-                    f'{position_str} {it:6} it / {-np.min(train_loss):14.5f} train / '
-                    f'{-np.min(test_loss_smooth):14.5f} test / {-best_loss:14.5f} best / '
-                    f'{status.value} status / {total_pgpe_it:6} pgpe',
-                    refresh=False)
+                    f'{position_str} {it} it | {-np.min(train_loss):13.5f} train | '
+                    f'{-np.min(test_loss_smooth):13.5f} test | '
+                    f'{-best_loss:13.5f} best | '
+                    f'{total_pgpe_it} pgpe | {status.value} status', 
+                    refresh=False
+                )
                 progress_bar.set_postfix_str(
-                    f'{(it + 1) / (elapsed + 1e-6):.2f}it/s', refresh=False)
+                    f'{(it + 1) / (elapsed + 1e-6):.2f}it/s', refresh=False
+                )
                 progress_bar.update(progress_percent - progress_bar.n)
             
             # dashboard
-            if dashboard is not None:
+            if dashboard is not None:            
                 dashboard.update_experiment(dashboard_id, callback)
                         
             # yield the callback
@@ -3006,28 +2799,51 @@ r"""
         # release resources
         if print_progress:
             progress_bar.close()
-            print()
         
         # summarize and test for convergence
         if print_summary:
-            grad_norm = jax.tree_util.tree_map(
-                lambda x: np.linalg.norm(x).item(), best_grad)
+
+            # calculate gradient norm
+            grad_norm = jax.tree_util.tree_map(lambda x: np.linalg.norm(x).item(), best_grad)
+            grad_norms = jax.tree_util.tree_leaves(grad_norm)
+            max_grad_norm = max(grad_norms) if grad_norms else np.nan
+
+            # calculate best policy return
+            _, (final_log, _) = self.test_loss(
+                key, self._broadcast_pytree(best_params), policy_hyperparams, 
+                *test_subs, model_params_test
+            )
+            best_returns = np.ravel(np.sum(final_log['reward'], axis=2))
+            mean, rlo, rhi = self.ci_bootstrap(best_returns)            
+
+            # diagnosis
             diagnosis = self._perform_diagnosis(
                 last_iter_improve, -np.min(train_loss), -np.min(test_loss_smooth), 
-                -best_loss, grad_norm)
-            print(f'Summary of optimization:\n'
-                  f'    status        ={status}\n'
-                  f'    time          ={elapsed:.3f} sec.\n'
-                  f'    iterations    ={it}\n'
-                  f'    best objective={-best_loss:.6f}\n'
-                  f'    best grad norm={grad_norm}\n'
-                  f'diagnosis: {diagnosis}\n')
+                -best_loss, max_grad_norm
+            )
+            print(
+                f'[INFO] Summary of optimization:\n'
+                f'    status:           {status}\n'
+                f'    time:             {elapsed:.2f} seconds\n'
+                f'    iterations:       {it}\n'
+                f'    best objective:   {-best_loss:.5f}\n'
+                f'    best grad norm:   {max_grad_norm:.5f}\n'
+                f'    best cuml reward: Mean = {mean:.5f}, 95% CI [{rlo:.5f}, {rhi:.5f}]\n'
+                f'    diagnosis:        {diagnosis}\n'
+            )
     
-    def _perform_diagnosis(self, last_iter_improve,
-                           train_return, test_return, best_return, grad_norm):
-        grad_norms = jax.tree_util.tree_leaves(grad_norm)
-        max_grad_norm = max(grad_norms) if grad_norms else np.nan
-        grad_is_zero = np.allclose(max_grad_norm, 0)
+    @staticmethod
+    def ci_bootstrap(returns, confidence=0.95, n_boot=10000):
+        means = np.zeros((n_boot,))
+        for i in range(n_boot):
+            means[i] = np.mean(np.random.choice(returns, size=len(returns), replace=True))
+        lower = np.percentile(means, (1 - confidence) / 2 * 100)
+        upper = np.percentile(means, (1 + confidence) / 2 * 100)
+        mean = np.mean(returns)
+        return mean, lower, upper
+
+    def _perform_diagnosis(self, last_iter_improve, train_return, test_return, best_return, 
+                           max_grad_norm):
         
         # divergence if the solution is not finite
         if not np.isfinite(train_return):
@@ -3036,64 +2852,61 @@ r"""
         # hit a plateau is likely IF:
         # 1. planner does not improve at all
         # 2. the gradient norm at the best solution is zero
+        grad_is_zero = np.allclose(max_grad_norm, 0)
         if last_iter_improve <= 1:
             if grad_is_zero:
                 return termcolor.colored(
-                    f'[FAIL] No progress was made '
-                    f'and max grad norm {max_grad_norm:.6f} was zero: '
-                    f'solver likely stuck in a plateau.', 'red')
+                    f'[FAIL] No progress and ||g||={max_grad_norm:.4f}, '
+                    f'solver initialized in a plateau.', 'red'
+                )
             else:
                 return termcolor.colored(
-                    f'[FAIL] No progress was made '
-                    f'but max grad norm {max_grad_norm:.6f} was non-zero: '
-                    f'learning rate or other hyper-parameters could be suboptimal.', 
-                    'red')
+                    f'[FAIL] No progress and ||g||={max_grad_norm:.4f}, '
+                    f'adjust learning rate or other parameters.', 'red'
+                )
         
         # model is likely poor IF:
         # 1. the train and test return disagree
-        validation_error = 100 * abs(test_return - train_return) / \
-                            max(abs(train_return), abs(test_return))
-        if not (validation_error < 20):
+        validation_error = (abs(test_return - train_return) / 
+                            max(abs(train_return), abs(test_return)))
+        if not (validation_error < 0.2):
             return termcolor.colored(
-                f'[WARN] Progress was made '
-                f'but relative train-test error {validation_error:.6f} was high: '
-                f'poor model relaxation around solution or batch size too small.', 
-                'yellow')
+                f'[WARN] Progress but large rel. train/test error {validation_error:.4f}, '
+                f'adjust model or batch size.', 'yellow'
+            )
         
         # model likely did not converge IF:
         # 1. the max grad relative to the return is high
         if not grad_is_zero:
-            return_to_grad_norm = abs(best_return) / max_grad_norm
-            if not (return_to_grad_norm > 1):
+            if not (abs(best_return) > 1.0 * max_grad_norm):
                 return termcolor.colored(
-                    f'[WARN] Progress was made '
-                    f'but max grad norm {max_grad_norm:.6f} was high: '
-                    f'solution locally suboptimal, relaxed model nonsmooth around solution, '
-                    f'or batch size too small.', 'yellow')
+                    f'[WARN] Progress but large ||g||={max_grad_norm:.4f}, '
+                    f'adjust learning rate or budget.', 'yellow'
+                )
         
         # likely successful
         return termcolor.colored(
-            '[SUCC] Planner converged successfully '
-            '(note: not all problems can be ruled out).', 'green')
+            '[SUCC] No convergence problems found.', 'green'
+        )
         
     def get_action(self, key: random.PRNGKey,
                    params: Pytree,
                    step: int,
-                   subs: Dict[str, Any],
+                   state: Dict[str, Any],
                    policy_hyperparams: Optional[Dict[str, Any]]=None) -> Dict[str, Any]:
         '''Returns an action dictionary from the policy or plan with the given parameters.
         
         :param key: the JAX PRNG key
         :param params: the trainable parameter PyTree of the policy
         :param step: the time step at which decision is made
-        :param subs: the dict of pvariables
+        :param state: the dict of state p-variables
         :param policy_hyperparams: hyper-parameters for the policy/plan, such as
         weights for sigmoid wrapping boolean actions (optional)
         '''
-        subs = subs.copy()
+        state = state.copy()
         
-        # check compatibility of the subs dictionary
-        for (var, values) in subs.items():
+        # check compatibility of the state dictionary
+        for (var, values) in state.items():
             
             # must not be grounded
             if RDDLPlanningModel.FLUENT_SEP in var or RDDLPlanningModel.OBJECT_SEP in var:
@@ -3107,18 +2920,19 @@ r"""
             dtype = np.result_type(values)
             if not np.issubdtype(dtype, np.number) and not np.issubdtype(dtype, np.bool_):
                 if step == 0 and var in self.rddl.observ_fluents:
-                    subs[var] = self.test_compiled.init_values[var]
+                    state[var] = self.test_compiled.init_values[var]
                 else:
                     if dtype.type is np.str_:
                         prange = self.rddl.variable_ranges[var]
-                        subs[var] = self.rddl.object_string_to_index_array(prange, subs[var])     
+                        state[var] = self.rddl.object_string_to_index_array(prange, state[var])     
                     else:               
                         raise ValueError(
                             f'Values {values} assigned to p-variable <{var}> are '
-                            f'non-numeric of type {dtype}.')
+                            f'non-numeric of type {dtype}.'
+                        )
             
         # cast device arrays to numpy
-        actions = self.test_policy(key, params, policy_hyperparams, step, subs)
+        actions = self.test_policy(key, params, policy_hyperparams, step, state)
         actions = jax.tree_util.tree_map(np.asarray, actions)
         return actions      
        
@@ -3262,13 +3076,20 @@ class JaxOnlineController(BaseAgent):
         while attempts < self.max_attempts and callback['iteration'] <= 1:
             attempts += 1
             if self.planner.print_warnings:
-                message = termcolor.colored(
-                    f'[WARN] JIT compilation dominated the execution time: '
+                print(termcolor.colored(
+                    f'[INFO] JIT compilation dominated the execution time: '
                     f'executing the optimizer again on the traced model '
-                    f'[attempt {attempts}].', 'yellow')
-                print(message)
+                    f'[attempt {attempts}].', 'dark_grey'
+                ))
             callback = planner.optimize(
-                key=self.key, guess=self.guess, subs=state, **self.train_kwargs)    
+                key=self.key, guess=self.guess, subs=state, **self.train_kwargs)   
+        if callback['iteration'] <= 1 and self.planner.print_warnings:
+            print(termcolor.colored(
+                f'[FAIL] JIT compilation dominated the execution time and '
+                f'ran out of attempts: increase max_attempts or the training time.', 'red'
+            )) 
+        
+        # use the last callback obtained
         self.callback = callback
         params = callback['best_params']
         if not self.hyperparams_given:

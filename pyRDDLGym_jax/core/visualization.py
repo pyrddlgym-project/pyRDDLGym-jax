@@ -18,6 +18,8 @@ import os
 from datetime import datetime
 import math
 import numpy as np
+import io
+import pickle
 import time
 import threading
 from typing import Any, Dict, Optional, Tuple, TYPE_CHECKING
@@ -29,7 +31,7 @@ log = logging.getLogger('werkzeug')
 log.setLevel(logging.ERROR)
 
 import dash
-from dash.dcc import Interval, Graph, Store
+from dash.dcc import Download, Interval, Graph, Store
 from dash.dependencies import Input, Output, State, ALL
 from dash.html import Div, B, H4, P, Hr
 import dash_bootstrap_components as dbc
@@ -48,6 +50,7 @@ POLICY_DIST_PLOTS_PER_ROW = 6
 ACTION_HEATMAP_HEIGHT = 400
 PROGRESS_FOR_NEXT_RETURN_DIST = 2
 PROGRESS_FOR_NEXT_POLICY_DIST = 10
+PROGRESS_FOR_NEXT_BASIC_TIME_CURVE = 0.05
 REWARD_ERROR_DIST_SUBPLOTS = 20
 MODEL_STATE_ERROR_HEIGHT = 300
 POLICY_STATE_VIZ_MAX_HEIGHT = 800
@@ -77,6 +80,7 @@ class JaxPlannerDashboard:
         self.test_return = {}
         self.train_return = {}
         self.pgpe_return = {}
+        self.basic_time_curve_last_progress = {}
         self.return_dist = {}
         self.return_dist_ticks = {}
         self.return_dist_last_progress = {}
@@ -91,7 +95,8 @@ class JaxPlannerDashboard:
         self.train_reward_dist = {}
         self.test_reward_dist = {}
         self.train_state_fluents = {}
-        self.test_state_fluents = {}
+        self.train_state_output = {}
+        self.test_state_output = {}
         
         self.tuning_gp_heatmaps = None
         self.tuning_gp_targets = None
@@ -269,6 +274,8 @@ class JaxPlannerDashboard:
                              dbc.DropdownMenuItem("30s", id='30sec'),
                              dbc.DropdownMenuItem("1m", id='1min'),
                              dbc.DropdownMenuItem("5m", id='5min'),
+                             dbc.DropdownMenuItem("30m", id='30min'),
+                             dbc.DropdownMenuItem("1h", id='1h'),
                              dbc.DropdownMenuItem("1d", id='1day')],
                             label="Refresh: 2s",
                             id='refresh-rate-dropdown',
@@ -328,6 +335,13 @@ class JaxPlannerDashboard:
                         # policy
                         dbc.Tab(dbc.Card(
                             dbc.CardBody([
+                                dbc.Row([
+                                    dbc.Col([
+                                        dbc.Button('Save Policy Weights',
+                                                    id='policy-save-button'),
+                                        Download(id="download-policy")
+                                    ], width='auto')
+                                ]),
                                 dbc.Row([
                                     Graph(id='action-output'),
                                 ]),
@@ -506,10 +520,12 @@ class JaxPlannerDashboard:
              Input("30sec", "n_clicks"),
              Input("1min", "n_clicks"),
              Input("5min", "n_clicks"),
+             Input("30min", "n_clicks"),
+             Input("1h", "n_clicks"),
              Input("1day", "n_clicks")],
             [State('refresh-interval', 'data')]
         )
-        def click_refresh_rate(n05, n1, n2, n5, n10, n30, n1m, n5m, nd, data):
+        def click_refresh_rate(n05, n1, n2, n5, n10, n30, n1m, n5m, n30m, n1h, nd, data):
             ctx = dash.callback_context 
             if not ctx.triggered: 
                 return data 
@@ -530,6 +546,10 @@ class JaxPlannerDashboard:
                 return 60000
             elif button_id == '5min':
                 return 300000
+            elif button_id == '30min':
+                return 1800000
+            elif button_id == '1h':
+                return 3600000
             elif button_id == '1day':
                 return 86400000
             return data            
@@ -562,8 +582,14 @@ class JaxPlannerDashboard:
                 return 'Refresh: 1m'
             elif selected_interval == 300000:
                 return 'Refresh: 5m'
+            elif selected_interval == 1800000:
+                return 'Refresh: 30m'
+            elif selected_interval == 3600000:
+                return 'Refresh: 1h'
+            elif selected_interval == 86400000:
+                return 'Refresh: 1day'
             else:
-                return 'Refresh: 2s'
+                return 'Refresh: n/a'
         
         # update the experiments per page
         @app.callback(
@@ -758,7 +784,7 @@ class JaxPlannerDashboard:
                 if checked and self.action_output[row] is not None:
                     num_plots = len(self.action_output[row])
                     titles = []
-                    for (_, act, _) in self.action_output[row]:
+                    for act in self.action_output[row].keys():
                         titles.append(f'Values of Action-Fluents {act}')
                         titles.append(f'Std. Dev. of Action-Fluents {act}')
                     fig = make_subplots(
@@ -766,8 +792,7 @@ class JaxPlannerDashboard:
                         shared_xaxes=True, horizontal_spacing=0.15,
                         subplot_titles=titles
                     )
-                    for (i, (action_output, action, action_labels)) \
-                    in enumerate(self.action_output[row]):
+                    for (i, action_output) in enumerate(self.action_output[row].values()):
                         action_values = np.mean(1. * action_output, axis=0).T
                         action_errors = np.std(1. * action_output, axis=0).T
                         fig.add_trace(go.Heatmap(
@@ -984,6 +1009,21 @@ class JaxPlannerDashboard:
                     return fig
             return dash.no_update
         
+        # save policy button
+        @app.callback(
+            Output('download-policy', 'data'),
+            Input("policy-save-button", "n_clicks"),
+            prevent_initial_call=True
+        )
+        def save_policy_weights(n_clicks):
+            for (row, checked) in self.checked.copy().items():
+                if checked:
+                    bytes_io = io.BytesIO()
+                    pickle.dump(self.policy_params[row], bytes_io)
+                    bytes_io.seek(0)
+                    return dash.dcc.send_bytes(bytes_io.read(), "policy_params.pkl")
+            return dash.no_update
+
         # update the model parameter information
         @app.callback(
             Output('model-params-dropdown', 'children'),
@@ -1136,42 +1176,40 @@ class JaxPlannerDashboard:
             if not state: return fig
             for (row, checked) in self.checked.copy().items():
                 if checked and row in self.train_state_fluents:
-                    train_values = self.train_state_fluents[row][state]
-                    test_values = self.test_state_fluents[row][state]
-                    train_values = 1 * train_values.reshape(train_values.shape[:2] + (-1,))
-                    test_values = 1 * test_values.reshape(test_values.shape[:2] + (-1,))
-                    num_epochs, num_states = train_values.shape[1:]
-                    step = 1
-                    if num_epochs > REWARD_ERROR_DIST_SUBPLOTS:
-                        step = num_epochs // REWARD_ERROR_DIST_SUBPLOTS
+                    titles = [f'Values of Train State-Fluents {state}',
+                              f'Values of Test State-Fluents {state}']
                     fig = make_subplots(
-                        rows=num_states, cols=1, shared_xaxes=True,
-                        subplot_titles=self.rddl[row].variable_groundings[state]
+                        rows=1, cols=2,
+                        shared_xaxes=True, horizontal_spacing=0.15,
+                        subplot_titles=titles
                     )
-                    for istate in range(num_states):
-                        for epoch in range(0, num_epochs, step):
-                            fig.add_trace(go.Violin(
-                                y=train_values[:, epoch, istate], x0=epoch,
-                                side='negative', line_color='red',
-                                name=f'Train Epoch {epoch + 1}'
-                            ), row=istate + 1, col=1)
-                            fig.add_trace(go.Violin(
-                                y=test_values[:, epoch, istate], x0=epoch,
-                                side='positive', line_color='blue',
-                                name=f'Test Epoch {epoch + 1}'
-                            ), row=istate + 1, col=1)
-                    fig.update_traces(meanline_visible=True)
+                    train_state_output = self.train_state_output[row][state]
+                    test_state_output = self.test_state_output[row][state]
+                    train_state_values = np.mean(1. * train_state_output, axis=0).T
+                    test_state_values = np.mean(1. * test_state_output, axis=0).T
+                    fig.add_trace(go.Heatmap(
+                        z=train_state_values,
+                        x=np.arange(train_state_values.shape[1]),
+                        y=np.arange(train_state_values.shape[0]),
+                        colorscale='Blues', colorbar_x=0.45,
+                        colorbar_len=0.8 / 1,
+                        colorbar_y=1 - (0.5) / 1
+                    ), row=1, col=1)
+                    fig.add_trace(go.Heatmap(
+                        z=test_state_values,
+                        x=np.arange(test_state_values.shape[1]),
+                        y=np.arange(test_state_values.shape[0]),
+                        colorscale='Blues', colorbar_len=0.8 / 1,
+                        colorbar_y=1 - (0.5) / 1
+                    ), row=1, col=2)
                     fig.update_layout(
-                        title=dict(text=(f"Distribution of State-Fluent {state} "
-                                         f"in Relaxed Model vs True Model")),
+                        title=f"Values of State-Fluents {state}",
                         xaxis=dict(title=dict(text="Decision Epoch")),
-                        yaxis=dict(title=dict(text="State-Fluent Value")),
                         font=dict(size=PLOT_AXES_FONT_SIZE),
-                        height=MODEL_STATE_ERROR_HEIGHT * num_states,
-                        violingap=0, violinmode='overlay', showlegend=False,
-                        legend=dict(bgcolor='rgba(0,0,0,0)'),
+                        height=ACTION_HEATMAP_HEIGHT * 1,
+                        showlegend=False,
                         template="plotly_white"
-                    )
+                    )          
                     break
             return fig
                 
@@ -1363,6 +1401,7 @@ class JaxPlannerDashboard:
         self.train_return[experiment_id] = []
         self.test_return[experiment_id] = []
         self.pgpe_return[experiment_id] = []
+        self.basic_time_curve_last_progress[experiment_id] = 0
         self.return_dist_ticks[experiment_id] = []
         self.return_dist_last_progress[experiment_id] = 0
         self.return_dist[experiment_id] = []
@@ -1410,64 +1449,63 @@ class JaxPlannerDashboard:
         '''Pass new information and update the dashboard for a given experiment.'''
         
         # data for return curves
+        progress = callback['progress']
         iteration = callback['iteration']
-        self.xticks[experiment_id].append(iteration)
-        self.train_return[experiment_id].append(callback['train_return'])    
-        self.test_return[experiment_id].append(callback['best_return'])
-        self.pgpe_return[experiment_id].append(callback['pgpe_return'])
+        if progress - self.basic_time_curve_last_progress[experiment_id] >= PROGRESS_FOR_NEXT_BASIC_TIME_CURVE:
+            self.xticks[experiment_id].append(iteration)
+            self.train_return[experiment_id].append(np.min(callback['train_return']))  
+            self.test_return[experiment_id].append(np.min(callback['best_return']))
+            self.pgpe_return[experiment_id].append(np.min(callback['pgpe_return']))
+            for (key, values) in callback['model_params'].items():
+                self.relaxed_exprs_values[experiment_id][key].append(values[0])
+            self.basic_time_curve_last_progress[experiment_id] = progress
         
         # data for return distributions
-        progress = int(callback['progress'])
-        if progress - self.return_dist_last_progress[experiment_id] \
-            >= PROGRESS_FOR_NEXT_RETURN_DIST:
+        if progress - self.return_dist_last_progress[experiment_id] >= PROGRESS_FOR_NEXT_RETURN_DIST:
             self.return_dist_ticks[experiment_id].append(iteration)
             self.return_dist[experiment_id].append(
-                np.sum(np.asarray(callback['reward']), axis=1))
+                np.sum(np.mean(callback['test_log']['reward'], axis=0), axis=1))
             self.return_dist_last_progress[experiment_id] = progress
         
-        # data for action heatmaps
-        action_output = []
-        rddl = self.rddl[experiment_id]
-        for action in rddl.action_fluents:
-            action_values = np.asarray(callback['fluents'][action])
-            action_output.append(
-                (action_values.reshape(action_values.shape[:2] + (-1,)),
-                 action,
-                 rddl.variable_groundings[action])
-            )
-        self.action_output[experiment_id] = action_output
-        
         # data for policy weight distributions
-        if progress - self.policy_params_last_progress[experiment_id] \
-            >= PROGRESS_FOR_NEXT_POLICY_DIST:
+        if progress - self.policy_params_last_progress[experiment_id] >= PROGRESS_FOR_NEXT_POLICY_DIST:
             self.policy_params_ticks[experiment_id].append(iteration)
             self.policy_params[experiment_id].append(callback['best_params'])
             self.policy_params_last_progress[experiment_id] = progress
         
-        # data for model relaxations
-        model_params = callback['model_params']
-        for (key, values) in model_params.items():
-            expr_id = int(str(key).split('_')[0])
-            self.relaxed_exprs_values[experiment_id][expr_id].append(values.item())
-        self.train_reward_dist[experiment_id] = callback['train_log']['reward']
-        self.test_reward_dist[experiment_id] = callback['reward']
+        # data for action heatmaps
+        action_output = {}
+        rddl = self.rddl[experiment_id]
+        for action in rddl.action_fluents:
+            action_values = np.asarray(callback['test_log']['fluents'][action][0])
+            action_output[action] = action_values.reshape(action_values.shape[:2] + (-1,))
+        self.action_output[experiment_id] = action_output
+        
+        # data for state heatmaps
+        train_state_output = {}
+        test_state_output = {}
+        for state in rddl.state_fluents:
+            state_values = np.asarray(callback['train_log']['fluents'][state][0])
+            train_state_output[state] = state_values.reshape(state_values.shape[:2] + (-1,))
+            state_values = np.asarray(callback['test_log']['fluents'][state][0])
+            test_state_output[state] = state_values.reshape(state_values.shape[:2] + (-1,))
+        self.train_state_output[experiment_id] = train_state_output
+        self.test_state_output[experiment_id] = test_state_output
+        
+        # data for reward distributions
+        self.train_reward_dist[experiment_id] = np.mean(callback['train_log']['reward'], axis=0)
+        self.test_reward_dist[experiment_id] = np.mean(callback['test_log']['reward'], axis=0)
         self.train_state_fluents[experiment_id] = {
-            name: np.asarray(callback['train_log']['fluents'][name])
+            name: np.asarray(callback['train_log']['fluents'][name][0])
             for name in rddl.state_fluents
         }
-        self.test_state_fluents[experiment_id] = {
-            name: np.asarray(callback['fluents'][name])
-            for name in self.train_state_fluents[experiment_id]
-        }
-        
         # update experiment table info
         self.status[experiment_id] = str(callback['status']).split('.')[1]
         self.duration[experiment_id] = callback["elapsed_time"]
-        self.progress[experiment_id] = progress
+        self.progress[experiment_id] = int(progress)
         self.warnings = None
     
-    def update_tuning(self, optimizer: Any,
-                      bounds: Dict[str, Tuple[float, float]]) -> None:
+    def update_tuning(self, optimizer: Any, bounds: Dict[str, Tuple[float, float]]) -> None:
         '''Updates the hyper-parameter tuning plots.'''
         
         self.tuning_gp_heatmaps = []
@@ -1475,8 +1513,7 @@ class JaxPlannerDashboard:
         if not optimizer.res: return
         
         self.tuning_gp_targets = optimizer.space.target.reshape((-1,))
-        self.tuning_gp_predicted = \
-            optimizer._gp.predict(optimizer.space.params).reshape((-1,))
+        self.tuning_gp_predicted = optimizer._gp.predict(optimizer.space.params).reshape((-1,))
         self.tuning_gp_params = {name: optimizer.space.params[:, i] 
                                  for (i, name) in enumerate(optimizer.space.keys)}
         

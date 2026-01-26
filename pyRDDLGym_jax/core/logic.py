@@ -29,26 +29,16 @@
 #
 # ***********************************************************************
 
+import termcolor
+from typing import Any, Dict, Optional, Set, Tuple, Union
 
-from abc import ABCMeta, abstractmethod
-import traceback
-from typing import Callable, Dict, Tuple, Union
-
+import numpy as np
 import jax
 import jax.numpy as jnp
 import jax.random as random
 import jax.scipy as scipy 
 
-from pyRDDLGym.core.debug.exception import raise_warning
-
-# more robust approach - if user does not have this or broken try to continue
-try:
-    from tensorflow_probability.substrates import jax as tfp
-except Exception:
-    raise_warning('Failed to import tensorflow-probability: '
-                  'compilation of some probability distributions will fail.', 'red')
-    traceback.print_exc()
-    tfp = None
+from pyRDDLGym_jax.core.compiler import JaxRDDLCompiler
 
 
 def enumerate_literals(shape: Tuple[int, ...], axis: int, dtype: type=jnp.int32) -> jnp.ndarray:
@@ -59,1421 +49,1599 @@ def enumerate_literals(shape: Tuple[int, ...], axis: int, dtype: type=jnp.int32)
     return literals
 
 
-# ===========================================================================
-# RELATIONAL OPERATIONS
-# - abstract class
-# - sigmoid comparison
-#
-# ===========================================================================
+# branching sigmoid to help reduce numerical issues
+@jax.custom_jvp
+def stable_sigmoid(x: jnp.ndarray) -> jnp.ndarray:
+    return jnp.where(x >= 0, 1.0 / (1.0 + jnp.exp(-x)), jnp.exp(x) / (1.0 + jnp.exp(x)))
 
-class Comparison(metaclass=ABCMeta):
-    '''Base class for approximate comparison operations.'''
-    
-    @abstractmethod
-    def greater_equal(self, id, init_params):
-        pass
-    
-    @abstractmethod
-    def greater(self, id, init_params):
-        pass
-    
-    @abstractmethod
-    def equal(self, id, init_params):
-        pass
-    
-    @abstractmethod
-    def sgn(self, id, init_params):
-        pass
-    
-    @abstractmethod
-    def argmax(self, id, init_params):
-        pass
-    
 
-class SigmoidComparison(Comparison):
+@stable_sigmoid.defjvp
+def stable_sigmoid_jvp(primals, tangents):
+    (x,), (x_dot,) = primals, tangents
+    s = stable_sigmoid(x)
+    primal_out = s
+    tangent_out = x_dot * s * (1.0 - s)
+    return primal_out, tangent_out
+
+
+# branching tanh to help reduce numerical issues
+@jax.custom_jvp
+def stable_tanh(x: jnp.ndarray) -> jnp.ndarray:
+    ax = jnp.abs(x)
+    small = jnp.where(
+        ax < 20.0,
+        jnp.expm1(2.0 * ax) / (jnp.expm1(2.0 * ax) + 2.0),
+        1.0 - 2.0 * jnp.exp(-2.0 * ax)
+    )
+    return jnp.sign(x) * small
+
+
+@stable_tanh.defjvp
+def stable_tanh_jvp(primals, tangents):
+    (x,), (x_dot,) = primals, tangents
+    t = stable_tanh(x)
+    tangent_out = x_dot * (1.0 - t * t)
+    return t, tangent_out
+
+
+# it seems JAX uses the stability trick already
+def stable_softmax_weight_sum(logits: jnp.ndarray, 
+                              values: jnp.ndarray, 
+                              axis: Union[int, Tuple[int, ...]]) -> jnp.ndarray:
+    return jnp.sum(values * jax.nn.softmax(logits), axis=axis)
+
+
+class JaxRDDLCompilerWithGrad(JaxRDDLCompiler):
+    '''Compiles a RDDL AST representation to an equivalent JAX representation. 
+    Unlike its parent class, this class treats all fluents as real-valued, and
+    replaces all mathematical operations by equivalent ones with a well defined 
+    (e.g. non-zero) gradient where appropriate. 
+    '''
+    
+    def __init__(self, *args,
+                 cpfs_without_grad: Optional[Set[str]]=None,
+                 print_warnings: bool=True, 
+                 **kwargs) -> None:
+        '''Creates a new RDDL to Jax compiler, where operations that are not
+        differentiable are converted to approximate forms that have defined gradients.
+        
+        :param *args: arguments to pass to base compiler
+        :param cpfs_without_grad: which CPFs do not have gradients (use straight
+        through gradient trick)
+        :param print_warnings: whether to print warnings
+        :param *kwargs: keyword arguments to pass to base compiler
+        '''
+        super(JaxRDDLCompilerWithGrad, self).__init__(*args, **kwargs)
+        
+        if cpfs_without_grad is None:
+            cpfs_without_grad = set()
+        self.cpfs_without_grad = cpfs_without_grad
+        self.print_warnings = print_warnings
+        
+        # actions and CPFs must be continuous
+        pvars_cast = set()
+        for (var, values) in self.init_values.items():
+            self.init_values[var] = np.asarray(values, dtype=self.REAL) 
+            if not np.issubdtype(np.result_type(values), np.floating):
+                pvars_cast.add(var)
+        if self.print_warnings and pvars_cast:
+            print(termcolor.colored(
+                f'[INFO] Compiler will cast pvars {pvars_cast} to float.', 'dark_grey'))
+        
+    def get_kwargs(self) -> Dict[str, Any]:
+        kwargs = super().get_kwargs()
+        kwargs['cpfs_without_grad'] = self.cpfs_without_grad
+        kwargs['print_warnings'] = self.print_warnings
+        return kwargs
+
+    def _jax_stop_grad(self, jax_expr):        
+        def _jax_wrapped_stop_grad(fls, nfls, params, key):
+            sample, key, error, params = jax_expr(fls, nfls, params, key)
+            sample = jax.lax.stop_gradient(sample)
+            return sample, key, error, params
+        return _jax_wrapped_stop_grad
+        
+    def _compile_cpfs(self, aux):
+
+        # cpfs will all be cast to float
+        cpfs_cast = set()   
+        jax_cpfs = {}
+        for (_, cpfs) in self.levels.items():
+            for cpf in cpfs:
+                _, expr = self.rddl.cpfs[cpf]
+                jax_cpfs[cpf] = self._jax(expr, aux, dtype=self.REAL)
+                if self.rddl.variable_ranges[cpf] != 'real':
+                    cpfs_cast.add(cpf)
+                if cpf in self.cpfs_without_grad:
+                    jax_cpfs[cpf] = self._jax_stop_grad(jax_cpfs[cpf])
+                    
+        if self.print_warnings and cpfs_cast:
+            print(termcolor.colored(
+                f'[INFO] Compiler will cast CPFs {cpfs_cast} to float.', 'dark_grey'))
+        if self.print_warnings and self.cpfs_without_grad:
+            print(termcolor.colored(
+                f'[INFO] Gradient disabled for CPFs {self.cpfs_without_grad}.', 'dark_grey'))
+ 
+        return jax_cpfs
+    
+    def _jax_unary_with_param(self, jax_expr, jax_op):
+        def _jax_wrapped_unary_op_with_param(fls, nfls, params, key):
+            sample, key, err, params = jax_expr(fls, nfls, params, key)
+            sample = self.ONE * sample
+            sample, params = jax_op(sample, params)
+            return sample, key, err, params
+        return _jax_wrapped_unary_op_with_param
+    
+    def _jax_binary_with_param(self, jax_lhs, jax_rhs, jax_op):
+        def _jax_wrapped_binary_op_with_param(fls, nfls, params, key):
+            sample1, key, err1, params = jax_lhs(fls, nfls, params, key)
+            sample2, key, err2, params = jax_rhs(fls, nfls, params, key)
+            sample1 = self.ONE * sample1
+            sample2 = self.ONE * sample2
+            sample, params = jax_op(sample1, sample2, params)
+            err = err1 | err2
+            return sample, key, err, params
+        return _jax_wrapped_binary_op_with_param
+    
+    def _jax_unary_helper_with_param(self, expr, aux, jax_op):
+        JaxRDDLCompilerWithGrad._check_num_args(expr, 1)
+        arg, = expr.args
+        jax_arg = self._jax(arg, aux)
+        return self._jax_unary_with_param(jax_arg, jax_op)
+    
+    def _jax_binary_helper_with_param(self, expr, aux, jax_op):
+        JaxRDDLCompilerWithGrad._check_num_args(expr, 2)
+        lhs, rhs = expr.args
+        jax_lhs = self._jax(lhs, aux)
+        jax_rhs = self._jax(rhs, aux)
+        return self._jax_binary_with_param(jax_lhs, jax_rhs, jax_op)
+
+    def _jax_kron(self, expr, aux):
+        aux['overriden'][expr.id] = __class__.__name__
+        arg, = expr.args
+        arg = self._jax(arg, aux)
+        return arg
+
+
+# ===============================================================================
+# relational relaxations
+# ===============================================================================
+
+# https://arxiv.org/abs/2110.05651
+class SigmoidRelational(JaxRDDLCompilerWithGrad):
     '''Comparison operations approximated using sigmoid functions.'''
     
-    def __init__(self, weight: float=10.0) -> None:
-        self.weight = float(weight)
-        
-    # https://arxiv.org/abs/2110.05651
-    def greater_equal(self, id, init_params):
-        id_ = str(id)
-        init_params[id_] = self.weight
-        def _jax_wrapped_calc_greater_equal_approx(x, y, params):
-            gre_eq = jax.nn.sigmoid(params[id_] * (x - y))
-            return gre_eq, params
-        return _jax_wrapped_calc_greater_equal_approx
+    def __init__(self, *args, sigmoid_weight: float=10., 
+                 use_sigmoid_ste: bool=True, use_tanh_ste: bool=True, 
+                 **kwargs) -> None:
+        super(SigmoidRelational, self).__init__(*args, **kwargs)
+        self.sigmoid_weight = float(sigmoid_weight)
+        self.use_sigmoid_ste = use_sigmoid_ste
+        self.use_tanh_ste = use_tanh_ste
     
-    def greater(self, id, init_params):
-        return self.greater_equal(id, init_params)
-    
-    def equal(self, id, init_params):
-        id_ = str(id)
-        init_params[id_] = self.weight
-        def _jax_wrapped_calc_equal_approx(x, y, params):
-            equal = 1.0 - jnp.square(jnp.tanh(params[id_] * (y - x)))
-            return equal, params
-        return _jax_wrapped_calc_equal_approx
-    
-    def sgn(self, id, init_params):
-        id_ = str(id)
-        init_params[id_] = self.weight
-        def _jax_wrapped_calc_sgn_approx(x, params):
-            sgn = jnp.tanh(params[id_] * x)
-            return sgn, params
-        return _jax_wrapped_calc_sgn_approx
-    
-    # https://arxiv.org/abs/2110.05651
-    def argmax(self, id, init_params):
-        id_ = str(id)
-        init_params[id_] = self.weight
-        def _jax_wrapped_calc_argmax_approx(x, axis, params):
-            literals = enumerate_literals(jnp.shape(x), axis=axis)
-            softmax = jax.nn.softmax(params[id_] * x, axis=axis)
-            sample = jnp.sum(literals * softmax, axis=axis)
+    def get_kwargs(self) -> Dict[str, Any]:
+        kwargs = super().get_kwargs()
+        kwargs['sigmoid_weight'] = self.sigmoid_weight
+        kwargs['use_sigmoid_ste'] = self.use_sigmoid_ste
+        kwargs['use_tanh_ste'] = self.use_tanh_ste
+        return kwargs
+
+    def _jax_greater(self, expr, aux):
+        if not self.traced.cached_is_fluent(expr):
+            return super()._jax_greater(expr, aux)
+        id_ = expr.id
+        aux['params'][id_] = self.sigmoid_weight
+        aux['overriden'][id_] = __class__.__name__
+        def greater_op(x, y, params):
+            sample = stable_sigmoid(params[id_] * (x - y))
+            if self.use_sigmoid_ste:
+                sample = sample + jax.lax.stop_gradient(jnp.greater(x, y) - sample)
             return sample, params
-        return _jax_wrapped_calc_argmax_approx
+        return self._jax_binary_helper_with_param(expr, aux, greater_op)
     
-    def __str__(self) -> str:
-        return f'Sigmoid comparison with weight {self.weight}'
-
-
-# ===========================================================================
-# ROUNDING OPERATIONS
-# - abstract class
-# - soft rounding
-#
-# ===========================================================================
-
-class Rounding(metaclass=ABCMeta):
-    '''Base class for approximate rounding operations.'''
+    def _jax_greater_equal(self, expr, aux):
+        if not self.traced.cached_is_fluent(expr):
+            return super()._jax_greater(expr, aux)
+        id_ = expr.id
+        aux['params'][id_] = self.sigmoid_weight
+        aux['overriden'][id_] = __class__.__name__
+        def greater_equal_op(x, y, params):
+            sample = stable_sigmoid(params[id_] * (x - y))
+            if self.use_sigmoid_ste:
+                sample = sample + jax.lax.stop_gradient(jnp.greater_equal(x, y) - sample)
+            return sample, params
+        return self._jax_binary_helper_with_param(expr, aux, greater_equal_op)
     
-    @abstractmethod
-    def floor(self, id, init_params):
-        pass
+    def _jax_less(self, expr, aux):
+        if not self.traced.cached_is_fluent(expr):
+            return super()._jax_less(expr, aux)
+        id_ = expr.id
+        aux['params'][id_] = self.sigmoid_weight
+        aux['overriden'][id_] = __class__.__name__
+        def less_op(x, y, params):
+            sample = stable_sigmoid(params[id_] * (y - x))
+            if self.use_sigmoid_ste:
+                sample = sample + jax.lax.stop_gradient(jnp.less(x, y) - sample)
+            return sample, params
+        return self._jax_binary_helper_with_param(expr, aux, less_op)
     
-    @abstractmethod
-    def round(self, id, init_params):
-        pass
-
-
-class SoftRounding(Rounding):
-    '''Rounding operations approximated using soft operations.'''
+    def _jax_less_equal(self, expr, aux):
+        if not self.traced.cached_is_fluent(expr):
+            return super()._jax_less(expr, aux)
+        id_ = expr.id
+        aux['params'][id_] = self.sigmoid_weight
+        aux['overriden'][id_] = __class__.__name__
+        def less_equal_op(x, y, params):
+            sample = stable_sigmoid(params[id_] * (y - x))
+            if self.use_sigmoid_ste:
+                sample = sample + jax.lax.stop_gradient(jnp.less_equal(x, y) - sample)
+            return sample, params
+        return self._jax_binary_helper_with_param(expr, aux, less_equal_op)
     
-    def __init__(self, weight: float=10.0) -> None:
-        self.weight = float(weight)
-        
-    # https://www.tensorflow.org/probability/api_docs/python/tfp/substrates/jax/bijectors/Softfloor
-    def floor(self, id, init_params):
-        id_ = str(id)
-        init_params[id_] = self.weight
-        def _jax_wrapped_calc_floor_approx(x, params):
-            param = params[id_]
-            denom = jnp.tanh(param / 4.0)
-            floor = (jax.nn.sigmoid(param * (x - jnp.floor(x) - 1.0)) - 
-                     jax.nn.sigmoid(-param / 2.0)) / denom + jnp.floor(x)
-            return floor, params
-        return _jax_wrapped_calc_floor_approx
+    def _jax_equal(self, expr, aux):
+        if not self.traced.cached_is_fluent(expr):
+            return super()._jax_equal(expr, aux)
+        id_ = expr.id
+        aux['params'][id_] = self.sigmoid_weight
+        aux['overriden'][id_] = __class__.__name__
+        def equal_op(x, y, params):
+            sample = 1. - jnp.square(stable_tanh(params[id_] * (y - x)))
+            if self.use_tanh_ste:
+                sample = sample + jax.lax.stop_gradient(jnp.equal(x, y) - sample)
+            return sample, params
+        return self._jax_binary_helper_with_param(expr, aux, equal_op)
     
-    # https://arxiv.org/abs/2006.09952
-    def round(self, id, init_params):
-        id_ = str(id)
-        init_params[id_] = self.weight
-        def _jax_wrapped_calc_round_approx(x, params):
-            param = params[id_]
-            m = jnp.floor(x) + 0.5
-            rounded = m + 0.5 * jnp.tanh(param * (x - m)) / jnp.tanh(param / 2.0)
-            return rounded, params
-        return _jax_wrapped_calc_round_approx
-
-    def __str__(self) -> str:
-        return f'SoftFloor and SoftRound with weight {self.weight}'
-
-
-# ===========================================================================
-# LOGICAL COMPLEMENT
-# - abstract class
-# - standard complement
-#
-# ===========================================================================
-
-class Complement(metaclass=ABCMeta):
-    '''Base class for approximate logical complement operations.'''
+    def _jax_not_equal(self, expr, aux):
+        if not self.traced.cached_is_fluent(expr):
+            return super()._jax_not_equal(expr, aux)
+        id_ = expr.id
+        aux['params'][id_] = self.sigmoid_weight
+        aux['overriden'][id_] = __class__.__name__
+        def not_equal_op(x, y, params):
+            sample = jnp.square(stable_tanh(params[id_] * (y - x)))
+            if self.use_tanh_ste:
+                sample = sample + jax.lax.stop_gradient(jnp.not_equal(x, y) - sample)
+            return sample, params
+        return self._jax_binary_helper_with_param(expr, aux, not_equal_op)
     
-    @abstractmethod
-    def __call__(self, id, init_params):
-        pass
-
-
-class StandardComplement(Complement):
-    '''The standard approximate logical complement given by x -> 1 - x.'''
+    def _jax_sgn(self, expr, aux):
+        if not self.traced.cached_is_fluent(expr):
+            return super()._jax_sgn(expr, aux)
+        id_ = expr.id
+        aux['params'][id_] = self.sigmoid_weight
+        aux['overriden'][id_] = __class__.__name__
+        def sgn_op(x, params):
+            sample = stable_tanh(params[id_] * x)
+            if self.use_tanh_ste:
+                sample = sample + jax.lax.stop_gradient(jnp.sign(x) - sample)
+            return sample, params
+        return self._jax_unary_helper_with_param(expr, aux, sgn_op)
     
-    # https://www.sciencedirect.com/science/article/abs/pii/016501149190171L
+
+class SoftmaxArgmax(JaxRDDLCompilerWithGrad):
+    '''Argmin/argmax operations approximated using softmax functions.'''
+
+    def __init__(self, *args, argmax_weight: float=10., **kwargs) -> None:
+        super(SoftmaxArgmax, self).__init__(*args, **kwargs)
+        self.argmax_weight = float(argmax_weight)
+    
+    def get_kwargs(self) -> Dict[str, Any]:
+        kwargs = super().get_kwargs()
+        kwargs['argmax_weight'] = self.argmax_weight
+        return kwargs
+
     @staticmethod
-    def _jax_wrapped_calc_not_approx(x, params):
-        return 1.0 - x, params   
-    
-    def __call__(self, id, init_params):
-        return self._jax_wrapped_calc_not_approx
-    
-    def __str__(self) -> str:
-        return 'Standard complement'
-    
+    def soft_argmax(x: jnp.ndarray, w: float, axes: Union[int, Tuple[int, ...]]) -> jnp.ndarray:
+        literals = enumerate_literals(jnp.shape(x), axis=axes)
+        return stable_softmax_weight_sum(w * x, literals, axis=axes)
 
-# ===========================================================================
-# TNORMS
-# - abstract tnorm
-# - product tnorm
-# - Godel tnorm
-# - Lukasiewicz tnorm
-# - Yager(p) tnorm
-#
-# https://www.sciencedirect.com/science/article/abs/pii/016501149190171L
-# ===========================================================================
+    def _jax_argmax(self, expr, aux):
+        if not self.traced.cached_is_fluent(expr):
+            return super()._jax_argmax(expr, aux)
+        id_ = expr.id
+        aux['params'][id_] = self.argmax_weight
+        aux['overriden'][id_] = __class__.__name__
+        arg = expr.args[-1]
+        _, axes = self.traced.cached_sim_info(expr)   
+        jax_expr = self._jax(arg, aux) 
+        def argmax_op(x, params):
+            sample = self.soft_argmax(x, params[id_], axes)
+            return sample, params
+        return self._jax_unary_with_param(jax_expr, argmax_op)
 
-class TNorm(metaclass=ABCMeta):
-    '''Base class for fuzzy differentiable t-norms.'''
-    
-    @abstractmethod
-    def norm(self, id, init_params):
-        '''Elementwise t-norm of x and y.'''
-        pass
-    
-    @abstractmethod
-    def norms(self, id, init_params):
-        '''T-norm computed for tensor x along axis.'''
-        pass
-    
+    def _jax_argmin(self, expr, aux):
+        if not self.traced.cached_is_fluent(expr):
+            return super()._jax_argmin(expr, aux)
+        id_ = expr.id
+        aux['params'][id_] = self.argmax_weight
+        aux['overriden'][id_] = __class__.__name__
+        arg = expr.args[-1]
+        _, axes = self.traced.cached_sim_info(expr)   
+        jax_expr = self._jax(arg, aux) 
+        def argmin_op(x, params):
+            sample = self.soft_argmax(-x, params[id_], axes)
+            return sample, params
+        return self._jax_unary_with_param(jax_expr, argmin_op)
+        
 
-class ProductTNorm(TNorm):
+# ===============================================================================
+# logical relaxations
+# ===============================================================================
+
+class ProductNormLogical(JaxRDDLCompilerWithGrad):
     '''Product t-norm given by the expression (x, y) -> x * y.'''
     
-    @staticmethod
-    def _jax_wrapped_calc_and_approx(x, y, params):
-        return x * y, params    
-        
-    def norm(self, id, init_params):        
-        return self._jax_wrapped_calc_and_approx
-    
-    @staticmethod
-    def _jax_wrapped_calc_forall_approx(x, axis, params):
-        return jnp.prod(x, axis=axis), params   
-        
-    def norms(self, id, init_params):        
-        return self._jax_wrapped_calc_forall_approx
+    def __init__(self, *args, use_logic_ste: bool=False, **kwargs) -> None:
+        super(ProductNormLogical, self).__init__(*args, **kwargs)
+        self.use_logic_ste = use_logic_ste
 
-    def __str__(self) -> str:
-        return 'Product t-norm'
-    
+    def get_kwargs(self) -> Dict[str, Any]:
+        kwargs = super().get_kwargs()
+        kwargs['use_logic_ste'] = self.use_logic_ste
+        return kwargs
 
-class GodelTNorm(TNorm):
+    def _jax_not(self, expr, aux):
+        if not self.traced.cached_is_fluent(expr):
+            return super()._jax_not(expr, aux)
+        aux['overriden'][expr.id] = __class__.__name__
+        def not_op(x):
+            sample = 1. - x
+            if self.use_logic_ste:
+                hard_sample = jnp.asarray(x <= 0.5, dtype=self.REAL)
+                sample = sample + jax.lax.stop_gradient(hard_sample - sample)
+            return sample
+        return self._jax_unary_helper(expr, aux, not_op)
+
+    def _jax_and(self, expr, aux):
+        if not self.traced.cached_is_fluent(expr):
+            return super()._jax_and(expr, aux)
+        aux['overriden'][expr.id] = __class__.__name__
+        def and_op(x, y):
+            sample = jnp.multiply(x, y)
+            if self.use_logic_ste:
+                hard_sample = jnp.asarray(jnp.logical_and(x > 0.5, y > 0.5), dtype=self.REAL)
+                sample = sample + jax.lax.stop_gradient(hard_sample - sample)
+            return sample
+        return self._jax_nary_helper(expr, aux, and_op)
+
+    def _jax_or(self, expr, aux):
+        if not self.traced.cached_is_fluent(expr):
+            return super()._jax_or(expr, aux)
+        aux['overriden'][expr.id] = __class__.__name__
+        def or_op(x, y):
+            sample = 1. - (1. - x) * (1. - y)
+            if self.use_logic_ste:
+                hard_sample = jnp.asarray(jnp.logical_or(x > 0.5, y > 0.5), dtype=self.REAL)
+                sample = sample + jax.lax.stop_gradient(hard_sample - sample)
+            return sample
+        return self._jax_nary_helper(expr, aux, or_op)
+
+    def _jax_xor(self, expr, aux):
+        if not self.traced.cached_is_fluent(expr):
+            return super()._jax_xor(expr, aux)
+        aux['overriden'][expr.id] = __class__.__name__
+        def xor_op(x, y):
+            sample = (1. - (1. - x) * (1. - y)) * (1. - x * y)
+            if self.use_logic_ste:
+                hard_sample = jnp.asarray(jnp.logical_xor(x > 0.5, y > 0.5), dtype=self.REAL)
+                sample = sample + jax.lax.stop_gradient(hard_sample - sample)
+            return sample
+        return self._jax_binary_helper(expr, aux, xor_op)
+
+    def _jax_implies(self, expr, aux):
+        if not self.traced.cached_is_fluent(expr):
+            return super()._jax_implies(expr, aux)
+        aux['overriden'][expr.id] = __class__.__name__
+        def implies_op(x, y):
+            sample = 1. - x * (1. - y)
+            if self.use_logic_ste:
+                hard_sample = jnp.asarray(jnp.logical_or(x <= 0.5, y > 0.5), dtype=self.REAL)
+                sample = sample + jax.lax.stop_gradient(hard_sample - sample)
+            return sample
+        return self._jax_binary_helper(expr, aux, implies_op)
+
+    def _jax_equiv(self, expr, aux):
+        if not self.traced.cached_is_fluent(expr):
+            return super()._jax_equiv(expr, aux)
+        aux['overriden'][expr.id] = __class__.__name__
+        def equiv_op(x, y):
+            sample = (1. - x * (1. - y)) * (1. - y * (1. - x))
+            if self.use_logic_ste:
+                hard_sample = jnp.logical_and(
+                    jnp.logical_or(x <= 0.5, y > 0.5), jnp.logical_or(y <= 0.5, x > 0.5))
+                hard_sample = jnp.asarray(hard_sample, dtype=self.REAL)
+                sample = sample + jax.lax.stop_gradient(hard_sample - sample)
+            return sample
+        return self._jax_binary_helper(expr, aux, equiv_op)
+    
+    def _jax_forall(self, expr, aux):
+        if not self.traced.cached_is_fluent(expr):
+            return super()._jax_forall(expr, aux)
+        aux['overriden'][expr.id] = __class__.__name__
+        def forall_op(x, axis):
+            sample = jnp.prod(x, axis=axis)
+            if self.use_logic_ste:
+                hard_sample = jnp.all(x, axis=axis)
+                sample = sample + jax.lax.stop_gradient(hard_sample - sample)
+            return sample
+        return self._jax_aggregation_helper(expr, aux, forall_op)
+    
+    def _jax_exists(self, expr, aux):
+        if not self.traced.cached_is_fluent(expr):
+            return super()._jax_exists(expr, aux)
+        aux['overriden'][expr.id] = __class__.__name__
+        def exists_op(x, axis):
+            sample = 1. - jnp.prod(1. - x, axis=axis)
+            if self.use_logic_ste:
+                hard_sample = jnp.any(x, axis=axis)
+                sample = sample + jax.lax.stop_gradient(hard_sample - sample)
+            return sample
+        return self._jax_aggregation_helper(expr, aux, exists_op)
+        
+
+class GodelNormLogical(JaxRDDLCompilerWithGrad):
     '''Godel t-norm given by the expression (x, y) -> min(x, y).'''
     
-    @staticmethod
-    def _jax_wrapped_calc_and_approx(x, y, params):
-        return jnp.minimum(x, y), params
-    
-    def norm(self, id, init_params):        
-        return self._jax_wrapped_calc_and_approx
-    
-    @staticmethod
-    def _jax_wrapped_calc_forall_approx(x, axis, params):
-        return jnp.min(x, axis=axis), params   
+    def __init__(self, *args, use_logic_ste: bool=False, **kwargs) -> None:
+        super(GodelNormLogical, self).__init__(*args, **kwargs)
+        self.use_logic_ste = use_logic_ste
         
-    def norms(self, id, init_params):        
-        return self._jax_wrapped_calc_forall_approx
-    
-    def __str__(self) -> str:
-        return 'Godel t-norm'
-    
+    def get_kwargs(self) -> Dict[str, Any]:
+        kwargs = super().get_kwargs()
+        kwargs['use_logic_ste'] = self.use_logic_ste
+        return kwargs
 
-class LukasiewiczTNorm(TNorm):
+    def _jax_not(self, expr, aux):
+        if not self.traced.cached_is_fluent(expr):
+            return super()._jax_not(expr, aux)
+        aux['overriden'][expr.id] = __class__.__name__
+        def not_op(x):
+            sample = 1. - x
+            if self.use_logic_ste:
+                hard_sample = jnp.asarray(x <= 0.5, dtype=self.REAL)
+                sample = sample + jax.lax.stop_gradient(hard_sample - sample)
+            return sample
+        return self._jax_unary_helper(expr, aux, not_op)
+    
+    def _jax_and(self, expr, aux):
+        if not self.traced.cached_is_fluent(expr):
+            return super()._jax_and(expr, aux)
+        aux['overriden'][expr.id] = __class__.__name__
+        def and_op(x, y):
+            sample = jnp.minimum(x, y)
+            if self.use_logic_ste:
+                hard_sample = jnp.asarray(jnp.logical_and(x > 0.5, y > 0.5), dtype=self.REAL)
+                sample = sample + jax.lax.stop_gradient(hard_sample - sample)
+            return sample
+        return self._jax_nary_helper(expr, aux, and_op)
+
+    def _jax_or(self, expr, aux):
+        if not self.traced.cached_is_fluent(expr):
+            return super()._jax_or(expr, aux)
+        aux['overriden'][expr.id] = __class__.__name__
+        def or_op(x, y):
+            sample = jnp.maximum(x, y)
+            if self.use_logic_ste:
+                hard_sample = jnp.asarray(jnp.logical_or(x > 0.5, y > 0.5), dtype=self.REAL)
+                sample = sample + jax.lax.stop_gradient(hard_sample - sample)
+            return sample
+        return self._jax_nary_helper(expr, aux, or_op)
+
+    def _jax_xor(self, expr, aux):
+        if not self.traced.cached_is_fluent(expr):
+            return super()._jax_xor(expr, aux)
+        aux['overriden'][expr.id] = __class__.__name__
+        def xor_op(x, y):
+            sample = jnp.minimum(jnp.maximum(x, y), 1. - jnp.minimum(x, y))
+            if self.use_logic_ste:
+                hard_sample = jnp.asarray(jnp.logical_xor(x > 0.5, y > 0.5), dtype=self.REAL)
+                sample = sample + jax.lax.stop_gradient(hard_sample - sample)
+            return sample
+        return self._jax_binary_helper(expr, aux, xor_op)
+
+    def _jax_implies(self, expr, aux):
+        if not self.traced.cached_is_fluent(expr):
+            return super()._jax_implies(expr, aux)
+        aux['overriden'][expr.id] = __class__.__name__
+        def implies_op(x, y):
+            sample = jnp.maximum(1. - x, y)
+            if self.use_logic_ste:
+                hard_sample = jnp.asarray(jnp.logical_or(x <= 0.5, y > 0.5), dtype=self.REAL)
+                sample = sample + jax.lax.stop_gradient(hard_sample - sample)
+            return sample
+        return self._jax_binary_helper(expr, aux, implies_op)
+
+    def _jax_equiv(self, expr, aux):
+        if not self.traced.cached_is_fluent(expr):
+            return super()._jax_equiv(expr, aux)
+        aux['overriden'][expr.id] = __class__.__name__
+        def equiv_op(x, y):
+            sample = jnp.minimum(jnp.maximum(1. - x, y), jnp.maximum(1. - y, x))
+            if self.use_logic_ste:
+                hard_sample = jnp.logical_and(
+                    jnp.logical_or(x <= 0.5, y > 0.5), jnp.logical_or(y <= 0.5, x > 0.5))
+                hard_sample = jnp.asarray(hard_sample, dtype=self.REAL)
+                sample = sample + jax.lax.stop_gradient(hard_sample - sample)
+            return sample
+        return self._jax_binary_helper(expr, aux, equiv_op)
+    
+    def _jax_forall(self, expr, aux):
+        if not self.traced.cached_is_fluent(expr):
+            return super()._jax_forall(expr, aux)
+        aux['overriden'][expr.id] = __class__.__name__
+        def all_op(x, axis):
+            sample = jnp.min(x, axis=axis)
+            if self.use_logic_ste:
+                hard_sample = jnp.all(x, axis=axis)
+                sample = sample + jax.lax.stop_gradient(hard_sample - sample)
+            return sample
+        return self._jax_aggregation_helper(expr, aux, all_op)
+    
+    def _jax_exists(self, expr, aux):
+        if not self.traced.cached_is_fluent(expr):
+            return super()._jax_exists(expr, aux)
+        aux['overriden'][expr.id] = __class__.__name__
+        def exists_op(x, axis):
+            sample = jnp.max(x, axis=axis)
+            if self.use_logic_ste:
+                hard_sample = jnp.any(x, axis=axis)
+                sample = sample + jax.lax.stop_gradient(hard_sample - sample)
+            return sample
+        return self._jax_aggregation_helper(expr, aux, exists_op)
+        
+
+class LukasiewiczNormLogical(JaxRDDLCompilerWithGrad):
     '''Lukasiewicz t-norm given by the expression (x, y) -> max(x + y - 1, 0).'''
     
+    def __init__(self, *args, use_logic_ste: bool=False, **kwargs) -> None:
+        super(LukasiewiczNormLogical, self).__init__(*args, **kwargs)
+        self.use_logic_ste = use_logic_ste
+
+    def get_kwargs(self) -> Dict[str, Any]:
+        kwargs = super().get_kwargs()
+        kwargs['use_logic_ste'] = self.use_logic_ste
+        return kwargs
+
+    def _jax_not(self, expr, aux):
+        if not self.traced.cached_is_fluent(expr):
+            return super()._jax_not(expr, aux)
+        aux['overriden'][expr.id] = __class__.__name__
+        def not_op(x):
+            sample = 1. - x
+            if self.use_logic_ste:
+                hard_sample = jnp.asarray(x <= 0.5, dtype=self.REAL)
+                sample = sample + jax.lax.stop_gradient(hard_sample - sample)
+            return sample
+        return self._jax_unary_helper(expr, aux, not_op)
+    
+    def _jax_and(self, expr, aux):
+        if not self.traced.cached_is_fluent(expr):
+            return super()._jax_and(expr, aux)
+        aux['overriden'][expr.id] = __class__.__name__
+        def and_op(x, y):
+            sample = jax.nn.relu(x + y - 1.)
+            if self.use_logic_ste:
+                hard_sample = jnp.asarray(jnp.logical_and(x > 0.5, y > 0.5), dtype=self.REAL)
+                sample = sample + jax.lax.stop_gradient(hard_sample - sample)
+            return sample
+        return self._jax_nary_helper(expr, aux, and_op)
+
+    def _jax_or(self, expr, aux):
+        if not self.traced.cached_is_fluent(expr):
+            return super()._jax_or(expr, aux)
+        aux['overriden'][expr.id] = __class__.__name__
+        def or_op(x, y):
+            sample = 1. - jax.nn.relu(1. - x - y)
+            if self.use_logic_ste:
+                hard_sample = jnp.asarray(jnp.logical_or(x > 0.5, y > 0.5), dtype=self.REAL)
+                sample = sample + jax.lax.stop_gradient(hard_sample - sample)
+            return sample
+        return self._jax_nary_helper(expr, aux, or_op)
+
+    def _jax_xor(self, expr, aux):
+        if not self.traced.cached_is_fluent(expr):
+            return super()._jax_xor(expr, aux)
+        aux['overriden'][expr.id] = __class__.__name__
+        def xor_op(x, y):
+            sample = jax.nn.relu(1. - jnp.abs(1. - x - y))
+            if self.use_logic_ste:
+                hard_sample = jnp.asarray(jnp.logical_xor(x > 0.5, y > 0.5), dtype=self.REAL)
+                sample = sample + jax.lax.stop_gradient(hard_sample - sample)
+            return sample
+        return self._jax_binary_helper(expr, aux, xor_op)
+
+    def _jax_implies(self, expr, aux):
+        if not self.traced.cached_is_fluent(expr):
+            return super()._jax_implies(expr, aux)
+        aux['overriden'][expr.id] = __class__.__name__
+        def implies_op(x, y):
+            sample = 1. - jax.nn.relu(x - y)
+            if self.use_logic_ste:
+                hard_sample = jnp.asarray(jnp.logical_or(x <= 0.5, y > 0.5), dtype=self.REAL)
+                sample = sample + jax.lax.stop_gradient(hard_sample - sample)
+            return sample
+        return self._jax_binary_helper(expr, aux, implies_op)
+
+    def _jax_equiv(self, expr, aux):
+        if not self.traced.cached_is_fluent(expr):
+            return super()._jax_equiv(expr, aux)
+        aux['overriden'][expr.id] = __class__.__name__
+        def equiv_op(x, y):
+            sample = jax.nn.relu(1. - jnp.abs(x - y))
+            if self.use_logic_ste:
+                hard_sample = jnp.logical_and(
+                    jnp.logical_or(x <= 0.5, y > 0.5), jnp.logical_or(y <= 0.5, x > 0.5))
+                hard_sample = jnp.asarray(hard_sample, dtype=self.REAL)
+                sample = sample + jax.lax.stop_gradient(hard_sample - sample)
+            return sample
+        return self._jax_binary_helper(expr, aux, equiv_op)
+    
+    def _jax_forall(self, expr, aux):
+        if not self.traced.cached_is_fluent(expr):
+            return super()._jax_forall(expr, aux)
+        aux['overriden'][expr.id] = __class__.__name__
+        def forall_op(x, axis):
+            sample = jax.nn.relu(jnp.sum(x - 1., axis=axis) + 1.)
+            if self.use_logic_ste:
+                hard_sample = jnp.all(x, axis=axis)
+                sample = sample + jax.lax.stop_gradient(hard_sample - sample)
+            return sample
+        return self._jax_aggregation_helper(expr, aux, forall_op)
+    
+    def _jax_exists(self, expr, aux):
+        if not self.traced.cached_is_fluent(expr):
+            return super()._jax_exists(expr, aux)
+        aux['overriden'][expr.id] = __class__.__name__
+        def exists_op(x, axis):
+            sample = 1. - jax.nn.relu(jnp.sum(-x, axis=axis) + 1.)
+            if self.use_logic_ste:
+                hard_sample = jnp.any(x, axis=axis)
+                sample = sample + jax.lax.stop_gradient(hard_sample - sample)
+            return sample
+        return self._jax_aggregation_helper(expr, aux, exists_op)
+
+
+# ===============================================================================
+# function relaxations
+# ===============================================================================
+
+class SafeSqrt(JaxRDDLCompilerWithGrad):
+    '''Sqrt operation without negative underflow.'''
+
+    def __init__(self, *args, sqrt_eps: float=1e-14, **kwargs) -> None:
+        super(SafeSqrt, self).__init__(*args, **kwargs)
+        self.sqrt_eps = float(sqrt_eps)
+
+    def get_kwargs(self) -> Dict[str, Any]:
+        kwargs = super().get_kwargs()
+        kwargs['sqrt_eps'] = self.sqrt_eps
+        return kwargs
+
+    def _jax_sqrt(self, expr, aux):
+        aux['overriden'][expr.id] = __class__.__name__
+        def safe_sqrt_op(x):
+            return jnp.sqrt(x + self.sqrt_eps)
+        return self._jax_unary_helper(expr, aux, safe_sqrt_op, at_least_int=True)
+
+
+class SoftFloor(JaxRDDLCompilerWithGrad):
+    '''Floor and ceil operations approximated using soft operations.'''
+    
+    def __init__(self, *args, floor_weight: float=10., 
+                 use_floor_ste: bool=True, **kwargs) -> None:
+        super(SoftFloor, self).__init__(*args, **kwargs)
+        self.floor_weight = float(floor_weight)
+        self.use_floor_ste = use_floor_ste
+    
+    def get_kwargs(self) -> Dict[str, Any]:
+        kwargs = super().get_kwargs()
+        kwargs['floor_weight'] = self.floor_weight
+        kwargs['use_floor_ste'] = self.use_floor_ste
+        return kwargs
+
     @staticmethod
-    def _jax_wrapped_calc_and_approx(x, y, params):
-        land = jax.nn.relu(x + y - 1.0)
-        return land, params
-        
-    def norm(self, id, init_params):
-        return self._jax_wrapped_calc_and_approx
-    
-    @staticmethod
-    def _jax_wrapped_calc_forall_approx(x, axis, params):
-        forall = jax.nn.relu(jnp.sum(x - 1.0, axis=axis) + 1.0)
-        return forall, params
-        
-    def norms(self, id, init_params):
-        return self._jax_wrapped_calc_forall_approx
-    
-    def __str__(self) -> str:
-        return 'Lukasiewicz t-norm'
+    def soft_floor(x: jnp.ndarray, w: float) -> jnp.ndarray:
+        s = x - jnp.floor(x)
+        return jnp.floor(x) + 0.5 * (
+            1. + stable_tanh(w * (s - 1.) / 2.) / stable_tanh(w / 4.))
 
-
-class YagerTNorm(TNorm):
-    '''Yager t-norm given by the expression 
-    (x, y) -> max(1 - ((1 - x)^p + (1 - y)^p)^(1/p)).'''
-    
-    def __init__(self, p: float=2.0) -> None:
-        self.p = float(p)
-    
-    def norm(self, id, init_params):
-        id_ = str(id)
-        init_params[id_] = self.p
-        def _jax_wrapped_calc_and_approx(x, y, params):
-            base = jax.nn.relu(1.0 - jnp.stack([x, y], axis=0))
-            arg = jnp.linalg.norm(base, ord=params[id_], axis=0)
-            land = jax.nn.relu(1.0 - arg)
-            return land, params
-        return _jax_wrapped_calc_and_approx
-    
-    def norms(self, id, init_params):
-        id_ = str(id)
-        init_params[id_] = self.p
-        def _jax_wrapped_calc_forall_approx(x, axis, params):
-            arg = jax.nn.relu(1.0 - x)
-            for ax in sorted(axis, reverse=True):
-                arg = jnp.linalg.norm(arg, ord=params[id_], axis=ax)
-            forall = jax.nn.relu(1.0 - arg)
-            return forall, params
-        return _jax_wrapped_calc_forall_approx
-    
-    def __str__(self) -> str:
-        return f'Yager({self.p}) t-norm'
-    
-
-# ===========================================================================
-# RANDOM SAMPLING
-# - abstract sampler
-# - Gumbel-softmax sampler
-# - determinization
-#
-# ===========================================================================
-
-class RandomSampling(metaclass=ABCMeta):
-    '''Describes how non-reparameterizable random variables are sampled.'''
-    
-    @abstractmethod
-    def discrete(self, id, init_params, logic):
-        pass
-    
-    @abstractmethod
-    def poisson(self, id, init_params, logic):
-        pass
-    
-    @abstractmethod
-    def binomial(self, id, init_params, logic):
-        pass
-    
-    @abstractmethod
-    def negative_binomial(self, id, init_params, logic):
-        pass
-    
-    @abstractmethod
-    def geometric(self, id, init_params, logic):
-        pass
-    
-    @abstractmethod
-    def bernoulli(self, id, init_params, logic):
-        pass
-    
-    def __str__(self) -> str:
-        return 'RandomSampling'
-
-
-class SoftRandomSampling(RandomSampling):
-    '''Random sampling of discrete variables using Gumbel-softmax trick.'''
-    
-    def __init__(self, poisson_max_bins: int=100, 
-                 poisson_min_cdf: float=0.999,
-                 poisson_exp_sampling: bool=True,
-                 binomial_max_bins: int=100,
-                 bernoulli_gumbel_softmax: bool=False) -> None:
-        '''Creates a new instance of soft random sampling.
-
-        :param poisson_max_bins: maximum bins to use for Poisson distribution relaxation
-        :param poisson_min_cdf: minimum cdf value of Poisson within truncated region
-        in order to use Poisson relaxation
-        :param poisson_exp_sampling: whether to use Poisson process sampling method
-        instead of truncated Gumbel-Softmax
-        :param binomial_max_bins: maximum bins to use for Binomial distribution relaxation
-        :param bernoulli_gumbel_softmax: whether to use Gumbel-Softmax to approximate
-        Bernoulli samples, or the standard uniform reparameterization instead
-        '''
-        self.poisson_bins = poisson_max_bins
-        self.poisson_min_cdf = poisson_min_cdf
-        self.poisson_exp_method = poisson_exp_sampling
-        self.binomial_bins = binomial_max_bins
-        self.bernoulli_gumbel_softmax = bernoulli_gumbel_softmax
-
-    # https://arxiv.org/pdf/1611.01144
-    def discrete(self, id, init_params, logic):
-        argmax_approx = logic.argmax(id, init_params)
-        def _jax_wrapped_calc_discrete_gumbel_softmax(key, prob, params):
-            Gumbel01 = random.gumbel(key=key, shape=jnp.shape(prob), dtype=logic.REAL)
-            sample = Gumbel01 + jnp.log(prob + logic.eps)
-            return argmax_approx(sample, axis=-1, params=params)
-        return _jax_wrapped_calc_discrete_gumbel_softmax
-    
-    def _poisson_gumbel_softmax(self, id, init_params, logic):        
-        argmax_approx = logic.argmax(id, init_params)
-        def _jax_wrapped_calc_poisson_gumbel_softmax(key, rate, params):
-            ks = jnp.arange(self.poisson_bins)[(jnp.newaxis,) * jnp.ndim(rate) + (...,)]
-            rate = rate[..., jnp.newaxis]
-            log_prob = ks * jnp.log(rate + logic.eps) - rate - scipy.special.gammaln(ks + 1)
-            Gumbel01 = random.gumbel(key=key, shape=jnp.shape(log_prob), dtype=logic.REAL)
-            sample = Gumbel01 + log_prob
-            return argmax_approx(sample, axis=-1, params=params)
-        return _jax_wrapped_calc_poisson_gumbel_softmax
-    
-    # https://arxiv.org/abs/2405.14473
-    def _poisson_exponential(self, id, init_params, logic):
-        less_approx = logic.less(id, init_params)
-        def _jax_wrapped_calc_poisson_exponential(key, rate, params):
-            Exp1 = random.exponential(
-                key=key,  shape=(self.poisson_bins,) + jnp.shape(rate), dtype=logic.REAL)
-            delta_t = Exp1 / rate[jnp.newaxis, ...]
-            times = jnp.cumsum(delta_t, axis=0)
-            indicator, params = less_approx(times, 1.0, params)
-            sample = jnp.sum(indicator, axis=0)
+    def _jax_floor(self, expr, aux):
+        if not self.traced.cached_is_fluent(expr):
+            return super()._jax_floor(expr, aux)
+        id_ = expr.id
+        aux['params'][id_] = self.floor_weight
+        aux['overriden'][id_] = __class__.__name__
+        def floor_op(x, params):
+            sample = self.soft_floor(x, params[id_])
+            if self.use_floor_ste:
+                sample = sample + jax.lax.stop_gradient(jnp.floor(x) - sample)
             return sample, params
-        return _jax_wrapped_calc_poisson_exponential
+        return self._jax_unary_helper_with_param(expr, aux, floor_op)
 
-    # normal approximation to Poisson: Poisson(rate) -> Normal(rate, rate)
-    def _poisson_normal_approx(self, logic):
-        def _jax_wrapped_calc_poisson_normal_approx(key, rate, params):
-            normal = random.normal(key=key, shape=jnp.shape(rate), dtype=logic.REAL)
-            sample = rate + jnp.sqrt(rate) * normal
-            return sample, params    
-        return _jax_wrapped_calc_poisson_normal_approx
-    
-    def poisson(self, id, init_params, logic):
-        if self.poisson_exp_method:
-            _jax_wrapped_calc_poisson_diff = self._poisson_exponential(
-                id, init_params, logic)
-        else:
-            _jax_wrapped_calc_poisson_diff = self._poisson_gumbel_softmax(
-                id, init_params, logic)
-        _jax_wrapped_calc_poisson_normal = self._poisson_normal_approx(logic)
-        
-        # for small rate use the Poisson process or gumbel-softmax reparameterization
-        # for large rate use the normal approximation
-        def _jax_wrapped_calc_poisson_approx(key, rate, params):
-            if self.poisson_bins > 0:
-                cuml_prob = scipy.stats.poisson.cdf(self.poisson_bins, rate)
-                small_rate = jax.lax.stop_gradient(cuml_prob >= self.poisson_min_cdf)
-                small_sample, params = _jax_wrapped_calc_poisson_diff(key, rate, params)
-                large_sample, params = _jax_wrapped_calc_poisson_normal(key, rate, params)
-                sample = jnp.where(small_rate, small_sample, large_sample)
-                return sample, params
-            else:
-                return _jax_wrapped_calc_poisson_normal(key, rate, params)
-        return _jax_wrapped_calc_poisson_approx        
-    
-    # normal approximation to Binomial: Bin(n, p) -> Normal(np, np(1-p))
-    def _binomial_normal_approx(self, logic):
-        def _jax_wrapped_calc_binomial_normal_approx(key, trials, prob, params):
-            normal = random.normal(key=key, shape=jnp.shape(trials), dtype=logic.REAL)
-            mean = trials * prob
-            std = jnp.sqrt(trials * prob * (1.0 - prob))
-            sample = mean + std * normal
-            return sample, params    
-        return _jax_wrapped_calc_binomial_normal_approx
-        
-    def _binomial_gumbel_softmax(self, id, init_params, logic):
-        argmax_approx = logic.argmax(id, init_params)
-        def _jax_wrapped_calc_binomial_gumbel_softmax(key, trials, prob, params):
-            ks = jnp.arange(self.binomial_bins)[(jnp.newaxis,) * jnp.ndim(trials) + (...,)]
-            trials = trials[..., jnp.newaxis]
-            prob = prob[..., jnp.newaxis]
-            in_support = ks <= trials
-            ks = jnp.minimum(ks, trials)
-            log_prob = ((scipy.special.gammaln(trials + 1) - 
-                         scipy.special.gammaln(ks + 1) - 
-                         scipy.special.gammaln(trials - ks + 1)) +
-                        ks * jnp.log(prob + logic.eps) + 
-                        (trials - ks) * jnp.log1p(-prob + logic.eps))
-            log_prob = jnp.where(in_support, log_prob, jnp.log(logic.eps))
-            Gumbel01 = random.gumbel(key=key, shape=jnp.shape(log_prob), dtype=logic.REAL)
-            sample = Gumbel01 + log_prob
-            return argmax_approx(sample, axis=-1, params=params)
-        return _jax_wrapped_calc_binomial_gumbel_softmax
-        
-    def binomial(self, id, init_params, logic):
-        _jax_wrapped_calc_binomial_normal = self._binomial_normal_approx(logic)  
-        _jax_wrapped_calc_binomial_gs = self._binomial_gumbel_softmax(id, init_params, logic)
-        
-        # for small trials use the Bernoulli relaxation
-        # for large trials use the normal approximation
-        def _jax_wrapped_calc_binomial_approx(key, trials, prob, params):
-            small_trials = jax.lax.stop_gradient(trials < self.binomial_bins)
-            small_sample, params = _jax_wrapped_calc_binomial_gs(key, trials, prob, params)
-            large_sample, params = _jax_wrapped_calc_binomial_normal(key, trials, prob, params)
-            sample = jnp.where(small_trials, small_sample, large_sample)
+    def _jax_ceil(self, expr, aux):
+        if not self.traced.cached_is_fluent(expr):
+            return super()._jax_ceil(expr, aux)
+        id_ = expr.id
+        aux['params'][id_] = self.floor_weight
+        aux['overriden'][id_] = __class__.__name__
+        def ceil_op(x, params):
+            sample = -self.soft_floor(-x, params[id_])
+            if self.use_floor_ste:
+                sample = sample + jax.lax.stop_gradient(jnp.ceil(x) - sample)
             return sample, params
-        return _jax_wrapped_calc_binomial_approx
+        return self._jax_unary_helper_with_param(expr, aux, ceil_op)
+
+    def _jax_div(self, expr, aux):
+        if not self.traced.cached_is_fluent(expr):
+            return super()._jax_div(expr, aux)
+        id_ = expr.id
+        aux['params'][id_] = self.floor_weight
+        aux['overriden'][id_] = __class__.__name__
+        def div_op(x, y, params):
+            sample = self.soft_floor(x / y, params[id_])
+            if self.use_floor_ste:
+                sample = sample + jax.lax.stop_gradient(jnp.floor_divide(x, y) - sample)
+            return sample, params
+        return self._jax_binary_helper_with_param(expr, aux, div_op)
+
+    def _jax_mod(self, expr, aux):
+        if not self.traced.cached_is_fluent(expr):
+            return super()._jax_mod(expr, aux)
+        id_ = expr.id
+        aux['params'][id_] = self.floor_weight
+        aux['overriden'][id_] = __class__.__name__
+        def mod_op(x, y, params):
+            div = self.soft_floor(x / y, params[id_])
+            if self.use_floor_ste:
+                div = div + jax.lax.stop_gradient(jnp.floor_divide(x, y) - div)
+            sample = x - y * div
+            return sample, params
+        return self._jax_binary_helper_with_param(expr, aux, mod_op)
+
+
+class SoftRound(JaxRDDLCompilerWithGrad):
+    '''Round operations approximated using soft operations.'''
     
-    # https://en.wikipedia.org/wiki/Negative_binomial_distribution#Gamma%E2%80%93Poisson_mixture
-    def negative_binomial(self, id, init_params, logic):
-        poisson_approx = self.poisson(id, init_params, logic)
-        def _jax_wrapped_calc_negative_binomial_approx(key, trials, prob, params):
+    def __init__(self, *args, round_weight: float=10., 
+                 use_round_ste: bool=True, **kwargs) -> None:
+        super(SoftRound, self).__init__(*args, **kwargs)
+        self.round_weight = float(round_weight)
+        self.use_round_ste = use_round_ste
+    
+    def get_kwargs(self) -> Dict[str, Any]:
+        kwargs = super().get_kwargs()
+        kwargs['round_weight'] = self.round_weight
+        kwargs['use_round_ste'] = self.use_round_ste
+        return kwargs
+
+    def _jax_round(self, expr, aux):
+        if not self.traced.cached_is_fluent(expr):
+            return super()._jax_round(expr, aux)
+        id_ = expr.id
+        aux['params'][id_] = self.round_weight
+        aux['overriden'][id_] = __class__.__name__
+        def round_op(x, params):
+            param = params[id_]
+            m = jnp.floor(x) + 0.5
+            sample = m + 0.5 * stable_tanh(param * (x - m)) / stable_tanh(param / 2.)
+            if self.use_round_ste:
+                sample = sample + jax.lax.stop_gradient(jnp.round(x) - sample)
+            return sample, params
+        return self._jax_unary_helper_with_param(expr, aux, round_op)
+
+
+# ===============================================================================
+# control flow relaxations
+# ===============================================================================
+
+class LinearIfElse(JaxRDDLCompilerWithGrad):
+    '''Approximate if else statement as a linear combination.'''
+
+    def __init__(self, *args, use_if_else_ste: bool=True, **kwargs) -> None:
+        super(LinearIfElse, self).__init__(*args, **kwargs)
+        self.use_if_else_ste = use_if_else_ste
+
+    def get_kwargs(self) -> Dict[str, Any]:
+        kwargs = super().get_kwargs()
+        kwargs['use_if_else_ste'] = self.use_if_else_ste
+        return kwargs
+
+    def _jax_if(self, expr, aux):
+        JaxRDDLCompilerWithGrad._check_num_args(expr, 3)
+        pred, if_true, if_false = expr.args   
+
+        # if predicate is non-fluent, always use the exact operation
+        if not self.traced.cached_is_fluent(pred):
+            return super()._jax_if(expr, aux)  
+        
+        # recursively compile arguments   
+        aux['overriden'][expr.id] = __class__.__name__
+        jax_pred = self._jax(pred, aux)
+        jax_true = self._jax(if_true, aux)
+        jax_false = self._jax(if_false, aux)
+        
+        def _jax_wrapped_if_then_else_linear(fls, nfls, params, key):
+            sample_pred, key, err1, params = jax_pred(fls, nfls, params, key)
+            sample_true, key, err2, params = jax_true(fls, nfls, params, key)
+            sample_false, key, err3, params = jax_false(fls, nfls, params, key)
+            if self.use_if_else_ste:
+                hard_pred = (sample_pred > 0.5).astype(sample_pred.dtype)
+                sample_pred = sample_pred + jax.lax.stop_gradient(hard_pred - sample_pred)
+            sample = sample_pred * sample_true + (1 - sample_pred) * sample_false
+            err = err1 | err2 | err3
+            return sample, key, err, params
+        return _jax_wrapped_if_then_else_linear
+
+
+class SoftmaxSwitch(JaxRDDLCompilerWithGrad):
+    '''Softmax switch control flow using a probabilistic interpretation.'''
+    
+    def __init__(self, *args, switch_weight: float=10., **kwargs) -> None:
+        super(SoftmaxSwitch, self).__init__(*args, **kwargs)
+        self.switch_weight = float(switch_weight)
+        
+    def get_kwargs(self) -> Dict[str, Any]:
+        kwargs = super().get_kwargs()
+        kwargs['switch_weight'] = self.switch_weight
+        return kwargs
+
+    def _jax_switch(self, expr, aux):
+
+         # if predicate is non-fluent, always use the exact operation
+        # case conditions are currently only literals so they are non-fluent
+        pred = expr.args[0]
+        if not self.traced.cached_is_fluent(pred):
+            return super()._jax_switch(expr, aux)  
+        
+        id_ = expr.id
+        aux['params'][id_] = self.switch_weight
+        aux['overriden'][id_] = __class__.__name__
+        
+        # recursively compile predicate
+        jax_pred = self._jax(pred, aux)
+        
+        # recursively compile cases
+        cases, default = self.traced.cached_sim_info(expr) 
+        jax_default = None if default is None else self._jax(default, aux)
+        jax_cases = [
+            (jax_default if _case is None else self._jax(_case, aux))
+            for _case in cases
+        ]
+                    
+        def _jax_wrapped_switch_softmax(fls, nfls, params, key):
+            
+            # sample predicate
+            sample_pred, key, err, params = jax_pred(fls, nfls, params, key) 
+            
+            # sample cases
+            sample_cases = []
+            for jax_case in jax_cases:
+                sample, key, err_case, params = jax_case(fls, nfls, params, key)
+                sample_cases.append(sample)
+                err = err | err_case      
+            sample_cases = jnp.asarray(sample_cases)          
+            sample_cases = jnp.asarray(sample_cases, dtype=self._fix_dtype(sample_cases))
+            
+            # replace integer indexing with softmax
+            sample_pred = jnp.broadcast_to(
+                sample_pred[jnp.newaxis, ...], shape=jnp.shape(sample_cases))
+            literals = enumerate_literals(jnp.shape(sample_cases), axis=0)
+            proximity = -jnp.square(sample_pred - literals)
+            logits = params[id_] * proximity
+            sample = stable_softmax_weight_sum(logits, sample_cases, axis=0)
+            return sample, key, err, params
+        return _jax_wrapped_switch_softmax
+    
+    
+# ===============================================================================
+# distribution relaxations - Geometric
+# ===============================================================================
+
+class ReparameterizedGeometric(JaxRDDLCompilerWithGrad):
+
+    def __init__(self, *args, 
+                 geometric_floor_weight: float=10., 
+                 geometric_eps: float=1e-14, **kwargs) -> None:
+        super(ReparameterizedGeometric, self).__init__(*args, **kwargs)
+        self.geometric_floor_weight = float(geometric_floor_weight)
+        self.geometric_eps = float(geometric_eps)
+        
+    def get_kwargs(self) -> Dict[str, Any]:
+        kwargs = super().get_kwargs()
+        kwargs['geometric_floor_weight'] = self.geometric_floor_weight
+        kwargs['geometric_eps'] = self.geometric_eps
+        return kwargs
+
+    def _jax_geometric(self, expr, aux):
+        ERR = JaxRDDLCompilerWithGrad.ERROR_CODES['INVALID_PARAM_GEOMETRIC']
+        JaxRDDLCompilerWithGrad._check_num_args(expr, 1)        
+        arg_prob, = expr.args
+
+        # if prob is non-fluent, always use the exact operation
+        if not self.traced.cached_is_fluent(arg_prob):
+            return super()._jax_geometric(expr, aux)  
+          
+        id_ = expr.id
+        aux['params'][id_] = (self.geometric_floor_weight, self.geometric_eps)
+        aux['overriden'][id_] = __class__.__name__
+
+        jax_prob = self._jax(arg_prob, aux)
+        
+        def _jax_wrapped_distribution_geometric_reparam(fls, nfls, params, key):
+            w, eps = params[id_]
+            prob, key, err, params = jax_prob(fls, nfls, params, key)
             key, subkey = random.split(key)
-            trials = jnp.asarray(trials, dtype=logic.REAL)
-            Gamma = random.gamma(key=key, a=trials, dtype=logic.REAL)
-            scale = (1.0 - prob) / prob
-            poisson_rate = scale * Gamma
-            return poisson_approx(subkey, poisson_rate, params)
-        return _jax_wrapped_calc_negative_binomial_approx
-
-    def geometric(self, id, init_params, logic):
-        approx_floor = logic.floor(id, init_params)
-        def _jax_wrapped_calc_geometric_approx(key, prob, params):
-            U = random.uniform(key=key, shape=jnp.shape(prob), dtype=logic.REAL)
-            floor, params = approx_floor(
-                jnp.log1p(-U) / jnp.log1p(-prob + logic.eps), params)
-            sample = floor + 1
-            return sample, params
-        return _jax_wrapped_calc_geometric_approx
-    
-    def _bernoulli_uniform(self, id, init_params, logic):
-        less_approx = logic.less(id, init_params)  
-        def _jax_wrapped_calc_bernoulli_uniform(key, prob, params):
-            U = random.uniform(key=key, shape=jnp.shape(prob), dtype=logic.REAL)
-            return less_approx(U, prob, params)   
-        return _jax_wrapped_calc_bernoulli_uniform
-    
-    def _bernoulli_gumbel_softmax(self, id, init_params, logic):
-        discrete_approx = self.discrete(id, init_params, logic)        
-        def _jax_wrapped_calc_bernoulli_gumbel_softmax(key, prob, params):
-            prob = jnp.stack([1.0 - prob, prob], axis=-1)
-            return discrete_approx(key, prob, params)        
-        return _jax_wrapped_calc_bernoulli_gumbel_softmax
-    
-    def bernoulli(self, id, init_params, logic):
-        if self.bernoulli_gumbel_softmax:
-            return self._bernoulli_gumbel_softmax(id, init_params, logic)
-        else:
-            return self._bernoulli_uniform(id, init_params, logic)
-
-    def __str__(self) -> str:
-        return 'SoftRandomSampling'
-    
-
-class Determinization(RandomSampling):
-    '''Random sampling of variables using their deterministic mean estimate.'''
-
-    @staticmethod
-    def _jax_wrapped_calc_discrete_determinized(key, prob, params):
-        literals = enumerate_literals(jnp.shape(prob), axis=-1)
-        sample = jnp.sum(literals * prob, axis=-1)
-        return sample, params
-    
-    def discrete(self, id, init_params, logic):
-        return self._jax_wrapped_calc_discrete_determinized
-    
-    @staticmethod
-    def _jax_wrapped_calc_poisson_determinized(key, rate, params):
-        return rate, params       
-
-    def poisson(self, id, init_params, logic):
-        return self._jax_wrapped_calc_poisson_determinized
-    
-    @staticmethod
-    def _jax_wrapped_calc_binomial_determinized(key, trials, prob, params):
-        sample = trials * prob
-        return sample, params
-    
-    def binomial(self, id, init_params, logic):
-        return self._jax_wrapped_calc_binomial_determinized
-    
-    @staticmethod
-    def _jax_wrapped_calc_negative_binomial_determinized(key, trials, prob, params):
-        sample = trials * ((1.0 / prob) - 1.0)
-        return sample, params
-
-    def negative_binomial(self, id, init_params, logic):
-        return self._jax_wrapped_calc_negative_binomial_determinized
-    
-    @staticmethod
-    def _jax_wrapped_calc_geometric_determinized(key, prob, params):
-        sample = 1.0 / prob
-        return sample, params   
-    
-    def geometric(self, id, init_params, logic):
-        return self._jax_wrapped_calc_geometric_determinized
-    
-    @staticmethod
-    def _jax_wrapped_calc_bernoulli_determinized(key, prob, params):
-        sample = prob
-        return sample, params
-    
-    def bernoulli(self, id, init_params, logic):
-        return self._jax_wrapped_calc_bernoulli_determinized
-
-    def __str__(self) -> str:
-        return 'Deterministic'
-    
-
-# ===========================================================================
-# CONTROL FLOW
-# - soft flow
-#
-# ===========================================================================
-
-class ControlFlow(metaclass=ABCMeta):
-    '''A base class for control flow, including if and switch statements.'''
-    
-    @abstractmethod
-    def if_then_else(self, id, init_params):
-        pass
-    
-    @abstractmethod
-    def switch(self, id, init_params):
-        pass
+            U = random.uniform(key=subkey, shape=jnp.shape(prob), dtype=self.REAL)
+            sample = 1. + SoftFloor.soft_floor(jnp.log1p(-U) / jnp.log1p(-prob + eps), w=w)
+            out_of_bounds = jnp.logical_not(jnp.all(jnp.logical_and(prob >= 0, prob <= 1)))
+            err = err | (out_of_bounds * ERR)
+            return sample, key, err, params
+        return _jax_wrapped_distribution_geometric_reparam
 
 
-class SoftControlFlow(ControlFlow):
-    '''Soft control flow using a probabilistic interpretation.'''
-    
-    def __init__(self, weight: float=10.0) -> None:
-        self.weight = float(weight)
+class DeterminizedGeometric(JaxRDDLCompilerWithGrad):
+
+    def __init__(self, *args, **kwargs) -> None:
+        super(DeterminizedGeometric, self).__init__(*args, **kwargs)
+
+    def get_kwargs(self) -> Dict[str, Any]:
+        return super().get_kwargs()
+
+    def _jax_geometric(self, expr, aux):
+        ERR = JaxRDDLCompilerWithGrad.ERROR_CODES['INVALID_PARAM_GEOMETRIC']
+        JaxRDDLCompilerWithGrad._check_num_args(expr, 1)        
+        arg_prob, = expr.args
         
-    @staticmethod
-    def _jax_wrapped_calc_if_then_else_soft(c, a, b, params):
-        sample = c * a + (1.0 - c) * b
-        return sample, params
-    
-    def if_then_else(self, id, init_params):
-        return self._jax_wrapped_calc_if_then_else_soft
-    
-    def switch(self, id, init_params):
-        id_ = str(id)
-        init_params[id_] = self.weight
-        def _jax_wrapped_calc_switch_soft(pred, cases, params):
-            literals = enumerate_literals(jnp.shape(cases), axis=0)
-            pred = jnp.broadcast_to(pred[jnp.newaxis, ...], shape=jnp.shape(cases))
-            proximity = -jnp.square(pred - literals)
-            softcase = jax.nn.softmax(params[id_] * proximity, axis=0)
-            sample = jnp.sum(cases * softcase, axis=0)
-            return sample, params
-        return _jax_wrapped_calc_switch_soft
-    
-    def __str__(self) -> str:
-        return f'Soft control flow with weight {self.weight}'
-    
-    
-# ===========================================================================
-# LOGIC
-# - exact logic
-# - fuzzy logic
-#
-# ===========================================================================
+        # if prob is non-fluent, always use the exact operation
+        if not self.traced.cached_is_fluent(arg_prob):
+            return super()._jax_geometric(expr, aux)
+          
+        aux['overriden'][expr.id] = __class__.__name__
 
-
-class Logic(metaclass=ABCMeta):
-    '''A base class for representing logic computations in JAX.'''
-    
-    def __init__(self, use64bit: bool=False) -> None:
-        self.set_use64bit(use64bit)
-    
-    def summarize_hyperparameters(self) -> str:
-        return (f'model relaxation:\n'
-                f'    use_64_bit    ={self.use64bit}')
-    
-    def set_use64bit(self, use64bit: bool) -> None:
-        '''Toggles whether or not the JAX system will use 64 bit precision.'''
-        self.use64bit = use64bit
-        if use64bit:
-            self.REAL = jnp.float64
-            self.INT = jnp.int64
-            jax.config.update('jax_enable_x64', True)
-        else:
-            self.REAL = jnp.float32
-            self.INT = jnp.int32
-            jax.config.update('jax_enable_x64', False)
-    
-    @staticmethod
-    def wrap_logic(func):
-        def exact_func(id, init_params):
-            return func
-        return exact_func
+        jax_prob = self._jax(arg_prob, aux)
         
-    def get_operator_dicts(self) -> Dict[str, Union[Callable, Dict[str, Callable]]]:
-        '''Returns a dictionary of all operators in the current logic.'''
-        return {
-            'negative': self.wrap_logic(ExactLogic.exact_unary_function(jnp.negative)),
-            'arithmetic': {
-                '+': self.wrap_logic(ExactLogic.exact_binary_function(jnp.add)),
-                '-': self.wrap_logic(ExactLogic.exact_binary_function(jnp.subtract)),
-                '*': self.wrap_logic(ExactLogic.exact_binary_function(jnp.multiply)),
-                '/': self.wrap_logic(ExactLogic.exact_binary_function(jnp.divide))
-            },
-            'relational': {
-                '>=': self.greater_equal,
-                '<=': self.less_equal,
-                '<': self.less,
-                '>': self.greater,
-                '==': self.equal,
-                '~=': self.not_equal
-            },
-            'logical_not': self.logical_not,
-            'logical': {
-                '^': self.logical_and,
-                '&': self.logical_and,
-                '|': self.logical_or,
-                '~': self.xor,
-                '=>': self.implies,
-                '<=>': self.equiv
-            },
-            'aggregation': {
-                'sum': self.wrap_logic(ExactLogic.exact_aggregation(jnp.sum)),
-                'avg': self.wrap_logic(ExactLogic.exact_aggregation(jnp.mean)),
-                'prod': self.wrap_logic(ExactLogic.exact_aggregation(jnp.prod)),
-                'minimum': self.wrap_logic(ExactLogic.exact_aggregation(jnp.min)),
-                'maximum': self.wrap_logic(ExactLogic.exact_aggregation(jnp.max)),
-                'forall': self.forall,
-                'exists': self.exists,
-                'argmin': self.argmin,
-                'argmax': self.argmax
-            },
-            'unary': {
-                'abs': self.wrap_logic(ExactLogic.exact_unary_function(jnp.abs)),
-                'sgn': self.sgn,
-                'round': self.round,
-                'floor': self.floor,
-                'ceil': self.ceil,
-                'cos': self.wrap_logic(ExactLogic.exact_unary_function(jnp.cos)),
-                'sin': self.wrap_logic(ExactLogic.exact_unary_function(jnp.sin)),
-                'tan': self.wrap_logic(ExactLogic.exact_unary_function(jnp.tan)),
-                'acos': self.wrap_logic(ExactLogic.exact_unary_function(jnp.arccos)),
-                'asin': self.wrap_logic(ExactLogic.exact_unary_function(jnp.arcsin)),
-                'atan': self.wrap_logic(ExactLogic.exact_unary_function(jnp.arctan)),
-                'cosh': self.wrap_logic(ExactLogic.exact_unary_function(jnp.cosh)),
-                'sinh': self.wrap_logic(ExactLogic.exact_unary_function(jnp.sinh)),
-                'tanh': self.wrap_logic(ExactLogic.exact_unary_function(jnp.tanh)),
-                'exp': self.wrap_logic(ExactLogic.exact_unary_function(jnp.exp)),
-                'ln': self.wrap_logic(ExactLogic.exact_unary_function(jnp.log)),
-                'sqrt': self.sqrt,
-                'lngamma': self.wrap_logic(ExactLogic.exact_unary_function(scipy.special.gammaln)),
-                'gamma': self.wrap_logic(ExactLogic.exact_unary_function(scipy.special.gamma))
-            },
-            'binary': {
-                'div': self.div,
-                'mod': self.mod,
-                'fmod': self.mod,
-                'min': self.wrap_logic(ExactLogic.exact_binary_function(jnp.minimum)),
-                'max': self.wrap_logic(ExactLogic.exact_binary_function(jnp.maximum)),
-                'pow': self.wrap_logic(ExactLogic.exact_binary_function(jnp.power)),
-                'log': self.wrap_logic(ExactLogic.exact_binary_log),
-                'hypot': self.wrap_logic(ExactLogic.exact_binary_function(jnp.hypot)),
-            },
-            'control': {
-                'if': self.control_if,
-                'switch': self.control_switch
-            },
-            'sampling': {
-                'Bernoulli': self.bernoulli,
-                'Discrete': self.discrete,
-                'Poisson': self.poisson,
-                'Geometric': self.geometric,
-                'Binomial': self.binomial,
-                'NegativeBinomial': self.negative_binomial
-            }
-        }
+        def _jax_wrapped_distribution_geometric_determinized(fls, nfls, params, key):
+            prob, key, err, params = jax_prob(fls, nfls, params, key)
+            sample = 1. / prob
+            out_of_bounds = jnp.logical_not(jnp.all(jnp.logical_and(prob >= 0, prob <= 1)))
+            err = err | (out_of_bounds * ERR)
+            return sample, key, err, params
+        return _jax_wrapped_distribution_geometric_determinized
 
-    # ===========================================================================
-    # logical operators
-    # ===========================================================================
-    
-    @abstractmethod
-    def logical_and(self, id, init_params):
-        pass
-    
-    @abstractmethod
-    def logical_not(self, id, init_params):
-        pass
-    
-    @abstractmethod
-    def logical_or(self, id, init_params):
-        pass
-    
-    @abstractmethod
-    def xor(self, id, init_params):
-        pass
-    
-    @abstractmethod
-    def implies(self, id, init_params):
-        pass
-    
-    @abstractmethod
-    def equiv(self, id, init_params):
-        pass
-    
-    @abstractmethod
-    def forall(self, id, init_params):
-        pass
-    
-    @abstractmethod
-    def exists(self, id, init_params):    
-        pass
-    
-    # ===========================================================================
-    # comparison operators
-    # ===========================================================================
-    
-    @abstractmethod
-    def greater_equal(self, id, init_params):
-        pass
-    
-    @abstractmethod
-    def greater(self, id, init_params):
-        pass
-    
-    @abstractmethod
-    def less_equal(self, id, init_params):
-        pass
-    
-    @abstractmethod
-    def less(self, id, init_params):
-        pass
-    
-    @abstractmethod
-    def equal(self, id, init_params):
-        pass
-    
-    @abstractmethod
-    def not_equal(self, id, init_params):
-        pass
-    
-    # ===========================================================================
-    # special functions
-    # ===========================================================================
-     
-    @abstractmethod
-    def sgn(self, id, init_params):
-        pass
-    
-    @abstractmethod
-    def floor(self, id, init_params):
-        pass
-    
-    @abstractmethod
-    def round(self, id, init_params):
-        pass
-    
-    @abstractmethod
-    def ceil(self, id, init_params):
-        pass 
-    
-    @abstractmethod
-    def div(self, id, init_params):
-        pass 
-    
-    @abstractmethod
-    def mod(self, id, init_params):
-        pass
-    
-    @abstractmethod
-    def sqrt(self, id, init_params):
-        pass
-    
-    # ===========================================================================
-    # indexing
-    # ===========================================================================
-    
-    @abstractmethod
-    def argmax(self, id, init_params):   
-        pass
-    
-    @abstractmethod
-    def argmin(self, id, init_params):   
-        pass
-    
-    # ===========================================================================
-    # control flow
-    # ===========================================================================
-     
-    @abstractmethod
-    def control_if(self, id, init_params):
-        pass
+
+# ===============================================================================
+# distribution relaxations - Bernoulli
+# ===============================================================================
+
+class ReparameterizedSigmoidBernoulli(JaxRDDLCompilerWithGrad):
+
+    def __init__(self, *args, bernoulli_sigmoid_weight: float=10., **kwargs) -> None:
+        super(ReparameterizedSigmoidBernoulli, self).__init__(*args, **kwargs)
+        self.bernoulli_sigmoid_weight = float(bernoulli_sigmoid_weight)
         
-    @abstractmethod
-    def control_switch(self, id, init_params):
-        pass
-    
-    # ===========================================================================
-    # random variables
-    # ===========================================================================
-     
-    @abstractmethod
-    def discrete(self, id, init_params):
-        pass
-    
-    @abstractmethod
-    def bernoulli(self, id, init_params):
-        pass
-    
-    @abstractmethod
-    def poisson(self, id, init_params):
-        pass
-    
-    @abstractmethod
-    def geometric(self, id, init_params):
-        pass
-    
-    @abstractmethod
-    def binomial(self, id, init_params):
-        pass
+    def get_kwargs(self) -> Dict[str, Any]:
+        kwargs = super().get_kwargs()
+        kwargs['bernoulli_sigmoid_weight'] = self.bernoulli_sigmoid_weight
+        return kwargs
 
-    @abstractmethod
-    def negative_binomial(self, id, init_params):
-        pass
+    def _jax_bernoulli(self, expr, aux):
+        ERR = JaxRDDLCompilerWithGrad.ERROR_CODES['INVALID_PARAM_BERNOULLI']
+        JaxRDDLCompilerWithGrad._check_num_args(expr, 1)
+        arg_prob, = expr.args
+        
+        # if prob is non-fluent, always use the exact operation
+        if not self.traced.cached_is_fluent(arg_prob):
+            return super()._jax_bernoulli(expr, aux)  
+        
+        id_ = expr.id
+        aux['params'][id_] = self.bernoulli_sigmoid_weight
+        aux['overriden'][id_] = __class__.__name__
+
+        jax_prob = self._jax(arg_prob, aux)
+        
+        def _jax_wrapped_distribution_bernoulli_reparam(fls, nfls, params, key):
+            prob, key, err, params = jax_prob(fls, nfls, params, key)
+            key, subkey = random.split(key)
+            U = random.uniform(key=subkey, shape=jnp.shape(prob), dtype=self.REAL)
+            sample = stable_sigmoid(params[id_] * (prob - U))
+            out_of_bounds = jnp.logical_not(jnp.all(jnp.logical_and(prob >= 0, prob <= 1)))
+            err = err | (out_of_bounds * ERR)
+            return sample, key, err, params
+        return _jax_wrapped_distribution_bernoulli_reparam
 
 
-class ExactLogic(Logic):
-    '''A class representing exact logic in JAX.'''
+class GumbelSoftmaxBernoulli(JaxRDDLCompilerWithGrad):
     
-    @staticmethod
-    def exact_unary_function(op):
-        def _jax_wrapped_calc_unary_function_exact(x, params):
-            return op(x), params
-        return _jax_wrapped_calc_unary_function_exact
+    def __init__(self, *args, 
+                 bernoulli_softmax_weight: float=10., 
+                 bernoulli_eps: float=1e-14, **kwargs) -> None:
+        super(GumbelSoftmaxBernoulli, self).__init__(*args, **kwargs)
+        self.bernoulli_softmax_weight = float(bernoulli_softmax_weight)
+        self.bernoulli_eps = float(bernoulli_eps)
     
-    @staticmethod
-    def exact_binary_function(op):
-        def _jax_wrapped_calc_binary_function_exact(x, y, params):
-            return op(x, y), params
-        return _jax_wrapped_calc_binary_function_exact
-    
-    @staticmethod
-    def exact_aggregation(op):        
-        def _jax_wrapped_calc_aggregation_exact(x, axis, params):
-            return op(x, axis=axis), params   
-        return _jax_wrapped_calc_aggregation_exact
+    def get_kwargs(self) -> Dict[str, Any]:
+        kwargs = super().get_kwargs()
+        kwargs['bernoulli_softmax_weight'] = self.bernoulli_softmax_weight
+        kwargs['bernoulli_eps'] = self.bernoulli_eps
+        return kwargs
 
-    # ===========================================================================
-    # logical operators
-    # ===========================================================================
-     
-    def logical_and(self, id, init_params):
-        return self.exact_binary_function(jnp.logical_and)
+    def _jax_bernoulli(self, expr, aux):
+        ERR = JaxRDDLCompilerWithGrad.ERROR_CODES['INVALID_PARAM_BERNOULLI']
+        JaxRDDLCompilerWithGrad._check_num_args(expr, 1)
+        arg_prob, = expr.args
+        
+        # if prob is non-fluent, always use the exact operation
+        if not self.traced.cached_is_fluent(arg_prob):
+            return super()._jax_bernoulli(expr, aux)  
+        
+        id_ = expr.id
+        aux['params'][id_] = (self.bernoulli_softmax_weight, self.bernoulli_eps)
+        aux['overriden'][id_] = __class__.__name__
+
+        jax_prob = self._jax(arg_prob, aux)
+        
+        def _jax_wrapped_distribution_bernoulli_gumbel_softmax(fls, nfls, params, key):
+            w, eps = params[id_]
+            prob, key, err, params = jax_prob(fls, nfls, params, key)
+            probs = jnp.stack([1. - prob, prob], axis=-1)
+            key, subkey = random.split(key)
+            g = random.gumbel(key=subkey, shape=jnp.shape(probs), dtype=self.REAL)
+            sample = SoftmaxArgmax.soft_argmax(g + jnp.log(probs + eps), w=w, axes=-1)
+            out_of_bounds = jnp.logical_not(jnp.all(jnp.logical_and(prob >= 0, prob <= 1)))
+            err = err | (out_of_bounds * ERR)
+            return sample, key, err, params
+        return _jax_wrapped_distribution_bernoulli_gumbel_softmax
     
-    def logical_not(self, id, init_params):
-        return self.exact_unary_function(jnp.logical_not)
+
+class DeterminizedBernoulli(JaxRDDLCompilerWithGrad):
+
+    def __init__(self, *args, **kwargs) -> None:
+        super(DeterminizedBernoulli, self).__init__(*args, **kwargs)
+
+    def get_kwargs(self) -> Dict[str, Any]:
+        return super().get_kwargs()
+
+    def _jax_bernoulli(self, expr, aux):
+        ERR = JaxRDDLCompilerWithGrad.ERROR_CODES['INVALID_PARAM_BERNOULLI']
+        JaxRDDLCompilerWithGrad._check_num_args(expr, 1)
+        arg_prob, = expr.args
+        
+        # if prob is non-fluent, always use the exact operation
+        if not self.traced.cached_is_fluent(arg_prob):
+            return super()._jax_bernoulli(expr, aux)  
+        
+        aux['overriden'][expr.id] = __class__.__name__
+
+        jax_prob = self._jax(arg_prob, aux)
+        
+        def _jax_wrapped_distribution_bernoulli_determinized(fls, nfls, params, key):
+            prob, key, err, params = jax_prob(fls, nfls, params, key)
+            sample = prob
+            out_of_bounds = jnp.logical_not(jnp.all(jnp.logical_and(prob >= 0, prob <= 1)))
+            err = err | (out_of_bounds * ERR)
+            return sample, key, err, params
+        return _jax_wrapped_distribution_bernoulli_determinized
     
-    def logical_or(self, id, init_params):
-        return self.exact_binary_function(jnp.logical_or)
+
+# ===============================================================================
+# distribution relaxations - Discrete
+# ===============================================================================
+
+# https://arxiv.org/pdf/1611.01144
+class GumbelSoftmaxDiscrete(JaxRDDLCompilerWithGrad):
     
-    def xor(self, id, init_params):
-        return self.exact_binary_function(jnp.logical_xor)
+    def __init__(self, *args, 
+                 discrete_softmax_weight: float=10., 
+                 discrete_eps: float=1e-14, **kwargs) -> None:
+        super(GumbelSoftmaxDiscrete, self).__init__(*args, **kwargs)
+        self.discrete_softmax_weight = float(discrete_softmax_weight)
+        self.discrete_eps = float(discrete_eps)
+        
+    def get_kwargs(self) -> Dict[str, Any]:
+        kwargs = super().get_kwargs()
+        kwargs['discrete_softmax_weight'] = self.discrete_softmax_weight
+        kwargs['discrete_eps'] = self.discrete_eps
+        return kwargs
+
+    def _jax_discrete(self, expr, aux, unnorm):
+
+        # if all probabilities are non-fluent, then always sample exact
+        ordered_args = self.traced.cached_sim_info(expr)
+        if not any(self.traced.cached_is_fluent(arg) for arg in ordered_args):
+            return super()._jax_discrete(expr, aux) 
+        
+        id_ = expr.id
+        aux['params'][id_] = (self.discrete_softmax_weight, self.discrete_eps)
+        aux['overriden'][id_] = __class__.__name__
+
+        jax_probs = [self._jax(arg, aux) for arg in ordered_args]
+        prob_fn = self._jax_discrete_prob(jax_probs, unnorm)
+        
+        def _jax_wrapped_distribution_discrete_gumbel_softmax(fls, nfls, params, key):
+            w, eps = params[id_]
+            prob, key, err, params = prob_fn(fls, nfls, params, key)
+            key, subkey = random.split(key)
+            g = random.gumbel(key=subkey, shape=jnp.shape(prob), dtype=self.REAL)
+            sample = SoftmaxArgmax.soft_argmax(g + jnp.log(prob + eps), w=w, axes=-1)
+            err = JaxRDDLCompilerWithGrad._jax_update_discrete_oob_error(err, prob)
+            return sample, key, err, params
+        return _jax_wrapped_distribution_discrete_gumbel_softmax
     
+    def _jax_discrete_pvar(self, expr, aux, unnorm):
+        JaxRDDLCompilerWithGrad._check_num_args(expr, 2)
+        _, args = expr.args
+        arg, = args
+
+        # if all probabilities are non-fluent, then always sample exact
+        if not self.traced.cached_is_fluent(arg):
+            return super()._jax_discrete_pvar(expr, aux) 
+        
+        id_ = expr.id
+        aux['params'][id_] = (self.discrete_softmax_weight, self.discrete_eps)
+        aux['overriden'][id_] = __class__.__name__
+        
+        jax_probs = self._jax(arg, aux)
+        prob_fn = self._jax_discrete_pvar_prob(jax_probs, unnorm)
+
+        def _jax_wrapped_distribution_discrete_pvar_gumbel_softmax(fls, nfls, params, key):
+            w, eps = params[id_]
+            prob, key, err, params = prob_fn(fls, nfls, params, key)
+            key, subkey = random.split(key)
+            g = random.gumbel(key=subkey, shape=jnp.shape(prob), dtype=self.REAL)
+            sample = SoftmaxArgmax.soft_argmax(g + jnp.log(prob + eps), w=w, axes=-1)
+            err = JaxRDDLCompilerWithGrad._jax_update_discrete_oob_error(err, prob)
+            return sample, key, err, params
+        return _jax_wrapped_distribution_discrete_pvar_gumbel_softmax
+
+
+class DeterminizedDiscrete(JaxRDDLCompilerWithGrad):
+    
+    def __init__(self, *args, **kwargs) -> None:
+        super(DeterminizedDiscrete, self).__init__(*args, **kwargs)
+
+    def get_kwargs(self) -> Dict[str, Any]:
+        return super().get_kwargs()
+
+    def _jax_discrete(self, expr, aux, unnorm):
+        
+        # if all probabilities are non-fluent, then always sample exact
+        ordered_args = self.traced.cached_sim_info(expr)
+        if not any(self.traced.cached_is_fluent(arg) for arg in ordered_args):
+            return super()._jax_discrete(expr, aux) 
+        
+        aux['overriden'][expr.id] = __class__.__name__
+        
+        jax_probs = [self._jax(arg, aux) for arg in ordered_args]
+        prob_fn = self._jax_discrete_prob(jax_probs, unnorm)
+        
+        def _jax_wrapped_distribution_discrete_determinized(fls, nfls, params, key):
+            prob, key, err, params = prob_fn(fls, nfls, params, key)
+            literals = enumerate_literals(jnp.shape(prob), axis=-1)
+            sample = jnp.sum(literals * prob, axis=-1)
+            err = JaxRDDLCompilerWithGrad._jax_update_discrete_oob_error(err, prob)
+            return sample, key, err, params
+        return _jax_wrapped_distribution_discrete_determinized
+    
+    def _jax_discrete_pvar(self, expr, aux, unnorm):
+        JaxRDDLCompilerWithGrad._check_num_args(expr, 2)
+        _, args = expr.args
+        arg, = args
+
+        # if all probabilities are non-fluent, then always sample exact
+        if not self.traced.cached_is_fluent(arg):
+            return super()._jax_discrete_pvar(expr, aux) 
+
+        aux['overriden'][expr.id] = __class__.__name__
+        
+        jax_probs = self._jax(arg, aux)
+        prob_fn = self._jax_discrete_pvar_prob(jax_probs, unnorm)
+
+        def _jax_wrapped_distribution_discrete_pvar_determinized(fls, nfls, params, key):
+            prob, key, err, params = prob_fn(fls, nfls, params, key)
+            literals = enumerate_literals(jnp.shape(prob), axis=-1)
+            sample = jnp.sum(literals * prob, axis=-1)
+            err = JaxRDDLCompilerWithGrad._jax_update_discrete_oob_error(err, prob)
+            return sample, key, err, params
+        return _jax_wrapped_distribution_discrete_pvar_determinized
+
+
+# ===============================================================================
+# distribution relaxations - Binomial
+# ===============================================================================
+
+class GumbelSoftmaxBinomial(JaxRDDLCompilerWithGrad):
+
+    def __init__(self, *args, 
+                 binomial_nbins: int=100, 
+                 binomial_softmax_weight: float=10., 
+                 binomial_eps: float=1e-14, **kwargs) -> None:
+        super(GumbelSoftmaxBinomial, self).__init__(*args, **kwargs)
+        self.binomial_nbins = binomial_nbins
+        self.binomial_softmax_weight = float(binomial_softmax_weight)
+        self.binomial_eps = float(binomial_eps)
+        
+    def get_kwargs(self) -> Dict[str, Any]:
+        kwargs = super().get_kwargs()
+        kwargs['binomial_nbins'] = self.binomial_nbins
+        kwargs['binomial_softmax_weight'] = self.binomial_softmax_weight
+        kwargs['binomial_eps'] = self.binomial_eps
+        return kwargs
+
+    # normal approximation to Binomial: Bin(n, p) -> Normal(np, np(1-p))
     @staticmethod
-    def _jax_wrapped_calc_implies_exact(x, y, params):
-        return jnp.logical_or(jnp.logical_not(x), y), params     
+    def normal_approx_to_binomial(key: random.PRNGKey, 
+                                  trials: jnp.ndarray, prob: jnp.ndarray) -> jnp.ndarray:
+        normal = random.normal(key=key, shape=jnp.shape(trials), dtype=prob.dtype)
+        mean = trials * prob
+        std = jnp.sqrt(trials * jnp.clip(prob * (1.0 - prob), 0.0, 1.0))
+        return mean + std * normal
     
-    def implies(self, id, init_params):
-        return self._jax_wrapped_calc_implies_exact
-    
-    def equiv(self, id, init_params):
-        return self.exact_binary_function(jnp.equal)
-    
-    def forall(self, id, init_params):
-        return self.exact_aggregation(jnp.all)
-    
-    def exists(self, id, init_params):
-        return self.exact_aggregation(jnp.any)
-    
-    # ===========================================================================
-    # comparison operators
-    # ===========================================================================
-    
-    def greater_equal(self, id, init_params):
-        return self.exact_binary_function(jnp.greater_equal)
-    
-    def greater(self, id, init_params):
-        return self.exact_binary_function(jnp.greater)
-    
-    def less_equal(self, id, init_params):
-        return self.exact_binary_function(jnp.less_equal)
-    
-    def less(self, id, init_params):
-        return self.exact_binary_function(jnp.less)
-    
-    def equal(self, id, init_params):
-        return self.exact_binary_function(jnp.equal)
-    
-    def not_equal(self, id, init_params):
-        return self.exact_binary_function(jnp.not_equal)
-    
-    # ===========================================================================
-    # special functions
-    # ===========================================================================
-     
-    @staticmethod
-    def exact_binary_log(x, y, params):
-        return jnp.log(x) / jnp.log(y), params
-    
-    def sgn(self, id, init_params):
-        return self.exact_unary_function(jnp.sign)
-    
-    def floor(self, id, init_params):
-        return self.exact_unary_function(jnp.floor)
-    
-    def round(self, id, init_params):
-        return self.exact_unary_function(jnp.round)
-    
-    def ceil(self, id, init_params):
-        return self.exact_unary_function(jnp.ceil)
-    
-    def div(self, id, init_params):
-        return self.exact_binary_function(jnp.floor_divide)
-    
-    def mod(self, id, init_params):
-        return self.exact_binary_function(jnp.mod)
-    
-    def sqrt(self, id, init_params):
-        return self.exact_unary_function(jnp.sqrt)
-    
-    # ===========================================================================
-    # indexing
-    # ===========================================================================
-     
-    def argmax(self, id, init_params):   
-        return self.exact_aggregation(jnp.argmax)
-    
-    def argmin(self, id, init_params):   
-        return self.exact_aggregation(jnp.argmin)
-    
-    # ===========================================================================
-    # control flow
-    # ===========================================================================
-    
-    @staticmethod
-    def _jax_wrapped_calc_if_then_else_exact(c, a, b, params):
-        return jnp.where(c > 0.5, a, b), params
-         
-    def control_if(self, id, init_params):
-        return self._jax_wrapped_calc_if_then_else_exact
-    
-    def control_switch(self, id, init_params):
-        def _jax_wrapped_calc_switch_exact(pred, cases, params):
-            pred = jnp.asarray(pred[jnp.newaxis, ...], dtype=self.INT)
-            sample = jnp.take_along_axis(cases, pred, axis=0)
-            assert sample.shape[0] == 1
-            return sample[0, ...], params
-        return _jax_wrapped_calc_switch_exact
-    
-    # ===========================================================================
-    # random variables
-    # ===========================================================================
-    
-    @staticmethod
-    def _jax_wrapped_calc_discrete_exact(key, prob, params):
-        sample = random.categorical(key=key, logits=jnp.log(prob), axis=-1)
-        return sample, params  
-    
-    def discrete(self, id, init_params):
-        return self._jax_wrapped_calc_discrete_exact
-    
-    @staticmethod
-    def _jax_wrapped_calc_bernoulli_exact(key, prob, params):
-        return random.bernoulli(key, prob), params
-    
-    def bernoulli(self, id, init_params):
-        return self._jax_wrapped_calc_bernoulli_exact
-    
-    def poisson(self, id, init_params):
-        def _jax_wrapped_calc_poisson_exact(key, rate, params):
-            sample = random.poisson(key=key, lam=rate, dtype=self.INT)
-            return sample, params
-        return _jax_wrapped_calc_poisson_exact
-    
-    def geometric(self, id, init_params):
-        def _jax_wrapped_calc_geometric_exact(key, prob, params):
-            sample = random.geometric(key=key, p=prob, dtype=self.INT)
-            return sample, params
-        return _jax_wrapped_calc_geometric_exact
-    
-    def binomial(self, id, init_params):
-        def _jax_wrapped_calc_binomial_exact(key, trials, prob, params):
+    def gumbel_softmax_approx_to_binomial(self, key: random.PRNGKey, 
+                                          trials: jnp.ndarray, prob: jnp.ndarray, 
+                                          w: float, eps: float):
+        ks = jnp.arange(self.binomial_nbins)[(jnp.newaxis,) * jnp.ndim(trials) + (...,)]
+        trials = trials[..., jnp.newaxis]
+        prob = prob[..., jnp.newaxis]
+        in_support = ks <= trials
+        ks = jnp.minimum(ks, trials)
+        log_prob = ((scipy.special.gammaln(trials + 1) - 
+                     scipy.special.gammaln(ks + 1) - 
+                     scipy.special.gammaln(trials - ks + 1)) +
+                    ks * jnp.log(prob + eps) + 
+                    (trials - ks) * jnp.log1p(-prob + eps))
+        log_prob = jnp.where(in_support, log_prob, jnp.log(eps))
+        g = random.gumbel(key=key, shape=jnp.shape(log_prob), dtype=prob.dtype)
+        return SoftmaxArgmax.soft_argmax(g + log_prob, w=w, axes=-1)
+        
+    def _jax_binomial(self, expr, aux):
+        ERR = JaxRDDLCompilerWithGrad.ERROR_CODES['INVALID_PARAM_BINOMIAL']
+        JaxRDDLCompilerWithGrad._check_num_args(expr, 2)
+        arg_trials, arg_prob = expr.args
+
+        # if prob is non-fluent, always use the exact operation
+        if (not self.traced.cached_is_fluent(arg_trials) and 
+            not self.traced.cached_is_fluent(arg_prob)):
+            return super()._jax_binomial(expr, aux)
+        
+        id_ = expr.id
+        aux['params'][id_] = (self.binomial_softmax_weight, self.binomial_eps)
+        aux['overriden'][id_] = __class__.__name__
+        
+        # recursively compile arguments
+        jax_trials = self._jax(arg_trials, aux)
+        jax_prob = self._jax(arg_prob, aux)
+
+        def _jax_wrapped_distribution_binomial_gumbel_softmax(fls, nfls, params, key):
+            trials, key, err2, params = jax_trials(fls, nfls, params, key)       
+            prob, key, err1, params = jax_prob(fls, nfls, params, key)
+            key, subkey = random.split(key)
             trials = jnp.asarray(trials, dtype=self.REAL)
             prob = jnp.asarray(prob, dtype=self.REAL)
-            sample = random.binomial(key=key, n=trials, p=prob, dtype=self.REAL)
-            sample = jnp.asarray(sample, dtype=self.INT)
-            return sample, params
-        return _jax_wrapped_calc_binomial_exact
+
+            # use the gumbel-softmax trick for small population size
+            # use the normal approximation for large population size
+            sample = jnp.where(
+                jax.lax.stop_gradient(trials < self.binomial_nbins), 
+                self.gumbel_softmax_approx_to_binomial(subkey, trials, prob, *params[id_]), 
+                self.normal_approx_to_binomial(subkey, trials, prob)
+            )
+
+            out_of_bounds = jnp.logical_not(jnp.all(
+                jnp.logical_and(jnp.logical_and(prob >= 0, prob <= 1), trials >= 0)))
+            err = err1 | err2 | (out_of_bounds * ERR)
+            return sample, key, err, params
+        return _jax_wrapped_distribution_binomial_gumbel_softmax
     
-    # note: for some reason tfp defines it as number of successes before trials failures
-    # I will define it as the number of failures before trials successes
-    def negative_binomial(self, id, init_params):
-        def _jax_wrapped_calc_negative_binomial_exact(key, trials, prob, params):
+
+class DeterminizedBinomial(JaxRDDLCompilerWithGrad):
+
+    def __init__(self, *args, **kwargs) -> None:
+        super(DeterminizedBinomial, self).__init__(*args, **kwargs)
+
+    def get_kwargs(self) -> Dict[str, Any]:
+        return super().get_kwargs()
+
+    def _jax_binomial(self, expr, aux):
+        ERR = JaxRDDLCompilerWithGrad.ERROR_CODES['INVALID_PARAM_BINOMIAL']
+        JaxRDDLCompilerWithGrad._check_num_args(expr, 2)
+        arg_trials, arg_prob = expr.args
+
+        # if prob is non-fluent, always use the exact operation
+        if (not self.traced.cached_is_fluent(arg_trials) and 
+            not self.traced.cached_is_fluent(arg_prob)):
+            return super()._jax_binomial(expr, aux)
+        
+        aux['overriden'][expr.id] = __class__.__name__
+        
+        jax_trials = self._jax(arg_trials, aux)
+        jax_prob = self._jax(arg_prob, aux)
+
+        def _jax_wrapped_distribution_binomial_determinized(fls, nfls, params, key):
+            trials, key, err2, params = jax_trials(fls, nfls, params, key)       
+            prob, key, err1, params = jax_prob(fls, nfls, params, key)
             trials = jnp.asarray(trials, dtype=self.REAL)
             prob = jnp.asarray(prob, dtype=self.REAL)
-            dist = tfp.distributions.NegativeBinomial(total_count=trials, probs=1.0 - prob)
-            sample = jnp.asarray(dist.sample(seed=key), dtype=self.INT)
-            return sample, params
-        return _jax_wrapped_calc_negative_binomial_exact
+            sample = trials * prob
+            out_of_bounds = jnp.logical_not(jnp.all(
+                jnp.logical_and(jnp.logical_and(prob >= 0, prob <= 1), trials >= 0)))
+            err = err1 | err2 | (out_of_bounds * ERR)
+            return sample, key, err, params
+        return _jax_wrapped_distribution_binomial_determinized    
 
+
+# ===============================================================================
+# distribution relaxations - Poisson and NegativeBinomial
+# ===============================================================================
+
+class ExponentialPoisson(JaxRDDLCompilerWithGrad):
     
-class FuzzyLogic(Logic):
-    '''A class representing fuzzy logic in JAX.'''
-    
-    def __init__(self, tnorm: TNorm=ProductTNorm(),
-                 complement: Complement=StandardComplement(),
-                 comparison: Comparison=SigmoidComparison(),
-                 sampling: RandomSampling=SoftRandomSampling(),
-                 rounding: Rounding=SoftRounding(),
-                 control: ControlFlow=SoftControlFlow(),
-                 eps: float=1e-15,
-                 use64bit: bool=False) -> None:
-        '''Creates a new fuzzy logic in Jax.
+    def __init__(self, *args, 
+                 poisson_nbins: int=100, 
+                 poisson_comparison_weight: float=10., 
+                 poisson_min_cdf: float=0.999, **kwargs) -> None:
+        super(ExponentialPoisson, self).__init__(*args, **kwargs)
+        self.poisson_nbins = poisson_nbins
+        self.poisson_comparison_weight = float(poisson_comparison_weight)
+        self.poisson_min_cdf = float(poisson_min_cdf)
         
-        :param tnorm: fuzzy operator for logical AND
-        :param complement: fuzzy operator for logical NOT
-        :param comparison: fuzzy operator for comparisons (>, >=, <, ==, ~=, ...)
-        :param sampling: random sampling of non-reparameterizable distributions
-        :param rounding: rounding floating values to integers
-        :param control: if and switch control structures
-        :param eps: small positive float to mitigate underflow
-        :param use64bit: whether to perform arithmetic in 64 bit
-        '''
-        super().__init__(use64bit=use64bit)
-        self.tnorm = tnorm
-        self.complement = complement
-        self.comparison = comparison
-        self.sampling = sampling
-        self.rounding = rounding
-        self.control = control
-        self.eps = eps
-    
-    def __str__(self) -> str:
-        return (f'model relaxation:\n'
-                f'    tnorm        ={str(self.tnorm)}\n'
-                f'    complement   ={str(self.complement)}\n'
-                f'    comparison   ={str(self.comparison)}\n'
-                f'    sampling     ={str(self.sampling)}\n'
-                f'    rounding     ={str(self.rounding)}\n'
-                f'    control      ={str(self.control)}\n'
-                f'    underflow_tol={self.eps}\n'
-                f'    use_64_bit   ={self.use64bit}\n')
+    def get_kwargs(self) -> Dict[str, Any]:
+        kwargs = super().get_kwargs()
+        kwargs['poisson_nbins'] = self.poisson_nbins
+        kwargs['poisson_comparison_weight'] = self.poisson_comparison_weight
+        kwargs['poisson_min_cdf'] = self.poisson_min_cdf
+        return kwargs
 
-    def summarize_hyperparameters(self) -> str:
-        return self.__str__()
+    def exponential_approx_to_poisson(self, key: random.PRNGKey, 
+                                      rate: jnp.ndarray, w: float) -> jnp.ndarray:
+        exp = random.exponential(
+            key=key, shape=(self.poisson_nbins,) + jnp.shape(rate), dtype=rate.dtype)
+        delta_t = exp / rate[jnp.newaxis, ...]
+        times = jnp.cumsum(delta_t, axis=0)
+        indicator = stable_sigmoid(w * (1. - times))
+        return jnp.sum(indicator, axis=0)
+
+    def branched_approx_to_poisson(self, key: random.PRNGKey, 
+                                   rate: jnp.ndarray, w: float, min_cdf: float) -> jnp.ndarray:
+        cuml_prob = scipy.stats.poisson.cdf(self.poisson_nbins, rate)
+        z = random.normal(key=key, shape=jnp.shape(rate), dtype=rate.dtype)
+        return jnp.where(
+            jax.lax.stop_gradient(cuml_prob >= min_cdf), 
+            self.exponential_approx_to_poisson(key, rate, w), 
+            rate + jnp.sqrt(rate) * z
+        )
+
+    def _jax_poisson(self, expr, aux):
+        ERR = JaxRDDLCompilerWithGrad.ERROR_CODES['INVALID_PARAM_POISSON']
+        JaxRDDLCompilerWithGrad._check_num_args(expr, 1)
+        arg_rate, = expr.args
         
-    # ===========================================================================
-    # logical operators
-    # ===========================================================================
-     
-    def logical_and(self, id, init_params):
-        return self.tnorm.norm(id, init_params)
-    
-    def logical_not(self, id, init_params):
-        return self.complement(id, init_params)
-    
-    def logical_or(self, id, init_params):
-        _not1 = self.complement(f'{id}_~1', init_params)
-        _not2 = self.complement(f'{id}_~2', init_params)
-        _and = self.tnorm.norm(f'{id}_^', init_params)
-        _not = self.complement(f'{id}_~', init_params)
+        # if rate is non-fluent, always use the exact operation
+        if not self.traced.cached_is_fluent(arg_rate):
+            return super()._jax_poisson(expr, aux)
         
-        def _jax_wrapped_calc_or_approx(x, y, params):
-            not_x, params = _not1(x, params)
-            not_y, params = _not2(y, params)
-            not_x_and_not_y, params = _and(not_x, not_y, params)
-            return _not(not_x_and_not_y, params)        
-        return _jax_wrapped_calc_or_approx
-
-    def xor(self, id, init_params):
-        _not = self.complement(f'{id}_~', init_params)
-        _and1 = self.tnorm.norm(f'{id}_^1', init_params)
-        _and2 = self.tnorm.norm(f'{id}_^2', init_params)
-        _or = self.logical_or(f'{id}_|', init_params)
+        id_ = expr.id
+        aux['params'][id_] = (self.poisson_comparison_weight, self.poisson_min_cdf)
+        aux['overriden'][id_] = __class__.__name__
         
-        def _jax_wrapped_calc_xor_approx(x, y, params):
-            x_and_y, params = _and1(x, y, params)
-            not_x_and_y, params = _not(x_and_y, params)
-            x_or_y, params = _or(x, y, params)
-            return _and2(x_or_y, not_x_and_y, params)        
-        return _jax_wrapped_calc_xor_approx
+        jax_rate = self._jax(arg_rate, aux)
         
-    def implies(self, id, init_params):
-        _not = self.complement(f'{id}_~', init_params)
-        _or = self.logical_or(f'{id}_|', init_params)
+        # use the exponential/Poisson process trick for small rate
+        # use the normal approximation for large rate
+        def _jax_wrapped_distribution_poisson_exponential(fls, nfls, params, key):
+            rate, key, err, params = jax_rate(fls, nfls, params, key)
+            key, subkey = random.split(key)
+            sample = self.branched_approx_to_poisson(subkey, rate, *params[id_])            
+            out_of_bounds = jnp.logical_not(jnp.all(rate >= 0))
+            err = err | (out_of_bounds * ERR)
+            return sample, key, err, params
+        return _jax_wrapped_distribution_poisson_exponential
+
+    def _jax_negative_binomial(self, expr, aux):
+        ERR = JaxRDDLCompilerWithGrad.ERROR_CODES['INVALID_PARAM_NEGATIVE_BINOMIAL']
+        JaxRDDLCompilerWithGrad._check_num_args(expr, 2)
+        arg_trials, arg_prob = expr.args
+
+        # if prob and trials is non-fluent, always use the exact operation
+        if (not self.traced.cached_is_fluent(arg_trials) and 
+            not self.traced.cached_is_fluent(arg_prob)):
+            return super()._jax_negative_binomial(expr, aux)
         
-        def _jax_wrapped_calc_implies_approx(x, y, params):
-            not_x, params = _not(x, params)
-            return _or(not_x, y, params)        
-        return _jax_wrapped_calc_implies_approx
-       
-    def equiv(self, id, init_params):
-        _implies1 = self.implies(f'{id}_=>1', init_params)
-        _implies2 = self.implies(f'{id}_=>2', init_params)
-        _and = self.tnorm.norm(f'{id}_^', init_params)
-           
-        def _jax_wrapped_calc_equiv_approx(x, y, params):
-            x_implies_y, params = _implies1(x, y, params)
-            y_implies_x, params = _implies2(y, x, params)
-            return _and(x_implies_y, y_implies_x, params)        
-        return _jax_wrapped_calc_equiv_approx
-    
-    def forall(self, id, init_params):
-        return self.tnorm.norms(id, init_params)
-    
-    def exists(self, id, init_params):
-        _not1 = self.complement(f'{id}_~1', init_params)
-        _not2 = self.complement(f'{id}_~2', init_params)
-        _forall = self.forall(f'{id}_forall', init_params)
+        id_ = expr.id
+        aux['params'][id_] = (self.poisson_comparison_weight, self.poisson_min_cdf)
+        aux['overriden'][id_] = __class__.__name__
+
+        jax_trials = self._jax(arg_trials, aux)
+        jax_prob = self._jax(arg_prob, aux)
         
-        def _jax_wrapped_calc_exists_approx(x, axis, params):
-            not_x, params = _not1(x, params)
-            forall_not_x, params = _forall(not_x, axis, params)
-            return _not2(forall_not_x, params)        
-        return _jax_wrapped_calc_exists_approx
-    
-    # ===========================================================================
-    # comparison operators
-    # ===========================================================================
-    
-    def greater_equal(self, id, init_params):
-        return self.comparison.greater_equal(id, init_params)
-    
-    def greater(self, id, init_params):
-        return self.comparison.greater(id, init_params)
-    
-    def less_equal(self, id, init_params):
-        _greater_eq = self.greater_equal(id, init_params)        
-        def _jax_wrapped_calc_leq_approx(x, y, params):
-            return _greater_eq(-x, -y, params)        
-        return _jax_wrapped_calc_leq_approx
-    
-    def less(self, id, init_params):
-        _greater = self.greater(id, init_params)  
-        def _jax_wrapped_calc_less_approx(x, y, params):
-            return _greater(-x, -y, params)
-        return _jax_wrapped_calc_less_approx
+        # https://en.wikipedia.org/wiki/Negative_binomial_distribution#Gamma%E2%80%93Poisson_mixture
+        def _jax_wrapped_distribution_negative_binomial_exponential(fls, nfls, params, key):
+            trials, key, err2, params = jax_trials(fls, nfls, params, key)       
+            prob, key, err1, params = jax_prob(fls, nfls, params, key)
+            key, subkey = random.split(key)
+            trials = jnp.asarray(trials, dtype=self.REAL)
+            prob = jnp.asarray(prob, dtype=self.REAL)
+            gamma = random.gamma(key=subkey, a=trials, dtype=self.REAL)
+            rate = ((1.0 - prob) / prob) * gamma
+            sample = self.branched_approx_to_poisson(subkey, rate, *params[id_])   
+            out_of_bounds = jnp.logical_not(jnp.all(
+                jnp.logical_and(jnp.logical_and(prob >= 0, prob <= 1), trials > 0)))
+            err = err1 | err2 | (out_of_bounds * ERR)
+            return sample, key, err, params
+        return _jax_wrapped_distribution_negative_binomial_exponential 
 
-    def equal(self, id, init_params):
-        return self.comparison.equal(id, init_params)
+
+class GumbelSoftmaxPoisson(JaxRDDLCompilerWithGrad):
+
+    def __init__(self, *args, 
+                 poisson_nbins: int=100, 
+                 poisson_softmax_weight: float=10., 
+                 poisson_min_cdf: float=0.999, 
+                 poisson_eps: float=1e-14, **kwargs) -> None:
+        super(GumbelSoftmaxPoisson, self).__init__(*args, **kwargs)
+        self.poisson_nbins = poisson_nbins
+        self.poisson_softmax_weight = float(poisson_softmax_weight)
+        self.poisson_min_cdf = float(poisson_min_cdf)
+        self.poisson_eps = float(poisson_eps)
     
-    def not_equal(self, id, init_params):
-        _not = self.complement(f'{id}_~', init_params)
-        _equal = self.comparison.equal(f'{id}_==', init_params)
-        def _jax_wrapped_calc_neq_approx(x, y, params):
-            equal, params = _equal(x, y, params)
-            return _not(equal, params)
-        return _jax_wrapped_calc_neq_approx
+    def get_kwargs(self) -> Dict[str, Any]:
+        kwargs = super().get_kwargs()
+        kwargs['poisson_nbins'] = self.poisson_nbins
+        kwargs['poisson_softmax_weight'] = self.poisson_softmax_weight
+        kwargs['poisson_min_cdf'] = self.poisson_min_cdf
+        kwargs['poisson_eps'] = self.poisson_eps
+        return kwargs
+
+    def gumbel_softmax_poisson(self, key: random.PRNGKey, 
+                               rate: jnp.ndarray, w: float, eps: float) -> jnp.ndarray:
+        ks = jnp.arange(self.poisson_nbins)[(jnp.newaxis,) * jnp.ndim(rate) + (...,)]
+        rate = rate[..., jnp.newaxis]
+        log_prob = ks * jnp.log(rate + eps) - rate - scipy.special.gammaln(ks + 1)
+        g = random.gumbel(key=key, shape=jnp.shape(log_prob), dtype=rate.dtype)
+        return SoftmaxArgmax.soft_argmax(g + log_prob, w=w, axes=-1)
+    
+    def branched_approx_to_poisson(self, key: random.PRNGKey, 
+                                   rate: jnp.ndarray, 
+                                   w: float, min_cdf: float, eps: float) -> jnp.ndarray:
+        cuml_prob = scipy.stats.poisson.cdf(self.poisson_nbins, rate)
+        z = random.normal(key=key, shape=jnp.shape(rate), dtype=rate.dtype)
+        return jnp.where(
+            jax.lax.stop_gradient(cuml_prob >= min_cdf), 
+            self.gumbel_softmax_poisson(key, rate, w, eps), 
+            rate + jnp.sqrt(rate) * z
+        )
         
-    # ===========================================================================
-    # special functions
-    # ===========================================================================
-    
-    def sgn(self, id, init_params):
-        return self.comparison.sgn(id, init_params)
-    
-    def floor(self, id, init_params):
-        return self.rounding.floor(id, init_params)
+    def _jax_poisson(self, expr, aux):
+        ERR = JaxRDDLCompilerWithGrad.ERROR_CODES['INVALID_PARAM_POISSON']
+        JaxRDDLCompilerWithGrad._check_num_args(expr, 1)
+        arg_rate, = expr.args
         
-    def round(self, id, init_params):
-        return self.rounding.round(id, init_params)
-    
-    def ceil(self, id, init_params):
-        _floor = self.rounding.floor(id, init_params)
-        def _jax_wrapped_calc_ceil_approx(x, params):
-            neg_floor, params = _floor(-x, params) 
-            return -neg_floor, params        
-        return _jax_wrapped_calc_ceil_approx
-    
-    def div(self, id, init_params):
-        _floor = self.rounding.floor(id, init_params)        
-        def _jax_wrapped_calc_div_approx(x, y, params):
-            return _floor(x / y, params)
-        return _jax_wrapped_calc_div_approx
-    
-    def mod(self, id, init_params):
-        _div = self.div(id, init_params)        
-        def _jax_wrapped_calc_mod_approx(x, y, params):
-            div, params = _div(x, y, params)
-            return x - y * div, params        
-        return _jax_wrapped_calc_mod_approx
-    
-    def sqrt(self, id, init_params):      
-        def _jax_wrapped_calc_sqrt_approx(x, params):
-            return jnp.sqrt(x + self.eps), params   
-        return _jax_wrapped_calc_sqrt_approx
-    
-    # ===========================================================================
-    # indexing
-    # ===========================================================================
-     
-    def argmax(self, id, init_params): 
-        return self.comparison.argmax(id, init_params)
-    
-    def argmin(self, id, init_params):
-        _argmax = self.argmax(id, init_params)
-        def _jax_wrapped_calc_argmin_approx(x, axis, param):
-            return _argmax(-x, axis, param)        
-        return _jax_wrapped_calc_argmin_approx
-    
-    # ===========================================================================
-    # control flow
-    # ===========================================================================
-     
-    def control_if(self, id, init_params):
-        return self.control.if_then_else(id, init_params)
-    
-    def control_switch(self, id, init_params):
-        return self.control.switch(id, init_params)
-    
-    # ===========================================================================
-    # random variables
-    # ===========================================================================
-     
-    def discrete(self, id, init_params):
-        return self.sampling.discrete(id, init_params, self)
-    
-    def bernoulli(self, id, init_params):
-        return self.sampling.bernoulli(id, init_params, self)
-    
-    def poisson(self, id, init_params):
-        return self.sampling.poisson(id, init_params, self)
-    
-    def geometric(self, id, init_params):
-        return self.sampling.geometric(id, init_params, self)
-    
-    def binomial(self, id, init_params):
-        return self.sampling.binomial(id, init_params, self)
-    
-    def negative_binomial(self, id, init_params):
-        return self.sampling.negative_binomial(id, init_params, self)
-
-
-# ===========================================================================
-# UNIT TESTS
-#
-# ===========================================================================
-
-logic = FuzzyLogic(comparison=SigmoidComparison(10000.0),
-                   rounding=SoftRounding(10000.0),
-                   control=SoftControlFlow(10000.0))
-
-
-def _test_logical():
-    print('testing logical')
-    init_params = {}
-    _and = logic.logical_and(0, init_params)
-    _not = logic.logical_not(1, init_params)
-    _gre = logic.greater(2, init_params)
-    _or = logic.logical_or(3, init_params)
-    _if = logic.control_if(4, init_params)
-    print(init_params)
-
-    # https://towardsdatascience.com/emulating-logical-gates-with-a-neural-network-75c229ec4cc9
-    def test_logic(x1, x2, w):
-        q1, w = _gre(x1, 0, w)
-        q2, w = _gre(x2, 0, w)
-        q3, w = _and(q1, q2, w)
-        q4, w = _not(q1, w)
-        q5, w = _not(q2, w)
-        q6, w = _and(q4, q5, w)        
-        cond, w = _or(q3, q6, w)
-        pred, w = _if(cond, +1, -1, w)
-        return pred
-    
-    x1 = jnp.asarray([1, 1, -1, -1, 0.1, 15, -0.5], dtype=float)
-    x2 = jnp.asarray([1, -1, 1, -1, 10, -30, 6], dtype=float)
-    print(test_logic(x1, x2, init_params))    
-
-
-def _test_indexing():
-    print('testing indexing')
-    init_params = {}
-    _argmax = logic.argmax(0, init_params)
-    _argmin = logic.argmin(1, init_params)
-    print(init_params)
-
-    def argmaxmin(x, w):
-        amax, w = _argmax(x, 0, w)
-        amin, w = _argmin(x, 0, w)
-        return amax, amin
+        # if rate is non-fluent, always use the exact operation
+        if not self.traced.cached_is_fluent(arg_rate):
+            return super()._jax_poisson(expr, aux)
         
-    values = jnp.asarray([2., 3., 5., 4.9, 4., 1., -1., -2.])
-    amax, amin = argmaxmin(values, init_params)
-    print(amax)
-    print(amin)
+        id_ = expr.id
+        aux['params'][id_] = (self.poisson_softmax_weight, self.poisson_min_cdf, self.poisson_eps)
+        aux['overriden'][id_] = __class__.__name__
 
-
-def _test_control():
-    print('testing control')
-    init_params = {}
-    _switch = logic.control_switch(0, init_params)
-    print(init_params)
-    
-    pred = jnp.asarray(jnp.linspace(0, 2, 10))
-    case1 = jnp.asarray([-10.] * 10)
-    case2 = jnp.asarray([1.5] * 10)
-    case3 = jnp.asarray([10.] * 10)
-    cases = jnp.asarray([case1, case2, case3])
-    switch, _ = _switch(pred, cases, init_params)
-    print(switch)
-
-
-def _test_random():
-    print('testing random')
-    key = random.PRNGKey(42)
-    init_params = {}
-    _bernoulli = logic.bernoulli(0, init_params)
-    _discrete = logic.discrete(1, init_params)
-    _geometric = logic.geometric(2, init_params)
-    print(init_params)
-    
-    def bern(n, w):
-        prob = jnp.asarray([0.3] * n)
-        sample, _ = _bernoulli(key, prob, w)
-        return sample
-    
-    samples = bern(50000, init_params)
-    print(jnp.mean(samples))
-    
-    def disc(n, w):
-        prob = jnp.asarray([0.1, 0.4, 0.5])
-        prob = jnp.tile(prob, (n, 1))
-        sample, _ = _discrete(key, prob, w)
-        return sample
+        jax_rate = self._jax(arg_rate, aux)
         
-    samples = disc(50000, init_params)
-    samples = jnp.round(samples)
-    print([jnp.mean(samples == i) for i in range(3)])
+        # use the gumbel-softmax and truncation trick for small rate
+        # use the normal approximation for large rate
+        def _jax_wrapped_distribution_poisson_gumbel_softmax(fls, nfls, params, key):
+            rate, key, err, params = jax_rate(fls, nfls, params, key)
+            key, subkey = random.split(key)
+            sample = self.branched_approx_to_poisson(subkey, rate, *params[id_])
+            out_of_bounds = jnp.logical_not(jnp.all(rate >= 0))
+            err = err | (out_of_bounds * ERR)
+            return sample, key, err, params
+        return _jax_wrapped_distribution_poisson_gumbel_softmax
     
-    def geom(n, w):
-        prob = jnp.asarray([0.3] * n)
-        sample, _ = _geometric(key, prob, w)
-        return sample
-    
-    samples = geom(50000, init_params)
-    print(jnp.mean(samples))
-    
+    def _jax_negative_binomial(self, expr, aux):
+        ERR = JaxRDDLCompilerWithGrad.ERROR_CODES['INVALID_PARAM_NEGATIVE_BINOMIAL']
+        JaxRDDLCompilerWithGrad._check_num_args(expr, 2)
+        arg_trials, arg_prob = expr.args
 
-def _test_rounding():
-    print('testing rounding')
-    init_params = {}
-    _floor = logic.floor(0, init_params)
-    _ceil = logic.ceil(1, init_params)
-    _round = logic.round(2, init_params)
-    _mod = logic.mod(3, init_params)
-    print(init_params)
-    
-    x = jnp.asarray([2.1, 0.6, 1.99, -2.01, -3.2, -0.1, -1.01, 23.01, -101.99, 200.01])
-    print(_floor(x, init_params)[0])
-    print(_ceil(x, init_params)[0])
-    print(_round(x, init_params)[0])
-    print(_mod(x, 2.0, init_params)[0])
+        # if prob and trials is non-fluent, always use the exact operation
+        if (not self.traced.cached_is_fluent(arg_trials) and 
+            not self.traced.cached_is_fluent(arg_prob)):
+            return super()._jax_negative_binomial(expr, aux)
+        
+        id_ = expr.id
+        aux['params'][id_] = (self.poisson_softmax_weight, self.poisson_min_cdf, self.poisson_eps)
+        aux['overriden'][id_] = __class__.__name__
+        
+        jax_trials = self._jax(arg_trials, aux)
+        jax_prob = self._jax(arg_prob, aux)
+
+        # https://en.wikipedia.org/wiki/Negative_binomial_distribution#Gamma%E2%80%93Poisson_mixture
+        def _jax_wrapped_distribution_negative_binomial_gumbel_softmax(fls, nfls, params, key):
+            trials, key, err2, params = jax_trials(fls, nfls, params, key)       
+            prob, key, err1, params = jax_prob(fls, nfls, params, key)
+            key, subkey = random.split(key)
+            trials = jnp.asarray(trials, dtype=self.REAL)
+            prob = jnp.asarray(prob, dtype=self.REAL)
+            gamma = random.gamma(key=subkey, a=trials, dtype=self.REAL)
+            rate = ((1.0 - prob) / prob) * gamma
+            sample = self.branched_approx_to_poisson(subkey, rate, *params[id_])   
+            out_of_bounds = jnp.logical_not(jnp.all(
+                jnp.logical_and(jnp.logical_and(prob >= 0, prob <= 1), trials > 0)))
+            err = err1 | err2 | (out_of_bounds * ERR)
+            return sample, key, err, params
+        return _jax_wrapped_distribution_negative_binomial_gumbel_softmax 
 
 
-if __name__ == '__main__':
-    _test_logical()
-    _test_indexing()
-    _test_control()
-    _test_random()
-    _test_rounding()
+class DeterminizedPoisson(JaxRDDLCompilerWithGrad):
+
+    def __init__(self, *args, **kwargs) -> None:
+        super(DeterminizedPoisson, self).__init__(*args, **kwargs)
+
+    def get_kwargs(self) -> Dict[str, Any]:
+        return super().get_kwargs()
+
+    def _jax_poisson(self, expr, aux):
+        ERR = JaxRDDLCompilerWithGrad.ERROR_CODES['INVALID_PARAM_POISSON']
+        JaxRDDLCompilerWithGrad._check_num_args(expr, 1)
+        arg_rate, = expr.args
+        
+        # if rate is non-fluent, always use the exact operation
+        if not self.traced.cached_is_fluent(arg_rate):
+            return super()._jax_poisson(expr, aux)
+        
+        aux['overriden'][expr.id] = __class__.__name__
+
+        jax_rate = self._jax(arg_rate, aux)
+        
+        def _jax_wrapped_distribution_poisson_determinized(fls, nfls, params, key):
+            rate, key, err, params = jax_rate(fls, nfls, params, key)
+            sample = rate
+            out_of_bounds = jnp.logical_not(jnp.all(rate >= 0))
+            err = err | (out_of_bounds * ERR)
+            return sample, key, err, params
+        return _jax_wrapped_distribution_poisson_determinized
     
+    def _jax_negative_binomial(self, expr, aux):
+        ERR = JaxRDDLCompilerWithGrad.ERROR_CODES['INVALID_PARAM_NEGATIVE_BINOMIAL']
+        JaxRDDLCompilerWithGrad._check_num_args(expr, 2)
+        arg_trials, arg_prob = expr.args
+
+        # if prob and trials is non-fluent, always use the exact operation
+        if (not self.traced.cached_is_fluent(arg_trials) and 
+            not self.traced.cached_is_fluent(arg_prob)):
+            return super()._jax_negative_binomial(expr, aux)
+        
+        aux['overriden'][expr.id] = __class__.__name__
+        
+        jax_trials = self._jax(arg_trials, aux)
+        jax_prob = self._jax(arg_prob, aux)
+        
+        def _jax_wrapped_distribution_negative_binomial_determinized(fls, nfls, params, key):
+            trials, key, err2, params = jax_trials(fls, nfls, params, key)       
+            prob, key, err1, params = jax_prob(fls, nfls, params, key)
+            trials = jnp.asarray(trials, dtype=self.REAL)
+            prob = jnp.asarray(prob, dtype=self.REAL)
+            sample = ((1.0 - prob) / prob) * trials
+            out_of_bounds = jnp.logical_not(jnp.all(
+                jnp.logical_and(jnp.logical_and(prob >= 0, prob <= 1), trials > 0)))
+            err = err1 | err2 | (out_of_bounds * ERR)
+            return sample, key, err, params
+        return _jax_wrapped_distribution_negative_binomial_determinized    
+        
+
+class DefaultJaxRDDLCompilerWithGrad(SigmoidRelational, SoftmaxArgmax, 
+                                     ProductNormLogical, 
+                                     SafeSqrt, SoftFloor, SoftRound, 
+                                     LinearIfElse, SoftmaxSwitch,
+                                     ReparameterizedGeometric, 
+                                     ReparameterizedSigmoidBernoulli,
+                                     GumbelSoftmaxDiscrete, GumbelSoftmaxBinomial,
+                                     ExponentialPoisson):
+    
+    def __init__(self, *args, **kwargs) -> None:
+        super(DefaultJaxRDDLCompilerWithGrad, self).__init__(*args, **kwargs)
+   
+    def get_kwargs(self) -> Dict[str, Any]:
+        kwargs = {}
+        for base in type(self).__bases__:
+            if base.__name__ != 'object':
+                kwargs = {**kwargs, **base.get_kwargs(self)}
+        return kwargs

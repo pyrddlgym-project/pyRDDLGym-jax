@@ -46,8 +46,8 @@ def main(domain: str, instance: str, method: str, episodes: int=1) -> None:
         exit(1)
     
     planner_args, _, train_args = load_config(config_path)
-    if 'dashboard' in train_args: 
-        train_args['dashboard'].launch()
+    if 'dashboard' in planner_args: 
+        planner_args['dashboard'].launch()
     
     # create the planning algorithm
     planner = JaxBackpropPlanner(
