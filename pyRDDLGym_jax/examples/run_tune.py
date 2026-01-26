@@ -77,8 +77,8 @@ def main(domain: str, instance: str, method: str,
     # evaluate the agent on the best parameters
     planner_args, _, train_args = load_config_from_string(tuning.best_config)
     planner = JaxBackpropPlanner(rddl=env.model, **planner_args)
-    klass = JaxOnlineController if method == 'replan' else JaxOfflineController
-    controller = klass(planner, **train_args)
+    class_ = JaxOnlineController if method == 'replan' else JaxOfflineController
+    controller = class_(planner, **train_args)
     controller.evaluate(env, episodes=1, verbose=True, render=True)
     env.close()
 

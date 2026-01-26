@@ -20,7 +20,7 @@
 
 import time
 import numpy as np
-from typing import Callable, Dict, Optional, Union
+from typing import Callable, Dict, Optional, Tuple, Union
 
 import jax
 
@@ -103,7 +103,7 @@ class JaxRDDLSimulator(RDDLSimulator):
         self.terminals = jax.tree_util.tree_map(jax.jit, compiled.terminations)
         self.reward = jax.jit(compiled.reward)
         jax_cpfs = jax.tree_util.tree_map(jax.jit, compiled.cpfs)
-        self.model_params = compiled.model_params
+        self.model_params = compiled.model_aux['params']
         
         # level analysis
         self.cpfs = []  
@@ -116,6 +116,7 @@ class JaxRDDLSimulator(RDDLSimulator):
         
         # initialize all fluent and non-fluent values    
         self.subs = self.init_values.copy() 
+        self.fls, self.nfls = compiled.split_fluent_nonfluent(self.subs)
         self.state = None 
         self.noop_actions = {var: values 
                              for (var, values) in self.init_values.items() 
@@ -142,24 +143,23 @@ class JaxRDDLSimulator(RDDLSimulator):
         for (i, invariant) in enumerate(self.invariants):
             loc = self.invariant_names[i]
             sample, self.key, error, self.model_params = invariant(
-                self.subs, self.model_params, self.key)
+                self.fls, self.nfls, self.model_params, self.key)
             self.handle_error_code(error, loc)            
             if not bool(sample):
                 if not silent:
-                    raise RDDLStateInvariantNotSatisfiedError(
-                        f'{loc} is not satisfied.')
+                    raise RDDLStateInvariantNotSatisfiedError(f'{loc} is not satisfied.')
                 return False
         return True
     
     def check_action_preconditions(self, actions: Args, silent: bool=False) -> bool:
         '''Throws an exception if the action preconditions are not satisfied.'''
-        subs = self.subs
-        subs.update(actions)
+        self.fls.update(actions)
+        self.subs.update(actions)
         
         for (i, precond) in enumerate(self.preconds):
             loc = self.precond_names[i]
             sample, self.key, error, self.model_params = precond(
-                subs, self.model_params, self.key)
+                self.fls, self.nfls, self.model_params, self.key)
             self.handle_error_code(error, loc)            
             if not bool(sample):
                 if not silent:
@@ -173,7 +173,7 @@ class JaxRDDLSimulator(RDDLSimulator):
         for (i, terminal) in enumerate(self.terminals):
             loc = self.terminal_names[i]
             sample, self.key, error, self.model_params = terminal(
-                self.subs, self.model_params, self.key)
+                self.fls, self.nfls, self.model_params, self.key)
             self.handle_error_code(error, loc)
             if bool(sample):
                 return True
@@ -182,24 +182,26 @@ class JaxRDDLSimulator(RDDLSimulator):
     def sample_reward(self) -> float:
         '''Samples the current reward given the current state and action.'''
         reward, self.key, error, self.model_params = self.reward(
-            self.subs, self.model_params, self.key)
+            self.fls, self.nfls, self.model_params, self.key)
         self.handle_error_code(error, 'reward function')
         return float(reward)
     
-    def step(self, actions: Args) -> Args:
+    def step(self, actions: Args) -> Tuple[Args, float, bool]:
         '''Samples and returns the next state from the cpfs.
         
         :param actions: a dict mapping current action fluents to their values
         '''
         rddl = self.rddl
         keep_tensors = self.keep_tensors
-        subs = self.subs
+        subs, fls, nfls = self.subs, self.fls, self.nfls
         subs.update(actions)
+        fls.update(actions)
         
         # compute CPFs in topological order
         for (cpf, expr, _) in self.cpfs:
-            subs[cpf], self.key, error, self.model_params = expr(
-                subs, self.model_params, self.key)
+            fls[cpf], self.key, error, self.model_params = expr(
+                fls, nfls, self.model_params, self.key)
+            subs[cpf] = fls[cpf]
             self.handle_error_code(error, f'CPF <{cpf}>')            
                 
         # sample reward
@@ -210,10 +212,11 @@ class JaxRDDLSimulator(RDDLSimulator):
         for (state, next_state) in rddl.next_state.items():
 
             # set state = state' for the next epoch
+            fls[state] = fls[next_state]
             subs[state] = subs[next_state]
 
             # convert object integer to string representation
-            state_values = subs[state]
+            state_values = fls[state]
             if self.objects_as_strings:
                 ptype = rddl.variable_ranges[state]
                 if ptype not in RDDLValueInitializer.NUMPY_TYPES:
@@ -231,7 +234,7 @@ class JaxRDDLSimulator(RDDLSimulator):
             for var in rddl.observ_fluents:
 
                 # convert object integer to string representation
-                obs_values = subs[var]
+                obs_values = fls[var]
                 if self.objects_as_strings:
                     ptype = rddl.variable_ranges[var]
                     if ptype not in RDDLValueInitializer.NUMPY_TYPES:
@@ -244,7 +247,7 @@ class JaxRDDLSimulator(RDDLSimulator):
                     obs.update(rddl.ground_var_with_values(var, obs_values))
         else:
             obs = self.state
-        
+
         done = self.check_terminal_states()        
         return obs, reward, done
         
