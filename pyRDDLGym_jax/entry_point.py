@@ -1,6 +1,5 @@
 import argparse
 
-from pyRDDLGym_jax.examples import run_plan, run_tune
 
 EPILOG = 'For complete documentation, see https://pyrddlgym.readthedocs.io/en/latest/jax.html.'
 
@@ -47,8 +46,10 @@ def main():
     # dispatch
     args = parser.parse_args()
     if args.jaxplan == "plan":
+        from pyRDDLGym_jax.examples import run_plan
         run_plan.main(args.domain, args.instance, args.method, args.episodes)
     elif args.jaxplan == "tune":
+        from pyRDDLGym_jax.examples import run_tune
         run_tune.main(args.domain, args.instance, args.method, 
                       args.trials, args.iters, args.workers, args.dashboard, 
                       args.filepath)
