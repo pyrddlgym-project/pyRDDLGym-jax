@@ -2370,9 +2370,7 @@ r"""
                     f'Variable <{name}> in subs argument is not a '
                     f'valid p-variable, must be one of '
                     f'{set(self.test_compiled.init_values.keys())}.')
-            if np.size(value) != np.size(init_value):
-                value = init_value
-            value = np.reshape(value, np.shape(init_value))[np.newaxis, ...]       
+            value = np.reshape(value, np.shape(init_value))[np.newaxis, ...]            
             
             # for enum types need to convert the string values to integer indices
             if value.dtype.type is np.str_:
