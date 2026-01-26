@@ -30,6 +30,10 @@ Some demos of solved problems by JaxPlan:
 </p>
 
 > [!WARNING]  
+> Starting in version 3.0 (major release), the structure of the config files and internal API have changed.
+> Please make sure your config files follow the new format. See [examples here](https://github.com/pyrddlgym-project/pyRDDLGym-jax/tree/main/pyRDDLGym_jax/examples/configs).
+
+> [!WARNING]  
 > Starting in version 1.0 (major release), the ``weight`` parameter in the config file was removed, 
 and was moved to the individual logic components which have their own unique weight parameter assigned.
 > Furthermore, the tuning module has been redesigned from the ground up, and supports tuning arbitrary hyper-parameters via config templates!
@@ -121,35 +125,32 @@ The simplest way to configure the planner is to write and pass a configuration f
 The basic structure of a configuration file is provided below for a straight-line planner:
 
 ```ini
-[Model]
-logic='FuzzyLogic'
-comparison_kwargs={'weight': 20}
-rounding_kwargs={'weight': 20}
-control_kwargs={'weight': 20}
+[Compiler]
+method='DefaultJaxRDDLCompilerWithGrad'
+sigmoid_weight=20
 
-[Optimizer]
+[Planner]
 method='JaxStraightLinePlan'
 method_kwargs={}
 optimizer='rmsprop'
 optimizer_kwargs={'learning_rate': 0.001}
 
-[Training]
+[Optimize]
 key=42
 epochs=5000
 train_seconds=30
 ```
 
 The configuration file contains three sections:
-- ``[Model]`` specifies the fuzzy logic operations used to relax discrete operations to differentiable approximations; the ``weight`` dictates the quality of the approximation,
-and ``tnorm`` specifies the type of [fuzzy logic](https://en.wikipedia.org/wiki/T-norm_fuzzy_logics) for relacing logical operations in RDDL (e.g. ``ProductTNorm``, ``GodelTNorm``, ``LukasiewiczTNorm``)
-- ``[Optimizer]`` generally specify the optimizer and plan settings; the ``method`` specifies the plan/policy representation (e.g. ``JaxStraightLinePlan``, ``JaxDeepReactivePolicy``), the gradient descent settings, learning rate, batch size, etc.
-- ``[Training]`` specifies computation limits, such as total training time and number of iterations, and options for printing or visualizing information from the planner.
+- ``[Compiler]`` specifies the fuzzy logic operations used to relax discrete operations to differentiable approximations; the ``weight`` dictates the quality of the approximation
+- ``[Planner]`` generally specify the optimizer and plan settings; the ``method`` specifies the plan/policy representation (e.g. ``JaxStraightLinePlan``, ``JaxDeepReactivePolicy``), the gradient descent settings, learning rate, batch size, etc.
+- ``[Optimize]`` specifies computation limits, such as total training time and number of iterations, and options for printing or visualizing information from the planner.
 
-For a policy network approach, simply change the ``[Optimizer]`` settings like so:
+For a policy network approach, simply change the ``[Planner]`` settings like so:
 
 ```ini
 ...
-[Optimizer]
+[Planner]
 method='JaxDeepReactivePolicy'
 method_kwargs={'topology': [128, 64], 'activation': 'tanh'}
 ...
@@ -177,7 +178,7 @@ and visualization of the policy or model, and other useful debugging features. T
 
 ```ini
 ...
-[Training]
+[Planner]
 dashboard=True
 ...
 ```
@@ -204,19 +205,17 @@ It is easy to tune a custom range of the planner's hyper-parameters efficiently.
 First create a config file template with patterns replacing concrete parameter values that you want to tune, e.g.:
 
 ```ini
-[Model]
-logic='FuzzyLogic'
-comparison_kwargs={'weight': TUNABLE_WEIGHT}
-rounding_kwargs={'weight': TUNABLE_WEIGHT}
-control_kwargs={'weight': TUNABLE_WEIGHT}
+[Compiler]
+method='DefaultJaxRDDLCompilerWithGrad'
+sigmoid_weight=TUNABLE_WEIGHT
 
-[Optimizer]
+[Planner]
 method='JaxStraightLinePlan'
 method_kwargs={}
 optimizer='rmsprop'
 optimizer_kwargs={'learning_rate': TUNABLE_LEARNING_RATE}
 
-[Training]
+[Optimize]
 train_seconds=30
 print_summary=False
 print_progress=False
@@ -225,7 +224,7 @@ train_on_reset=True
 
 would allow to tune the sharpness of model relaxations, and the learning rate of the optimizer.
 
-Next, you must link the patterns in the config with concrete hyper-parameter ranges the tuner will understand, and run the optimizer:
+Next, link the hyperparameters in the config with concrete ranges that the optimizer will use, and run the optimizer:
 
 ```python
 import pyRDDLGym
