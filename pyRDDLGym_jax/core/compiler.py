@@ -463,6 +463,9 @@ class JaxRDDLCompiler:
             steps = jnp.arange(n_steps)
             end, log = jax.lax.scan(batched_policy_step_fn, start, steps)
             log = jax.tree_util.tree_map(partial(jnp.swapaxes, axis1=0, axis2=1), log)
+            if not log['fluents']:
+                log['fluents'] = {name: jnp.expand_dims(fl, axis=1) 
+                                  for (name, fl) in end[3].items()}
             model_params = end[-1]
             return log, model_params        
         return _jax_wrapped_batched_policy_rollout
