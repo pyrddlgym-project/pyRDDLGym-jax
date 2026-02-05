@@ -13,7 +13,6 @@ where:
 '''
 import os
 import sys
-import jax
 from scipy.optimize import minimize
     
 import pyRDDLGym
