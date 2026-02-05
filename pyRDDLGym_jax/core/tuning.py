@@ -21,7 +21,7 @@ import os
 import termcolor
 import time
 import traceback
-from typing import Any, Callable, Dict, Iterable, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, Optional, Tuple, Union
 import warnings
 warnings.filterwarnings("ignore")
 
@@ -122,9 +122,9 @@ class JaxParameterTuning:
         # objective parameters
         self.env = env
         self.config_template = config_template
-        hyperparams_dict = {hyper_param.tag: hyper_param 
-                            for hyper_param in hyperparams
-                            if hyper_param.tag in config_template}
+        hyperparams_dict = {hyperparam.tag: hyperparam 
+                            for hyperparam in hyperparams
+                            if hyperparam.tag in config_template}
         self.hyperparams_dict = hyperparams_dict
         self.online = online
         self.eval_trials = eval_trials
@@ -160,12 +160,12 @@ class JaxParameterTuning:
         return weight1 * kernel1 + weight2 * kernel2 + weight3 * kernel3
         
     def summarize_hyperparameters(self) -> str:
-        hyper_params_table = []
+        hyperparams_table = []
         for (_, param) in self.hyperparams_dict.items():
-            hyper_params_table.append(f'        {str(param)}')
-        hyper_params_table = '\n'.join(hyper_params_table)
+            hyperparams_table.append(f'        {str(param)}')
+        hyperparams_table = '\n'.join(hyperparams_table)
         return (f'hyperparameter optimizer parameters:\n'
-                f'    tuned_hyper_parameters    =\n{hyper_params_table}\n'
+                f'    tuned_hyper_parameters    =\n{hyperparams_table}\n'
                 f'    initialization_args       ={self.gp_init_kwargs}\n'
                 f'    gp_params                 ={self.gp_params}\n'
                 f'    tuning_iterations         ={self.gp_iters}\n'
@@ -189,17 +189,16 @@ class JaxParameterTuning:
         return acq_fn
     
     @staticmethod
-    def search_to_config_params(hyper_params: Hyperparameters,
+    def search_to_config_params(hyperparams: Hyperparameters, 
                                 params: ParameterValues) -> ParameterValues:
         config_params = {
             tag: param.search_to_config_map(params[tag])
-            for (tag, param) in hyper_params.items()
+            for (tag, param) in hyperparams.items()
         }
         return config_params
     
     @staticmethod
-    def config_from_template(config_template: str,
-                             config_params: ParameterValues) -> str:
+    def config_from_template(config_template: str, config_params: ParameterValues) -> str:
         config_string = config_template
         for (tag, param_value) in config_params.items():
             config_string = config_string.replace(tag, str(param_value))
@@ -207,8 +206,20 @@ class JaxParameterTuning:
     
     @property
     def best_config(self) -> str:
+        '''Returns the concrete config by replacing all abstract parameters with
+        the best values found during tuning.
+        '''
         return self.config_from_template(self.config_template, self.best_params)
     
+    def build_best_controller(self) -> Union[JaxOfflineController, JaxOnlineController]:
+        '''Creates the concrete controller instance with the best hyper-parameters.
+        '''
+        planner_args, _, train_args = load_config_from_string(self.best_config)
+        planner = JaxBackpropPlanner(rddl=self.env.model, **planner_args)
+        class_ = JaxOnlineController if self.online else JaxOfflineController
+        controller = class_(planner, **train_args)
+        return controller
+
     @staticmethod
     def queue_listener(queue, dashboard):
         while True:
