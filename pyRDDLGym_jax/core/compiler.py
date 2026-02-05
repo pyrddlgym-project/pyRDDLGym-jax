@@ -88,7 +88,7 @@ class JaxRDDLCompiler:
             self.INT = jnp.int32
             self.REAL = jnp.float32
         jax.config.update('jax_enable_x64', use64bit)
-        self.ONE = jnp.asarray(1, dtype=self.INT)
+        self.ONE = jnp.array(1, dtype=self.INT)
         self.JAX_TYPES = {
             'int': self.INT,
             'real': self.REAL,
@@ -464,8 +464,9 @@ class JaxRDDLCompiler:
             end, log = jax.lax.scan(batched_policy_step_fn, start, steps)
             log = jax.tree_util.tree_map(partial(jnp.swapaxes, axis1=0, axis2=1), log)
             if not log['fluents']:
+                fls_end = end[3]
                 log['fluents'] = {name: jnp.expand_dims(fl, axis=1) 
-                                  for (name, fl) in end[3].items()}
+                                  for (name, fl) in fls_end.items()}
             model_params = end[-1]
             return log, model_params        
         return _jax_wrapped_batched_policy_rollout
@@ -1365,7 +1366,7 @@ class JaxRDDLCompiler:
             # predicate (enum) is an integer - use it to extract from case array
             sample_pred = jnp.asarray(sample_pred[jnp.newaxis, ...], dtype=self.INT)
             sample = jnp.take_along_axis(sample_cases, sample_pred, axis=0)
-            assert sample.shape[0] == 1
+            assert jnp.shape(sample)[0] == 1
             sample = sample[0, ...]
             return sample, key, err, params
         return _jax_wrapped_switch

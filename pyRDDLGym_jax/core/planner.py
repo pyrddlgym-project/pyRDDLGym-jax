@@ -513,7 +513,8 @@ class JaxSogbofaActionProjection(JaxActionProjection):
     def compile(self, ranges: Dict[str, str], noop: Dict[str, Any], 
                 allowed_actions: int, max_constraint_iter: int, 
                 jax_param_to_action: Callable, jax_action_to_param: Callable, 
-                min_action: float, max_action: float, real_dtype: type, *args, **kwargs) -> Callable:
+                min_action: float, max_action: float, real_dtype: type, 
+                *args, **kwargs) -> Callable:
         
         # calculate the surplus of actions above max-nondef-actions
         def _jax_wrapped_sogbofa_surplus(actions):
@@ -1466,8 +1467,8 @@ class GaussianPGPE(PGPE):
                 aa = jnp.abs(a)
                 atol = 1e-10
                 c1, c2, c3 = -0.06655, -0.9706, 0.124
-                term_neg_log = c1 * (aa * aa - 1.) / jnp.log(aa + atol) + c2
-                term_pos_log = 1. - c3 * jnp.log1p(-aa ** 3 + atol)
+                term_neg_log = c1 * (aa * aa - 1.0) / jnp.log(aa + atol) + c2
+                term_pos_log = 1.0 - c3 * jnp.log1p(-aa ** 3 + atol)
                 epsilon_star = jnp.sign(epsilon) * phi * jnp.exp(
                     aa * jnp.where(a <= 0, term_neg_log, term_pos_log))
             
@@ -2083,9 +2084,18 @@ class JaxBackpropPlanner:
         critic_fn = self.critic_fn
 
         def _jax_wrapped_critic(critic_params, key, policy_params, policy_hyperparams, fls):
-            obs = {state: fls[next_state][-1, ...] 
-                   for (state, next_state) in self.rddl.next_state.items()}       
+
+            # fluent tensors have leading time dimension, take last observation
+            if self.rddl.observ_fluents:
+                obs = {name: fls[name][-1, ...] for name in self.rddl.observ_fluents}
+            else:
+                obs = {state: fls[next_state][-1, ...] 
+                    for (state, next_state) in self.rddl.next_state.items()}    
+
+            # calculate action of the last observation   
             act = self.train_policy(key, policy_params, policy_hyperparams, 0, obs)    
+
+            # evaluate and validate critic
             critic_value = jnp.squeeze(critic_fn(critic_params, obs, act))
             assert jnp.isscalar(critic_value), 'Critic value must be a scalar.'
             return critic_value
@@ -2096,11 +2106,15 @@ class JaxBackpropPlanner:
         
         # apply discounting of future reward and then optional symlog transform
         def _jax_wrapped_returns(rewards, critic_values):
+
+            # apply optional discounting
             if gamma != 1:
                 horizon = jnp.shape(rewards)[-1]
                 discount = jnp.power(gamma, jnp.arange(horizon))
                 rewards = rewards * discount[jnp.newaxis, ...]
                 critic_values = critic_values * jnp.power(gamma, horizon)
+            
+            # evaluate return and apply optional symlog transform
             returns = jnp.sum(rewards, axis=1) + critic_values
             if use_symlog:
                 returns = jnp.sign(returns) * jnp.log1p(jnp.abs(returns))
@@ -2118,8 +2132,12 @@ class JaxBackpropPlanner:
         # by default, the utility function is the mean
         def _jax_wrapped_plan_loss(key, policy_params, policy_hyperparams, fls, nfls, 
                                    model_params, critic_params):
+            
+            # generate sample rollouts
             log, model_params = rollouts(
                 key, policy_params, policy_hyperparams, fls, nfls, model_params)
+            
+            # evaluate optional critic network at termination of rollouts
             batch_size = jnp.shape(log['reward'])[0]
             if self.critic_fn is None:
                 critic_values = jnp.zeros((batch_size,), dtype=self.compiled.REAL)
@@ -2128,6 +2146,8 @@ class JaxBackpropPlanner:
                 critic_values = jax.vmap(
                     _jax_wrapped_critic, in_axes=(None, 0, None, None, 0)
                 )(critic_params, keys, policy_params, policy_hyperparams, log['fluents'])
+            
+            # evaluate cumulative return per rollout
             returns = _jax_wrapped_returns(log['reward'], critic_values)
             utility = utility_fn(returns, **utility_kwargs)
             loss = -utility
@@ -2343,7 +2363,7 @@ class JaxBackpropPlanner:
                     '[WARN] policy_hyperparams is not set: setting values to 1.0 for '
                     'all action-fluents, which could be suboptimal.', 'yellow'
                 ))
-            policy_hyperparams = {action: 1. for action in self.rddl.action_fluents}
+            policy_hyperparams = {action: 1.0 for action in self.rddl.action_fluents}
                 
         # initialize the policy parameters
         params_guess = self.initialize(key, policy_hyperparams, fls)[0]
@@ -2419,6 +2439,7 @@ class JaxBackpropPlanner:
         their values: if None initializes all variables from the RDDL instance
         :param guess: initial policy parameters: if None will use the initializer
         specified in this instance
+        :param critic_params: parameters of the critic function
         :param print_summary: whether to print planner header and diagnosis
         :param print_progress: whether to print the progress bar during training
         :param print_hyperparams: whether to print list of hyper-parameter settings   
@@ -2510,7 +2531,7 @@ class JaxBackpropPlanner:
                     '[WARN] policy_hyperparams is not set: setting values to 1.0 for '
                     'all action-fluents, which could be suboptimal.', 'yellow'
                 ))
-            policy_hyperparams = {action: 1. for action in self.rddl.action_fluents}
+            policy_hyperparams = {action: 1.0 for action in self.rddl.action_fluents}
         
         # if policy_hyperparams is a scalar
         elif isinstance(policy_hyperparams, (int, float, np.number)):
@@ -2527,11 +2548,12 @@ class JaxBackpropPlanner:
                             f'setting values to 1.0 for missing action-fluents, '
                             f'which could be suboptimal.', 'yellow'
                         ))
-                    policy_hyperparams[action] = 1.
+                    policy_hyperparams[action] = 1.0
         
-        # initialize preprocessor
-        preproc_key = None
-        if self.preprocessor is not None:
+        # initialize preprocessor        
+        if self.preprocessor is None:
+            preproc_key = None
+        else:
             preproc_key = self.preprocessor.HYPERPARAMS_KEY
             policy_hyperparams[preproc_key] = self.preprocessor.initialize()
 
@@ -2885,8 +2907,8 @@ class JaxBackpropPlanner:
         means = np.zeros((n_boot,))
         for i in range(n_boot):
             means[i] = np.mean(np.random.choice(returns, size=len(returns), replace=True))
-        lower = np.percentile(means, (1 - confidence) / 2 * 100)
-        upper = np.percentile(means, (1 + confidence) / 2 * 100)
+        lower = np.percentile(means, 100 * (1 - confidence) / 2)
+        upper = np.percentile(means, 100 * (1 + confidence) / 2)
         mean = np.mean(returns)
         return mean, lower, upper
 
