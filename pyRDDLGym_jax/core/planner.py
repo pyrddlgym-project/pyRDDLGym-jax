@@ -2298,6 +2298,7 @@ class JaxBackpropPlanner:
     def as_optimization_problem(
             self, key: Optional[random.PRNGKey]=None,
             policy_hyperparams: Optional[Pytree]=None,
+            critic_params: Optional[Pytree]=None,
             loss_function_updates_key: bool=True,
             grad_function_updates_key: bool=False) -> Tuple[Callable, Callable, np.ndarray, Callable]:
         '''Returns a function that computes the loss and a function that 
@@ -2317,6 +2318,7 @@ class JaxBackpropPlanner:
         :param policy_hyperparameters: hyper-parameters for the policy/plan, 
         such as weights for sigmoid wrapping boolean actions (defaults to 1
         for all action-fluents if not provided)
+        :param critic_params: optional critic network parameters
         :param loss_function_updates_key: if True, the loss function 
         updates the PRNG key internally independently of the grad function
         :param grad_function_updates_key: if True, the gradient function
@@ -2356,7 +2358,9 @@ class JaxBackpropPlanner:
         def _loss_with_key(key, params_1d, model_params):
             policy_params = unravel_fn(params_1d)
             loss_val, (_, model_params) = self.single_train_loss(
-                key, policy_params, policy_hyperparams, fls, nfls, model_params)
+                key, policy_params, policy_hyperparams, fls, nfls, 
+                model_params, critic_params
+            )
             return loss_val, model_params
         
         # computes the training loss gradient function in a 1D vector
@@ -2366,7 +2370,9 @@ class JaxBackpropPlanner:
         def _grad_with_key(key, params_1d, model_params):
             policy_params = unravel_fn(params_1d)
             grad_val, (_, model_params) = grad_fn(
-                key, policy_params, policy_hyperparams, fls, nfls, model_params)
+                key, policy_params, policy_hyperparams, fls, nfls, 
+                model_params, critic_params
+            )
             grad_val = jax.flatten_util.ravel_pytree(grad_val)[0]
             return grad_val, model_params 
         
@@ -2544,6 +2550,7 @@ class JaxBackpropPlanner:
                 f'    policy_hyper_params={policy_hyperparams}\n'
                 f'    override_subs_dict ={subs is not None}\n'
                 f'    provide_param_guess={guess is not None}\n'
+                f'    critic_params      ={critic_params is not None}\n'
                 f'    test_rolling_window={test_rolling_window}\n'
                 f'    print_summary      ={print_summary}\n'
                 f'    print_progress     ={print_progress}\n'
@@ -2852,7 +2859,7 @@ class JaxBackpropPlanner:
             # calculate best policy return
             _, (final_log, _) = self.test_loss(
                 key, self._broadcast_pytree(best_params), policy_hyperparams, 
-                *test_subs, model_params_test
+                *test_subs, model_params_test, critic_params
             )
             best_returns = np.ravel(np.sum(final_log['reward'], axis=2))
             mean, rlo, rhi = self.ci_bootstrap(best_returns)            
