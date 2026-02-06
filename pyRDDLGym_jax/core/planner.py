@@ -274,11 +274,7 @@ class Preprocessor(metaclass=ABCMeta):
 class StaticNormalizer(Preprocessor):
     '''Normalize values by box constraints on fluents computed from the RDDL domain.'''
 
-    def __init__(self, fluent_bounds: Dict[str, Tuple[np.ndarray, np.ndarray]]={}) -> None:
-        '''Create a new instance of the static normalizer.
-
-        :param fluent_bounds: optional bounds on fluents to overwrite default values.
-        '''
+    def __init__(self, fluent_bounds: Bounds={}) -> None:
         self.fluent_bounds = fluent_bounds
 
     def compile(self, compiled: JaxRDDLCompilerWithGrad) -> None:
