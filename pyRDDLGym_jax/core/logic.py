@@ -50,18 +50,9 @@ def enumerate_literals(shape: Tuple[int, ...], axis: int, dtype: type=jnp.int32)
 
 
 # branching sigmoid to help reduce numerical issues
-@jax.custom_jvp
 def stable_sigmoid(x: jnp.ndarray) -> jnp.ndarray:
-    return jnp.where(x >= 0, 1.0 / (1.0 + jnp.exp(-x)), jnp.exp(x) / (1.0 + jnp.exp(x)))
-
-
-@stable_sigmoid.defjvp
-def stable_sigmoid_jvp(primals, tangents):
-    (x,), (x_dot,) = primals, tangents
-    s = stable_sigmoid(x)
-    primal_out = s
-    tangent_out = x_dot * s * (1.0 - s)
-    return primal_out, tangent_out
+    value = jax.nn.sigmoid(x)
+    return value
 
 
 # branching tanh to help reduce numerical issues
