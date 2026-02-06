@@ -60,6 +60,17 @@ GP_POSTERIOR_PIXELS = 100
 PLOT_AXES_FONT_SIZE = 11
 EXPERIMENT_ENTRY_FONT_SIZE = 14
 
+
+def walk(tree, prefix=''):
+    if isinstance(tree, dict):
+        for k, v in tree.items():
+            yield from walk(v, f"{prefix}/{k}" if prefix else k)
+    elif isinstance(tree, (list, tuple)):
+        for i, v in enumerate(tree):
+            yield from walk(v, f"{prefix}/{i}")
+    else:
+        yield prefix, tree
+
     
 class JaxPlannerDashboard:
     '''A dashboard app for monitoring the jax planner progress.'''
@@ -835,17 +846,12 @@ class JaxPlannerDashboard:
             for (row, checked) in self.checked.copy().items():
                 policy_params = self.policy_params[row]
                 policy_params_ticks = self.policy_params_ticks[row]
+
                 if checked and policy_params is not None and policy_params:
-                    titles = []
-                    for (layer_name, layer_params) in policy_params[0].items():
-                        if isinstance(layer_params, dict):
-                            for weight_name in layer_params:
-                                titles.append(f'{layer_name}/{weight_name}')
-                    
+                    titles = [name for (name, _) in walk(policy_params[-1])]                    
                     n_rows = math.ceil(len(policy_params) / POLICY_DIST_PLOTS_PER_ROW)
                     fig = make_subplots(
-                        rows=n_rows, cols=POLICY_DIST_PLOTS_PER_ROW,
-                        shared_xaxes=True,
+                        rows=n_rows, cols=POLICY_DIST_PLOTS_PER_ROW, shared_xaxes=True,
                         subplot_titles=titles
                     )
                     colors = pc.sample_colorscale(
@@ -856,18 +862,16 @@ class JaxPlannerDashboard:
                     for (it, (tick, policy_params_t)) in enumerate(
                         zip(policy_params_ticks[::-1], policy_params[::-1])):
                         r, c = 1, 1
-                        for (layer_name, layer_params) in policy_params_t.items():
-                            if isinstance(layer_params, dict):
-                                for (weight_name, weight_values) in layer_params.items():
-                                    if r <= n_rows:
-                                        fig.add_trace(go.Violin(
-                                            x=np.ravel(weight_values),
-                                            line_color=colors[it], name=f'{tick}'
-                                        ), row=r, col=c)
-                                    c += 1
-                                    if c > POLICY_DIST_PLOTS_PER_ROW:
-                                        r += 1
-                                        c = 1
+                        for (layer_name, layer_params) in walk(policy_params_t):
+                            if r <= n_rows:
+                                fig.add_trace(go.Violin(
+                                    x=np.ravel(layer_params),
+                                    line_color=colors[it], name=f'{tick}'
+                                ), row=r, col=c)
+                            c += 1
+                            if c > POLICY_DIST_PLOTS_PER_ROW:
+                                r += 1
+                                c = 1
                     fig.update_traces(
                         orientation='h', side='positive', width=3, points=False)
                     fig.update_layout(

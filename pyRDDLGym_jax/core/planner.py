@@ -45,11 +45,11 @@ import time
 import traceback
 from typing import Any, Callable, Dict, Generator, Optional, Sequence, Type, Tuple, Union
 
-import haiku as hk
 import jax
 import jax.nn.initializers as initializers
 import jax.numpy as jnp
 import jax.random as random
+import flax.linen as nn
 import numpy as np
 import optax
 import termcolor
@@ -146,7 +146,7 @@ def _load_config(config, args):
     plan_initializer = plan_kwargs.get('initializer', None)
     if plan_initializer is not None:
         initializer = _getattr_any(
-            packages=[initializers, hk.initializers], item=plan_initializer)
+            packages=[initializers, nn.initializers], item=plan_initializer)
         if initializer is None:
             raise ValueError(f'Invalid initializer <{plan_initializer}>.')
         else:
@@ -905,7 +905,8 @@ class JaxDeepReactivePolicy(JaxPlan):
     
     def __init__(self, topology: Optional[Sequence[int]]=None,
                  activation: Activation=jnp.tanh,
-                 initializer: hk.initializers.Initializer=hk.initializers.VarianceScaling(scale=2.0),
+                 initializer: nn.initializers.Initializer=nn.initializers.variance_scaling(
+                    scale=2.0, mode="fan_in", distribution="truncated_normal"),
                  normalize: bool=False,
                  normalize_per_layer: bool=False,
                  normalizer_kwargs: Optional[Kwargs]=None,
@@ -935,7 +936,7 @@ class JaxDeepReactivePolicy(JaxPlan):
         self._normalize = normalize
         self._normalize_per_layer = normalize_per_layer
         if normalizer_kwargs is None:
-            normalizer_kwargs = {'create_offset': True, 'create_scale': True}
+            normalizer_kwargs = {'use_bias': True, 'use_scale': True}
         self._normalizer_kwargs = normalizer_kwargs
         self._wrap_non_bool = wrap_non_bool
     
@@ -1047,12 +1048,8 @@ class JaxDeepReactivePolicy(JaxPlan):
                         states_bool.append(state)
                     else:
                         if normalize and normalize_per_layer:
-                            normalizer = hk.LayerNorm(
-                                axis=-1, 
-                                param_axis=-1,
-                                name=f'input_norm_{input_names[var]}',
-                                **self._normalizer_kwargs
-                            )
+                            name = f'input_norm_{input_names[var]}'
+                            normalizer = nn.LayerNorm(name=name, **self._normalizer_kwargs)
                             state = normalizer(state)
                         states_non_bool.append(state)
                         non_bool_dims = non_bool_dims + state.size
@@ -1060,12 +1057,7 @@ class JaxDeepReactivePolicy(JaxPlan):
             
             # optionally perform layer normalization on the non-bool inputs
             if normalize and not normalize_per_layer and non_bool_dims:
-                normalizer = hk.LayerNorm(
-                    axis=-1, 
-                    param_axis=-1, 
-                    name='input_norm',
-                    **self._normalizer_kwargs
-                )
+                normalizer = nn.LayerNorm(name='input_norm', **self._normalizer_kwargs)
                 normalized = normalizer(state[:non_bool_dims])
                 state = state.at[:non_bool_dims].set(normalized)
             return state
@@ -1077,19 +1069,18 @@ class JaxDeepReactivePolicy(JaxPlan):
             # feed state vector through hidden layers
             hidden = state
             for (i, (num_neuron, activation)) in layers:
-                linear = hk.Linear(num_neuron, name=f'hidden_{i}', w_init=init)
+                linear = nn.Dense(features=num_neuron, kernel_init=init, name=f'hidden_{i}')
                 hidden = activation(linear(hidden))
             
             # each output is a linear layer reshaped to original lifted shape
             actions = {}
             for (var, size) in layer_sizes.items():
-                linear = hk.Linear(size, name=layer_names[var], w_init=init)
-                reshape = hk.Reshape(output_shape=shapes[var], 
-                                     preserve_dims=-1,
-                                     name=f'reshape_{layer_names[var]}')
-                output = reshape(linear(hidden))
-                if not shapes[var]:
-                    output = jnp.squeeze(output)
+                if ranges[var] != 'bool' or not use_constraint_satisfaction:
+                    linear = nn.Dense(features=size, kernel_init=init, name=layer_names[var])
+                    output = linear(hidden)
+                    output = jnp.reshape(output, output.shape[:-1] + shapes[var])
+                    if not shapes[var]:
+                        output = jnp.squeeze(output)
                 
                 # project action output to valid box constraints following Bueno et. al.
                 if ranges[var] == 'bool':
@@ -1112,13 +1103,16 @@ class JaxDeepReactivePolicy(JaxPlan):
             # for constraint satisfaction wrap bool actions with softmax:
             # this only works when |A| = 1
             if use_constraint_satisfaction:
-                linear = hk.Linear(bool_action_count, name='output_bool', w_init=init)
+                linear = nn.Dense(features=bool_action_count, kernel_init=init, name='output_bool')
                 actions[bool_key] = jax.nn.softmax(linear(hidden))
             return actions
         
         # we need pure JAX functions for the policy network prediction
-        predict_fn = hk.transform(_jax_wrapped_policy_network_predict)
-        predict_fn = hk.without_apply_rng(predict_fn)            
+        class _FlaxWrappedPolicy(nn.Module):
+            @nn.compact
+            def __call__(self, fls, hyperparams):
+                return _jax_wrapped_policy_network_predict(fls, hyperparams)
+        predict_fn = _FlaxWrappedPolicy()       
         
         # given a softmax output, this simply unpacks the result of the softmax back into
         # the original action fluent dictionary
