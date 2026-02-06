@@ -2937,9 +2937,9 @@ class JaxBackpropPlanner:
         
         # model is likely poor IF:
         # 1. the train and test return disagree
-        validation_error = (abs(test_return - train_return) / 
-                            max(abs(train_return), abs(test_return)))
-        if not (validation_error < 0.2):
+        validation_error = abs(test_return - train_return)
+        validation_error_norm = max(abs(train_return), abs(test_return))
+        if not (validation_error < 0.2 * validation_error_norm):
             return termcolor.colored(
                 f'[WARN] Progress but large rel. train/test error {validation_error:.4f}, '
                 f'adjust model or batch size.', 'yellow'
