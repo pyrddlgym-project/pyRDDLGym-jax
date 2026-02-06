@@ -34,7 +34,7 @@ def power_10(x):
 
 
 def main(domain: str, instance: str, method: str, 
-         trials: int=1, iters: int=1, workers: int=4, dashboard: bool=False, 
+         trials: int=5, iters: int=20, workers: int=4, dashboard: bool=False, 
          filepath: str='') -> None:
     
     # set up the environment   

@@ -33,7 +33,7 @@ setup(
           'tqdm>=4.66',
           'jax>=0.4.12',
           'optax>=0.1.9',
-          'dm-haiku>=0.0.10',
+          'flax',
           'tensorflow-probability>=0.21.0'
       ],
       extras_require={
