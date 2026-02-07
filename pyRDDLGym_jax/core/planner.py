@@ -910,7 +910,8 @@ class JaxDeepReactivePolicy(JaxPlan):
                  normalize: bool=False,
                  normalize_per_layer: bool=False,
                  normalizer_kwargs: Optional[Kwargs]=None,
-                 wrap_non_bool: bool=False) -> None:
+                 wrap_non_bool: bool=False,
+                 softmax_output_weight: float=100.0) -> None:
         '''Creates a new deep reactive policy in JAX.
         
         :param neurons: sequence consisting of the number of neurons in each
@@ -924,6 +925,7 @@ class JaxDeepReactivePolicy(JaxPlan):
         to layer norm
         :param wrap_non_bool: whether to wrap real or int action fluent parameters
         with non-linearity (e.g. sigmoid or ELU) to satisfy box constraints
+        :param softmax_output_weight: weight in softmax action constraint satisfaction
         '''
         super(JaxDeepReactivePolicy, self).__init__()
         
@@ -939,6 +941,7 @@ class JaxDeepReactivePolicy(JaxPlan):
             normalizer_kwargs = {'use_bias': True, 'use_scale': True}
         self._normalizer_kwargs = normalizer_kwargs
         self._wrap_non_bool = wrap_non_bool
+        self._softmax_output_weight = softmax_output_weight
     
     def __str__(self) -> str:
         bounds = '\n        '.join(
@@ -952,8 +955,9 @@ class JaxDeepReactivePolicy(JaxPlan):
                 f'        input_norm_layerwise={self._normalize_per_layer}\n'
                 f'        input_norm_args     ={self._normalizer_kwargs}\n'
                 f'    constraint-sat strategy:\n'
-                f'        parsed_action_bounds=\n        {bounds}\n'
-                f'        wrap_non_bool       ={self._wrap_non_bool}\n')
+                f'        parsed_action_bounds =\n        {bounds}\n'
+                f'        wrap_non_bool        ={self._wrap_non_bool}\n'
+                f'        softmax_output_weight={self._softmax_output_weight}\n')
         
     def compile(self, compiled: JaxRDDLCompilerWithGrad,
                 _bounds: Bounds,
@@ -972,10 +976,6 @@ class JaxDeepReactivePolicy(JaxPlan):
         # only handles the case where |A| = 1 for now, as there is no way to do projection
         # currently (TODO: fix this)
         bool_action_count, allowed_actions = self._count_bool_actions(rddl)
-        if 1 < allowed_actions < bool_action_count:
-            raise RDDLNotImplementedError(
-                f'DRPs currently do not support max-nondef-actions {allowed_actions} > 1.'
-            )
         use_constraint_satisfaction = allowed_actions < bool_action_count
         
         # get the noop action values
@@ -1061,7 +1061,32 @@ class JaxDeepReactivePolicy(JaxPlan):
                 normalized = normalizer(state[:non_bool_dims])
                 state = state.at[:non_bool_dims].set(normalized)
             return state
-            
+        
+        # implements the iterative softmax approach outlined in
+        # https://stats.stackexchange.com/questions/444832/is-there-something-like-softmax-but-for-top-k-values
+        #
+        # in summary, this is an iterative approach to ensure k positive values:
+        #   1. y1 = softmax(logits, w=1) produces the single largest value
+        #   2. y2 = softmax(logits, w=1 - y1) produces the second largest value
+        #   3. y = y1 + y2 produces the top 2 largest values
+        #   4. y3 = softmax(logits, w = 1 - y) produces the third largest value
+        #   Repeat this process until yk
+        #
+        def softmax_w(logits, weights, w, axis=-1):
+            weighted_logits = logits + jnp.log(weights + 1e-12)
+            return jax.nn.softmax(w * weighted_logits, axis=axis)
+
+        def top_k_softmax(logits, k, w):
+            def body_fun(i, y):
+                return y + softmax_w(logits, weights=1.0 - y, w=w)
+            y_final = jax.lax.fori_loop(
+                lower=0, 
+                upper=k, 
+                body_fun=body_fun, 
+                init_val=jnp.zeros_like(logits)
+            )
+            return y_final
+
         # predict actions from the policy network for current state
         def _jax_wrapped_policy_network_predict(fls, hyperparams):
             state = _jax_wrapped_policy_input(fls, hyperparams)
@@ -1104,7 +1129,9 @@ class JaxDeepReactivePolicy(JaxPlan):
             # this only works when |A| = 1
             if use_constraint_satisfaction:
                 linear = nn.Dense(features=bool_action_count, kernel_init=init, name='output_bool')
-                actions[bool_key] = jax.nn.softmax(linear(hidden))
+                logits = linear(hidden)
+                actions[bool_key] = top_k_softmax(
+                    logits, k=allowed_actions, w=self._softmax_output_weight)
             return actions
         
         # we need pure JAX functions for the policy network prediction
