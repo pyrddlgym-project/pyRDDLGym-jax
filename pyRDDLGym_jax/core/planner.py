@@ -971,13 +971,6 @@ class JaxDeepReactivePolicy(JaxPlan):
         shapes = {var: value[1:] for (var, value) in shapes.items()}
         self.bounds = bounds
         
-        # enable constraint satisfaction subroutines during optimization 
-        # if there are nontrivial concurrency constraints in the problem description
-        # only handles the case where |A| = 1 for now, as there is no way to do projection
-        # currently (TODO: fix this)
-        bool_action_count, allowed_actions = self._count_bool_actions(rddl)
-        use_constraint_satisfaction = allowed_actions < bool_action_count
-        
         # get the noop action values
         noop = {var: (values[0] if isinstance(values, list) else values)
                 for (var, values) in rddl.action_fluents.items()}                   
@@ -1061,6 +1054,11 @@ class JaxDeepReactivePolicy(JaxPlan):
                 normalized = normalizer(state[:non_bool_dims])
                 state = state.at[:non_bool_dims].set(normalized)
             return state
+        
+        # enable constraint satisfaction subroutines during optimization 
+        # if there are nontrivial concurrency constraints in the problem description
+        bool_action_count, allowed_actions = self._count_bool_actions(rddl)
+        use_constraint_satisfaction = allowed_actions < bool_action_count
         
         # implements the iterative softmax approach outlined in
         # https://stats.stackexchange.com/questions/444832/is-there-something-like-softmax-but-for-top-k-values
