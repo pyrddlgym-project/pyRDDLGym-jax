@@ -911,7 +911,7 @@ class JaxDeepReactivePolicy(JaxPlan):
                  normalize_per_layer: bool=False,
                  normalizer_kwargs: Optional[Kwargs]=None,
                  wrap_non_bool: bool=False,
-                 softmax_output_weight: float=100.0) -> None:
+                 softmax_output_weight: float=1.0) -> None:
         '''Creates a new deep reactive policy in JAX.
         
         :param neurons: sequence consisting of the number of neurons in each
@@ -1123,13 +1123,16 @@ class JaxDeepReactivePolicy(JaxPlan):
                     else:
                         actions[var] = output
             
-            # for constraint satisfaction wrap bool actions with softmax:
-            # this only works when |A| = 1
+            # for constraint satisfaction wrap bool actions with softmax
             if use_constraint_satisfaction:
-                linear = nn.Dense(features=bool_action_count, kernel_init=init, name='output_bool')
+                linear = nn.Dense(
+                    features=bool_action_count, kernel_init=init, name='output_bool')
                 logits = linear(hidden)
-                actions[bool_key] = top_k_softmax(
-                    logits, k=allowed_actions, w=self._softmax_output_weight)
+                if allowed_actions == 1:
+                    actions[bool_key] = jax.nn.softmax(self._softmax_output_weight * logits)
+                else:
+                    actions[bool_key] = top_k_softmax(
+                        logits, k=allowed_actions, w=self._softmax_output_weight)
             return actions
         
         # we need pure JAX functions for the policy network prediction
