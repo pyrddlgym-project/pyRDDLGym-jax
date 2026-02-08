@@ -1060,33 +1060,42 @@ class JaxDeepReactivePolicy(JaxPlan):
         bool_action_count, allowed_actions = self._count_bool_actions(rddl)
         use_constraint_satisfaction = allowed_actions < bool_action_count
         
-        # implements the iterative softmax approach outlined in
-        # https://stats.stackexchange.com/questions/444832/is-there-something-like-softmax-but-for-top-k-values
-        #
-        # in summary, this is an iterative approach to ensure k positive values:
-        #   1. y1 = softmax(logits, w=1) produces the single largest value
-        #   2. y2 = softmax(logits, w=1 - y1) produces the second largest value
-        #   3. y = y1 + y2 produces the top 2 largest values
-        #   4. y3 = softmax(logits, w = 1 - y) produces the third largest value
-        #   Repeat this process until yk
-        #
-        def softmax_w(logits, weights, w, axis=-1):
-            weighted_logits = logits + jnp.log(weights + 1e-12)
-            return jax.nn.softmax(w * weighted_logits, axis=axis)
+        # implements the approach in https://gist.github.com/rahular/6091da25c8c8ce32f6310ec7399a135b
+        def differentiable_top_k(key, logits, w):
+            g = random.gumbel(key=key, shape=jnp.shape(logits), dtype=compiled.REAL)
+            logits = logits + g
+            def body_fun(i, carry):
+                khot, logits_i = carry
+                khot_mask = jnp.maximum(1.0 - khot, 1e-12)
+                logits_new = logits_i + jnp.log(khot_mask)
+                khot_new = khot + jax.nn.softmax(w * logits_new)
+                return (khot_new, logits_new)
+            khot0 = jnp.zeros_like(logits)
+            khot_final, _ = jax.lax.fori_loop(
+                lower=0, upper=allowed_actions, body_fun=body_fun, init_val=(khot0, logits))
+            return khot_final
+        
+        def hard_top_k(key, logits, w):
+            def body_fun(i, carry):
+                khot, logits_i = carry
+                idx = jnp.argmax(logits_i)
+                khot = khot.at[idx].set(1.0)
+                logits_i = logits_i.at[idx].set(-jnp.inf)
+                return (khot, logits_i)
+            khot0 = jnp.zeros_like(logits)
+            khot_final, _ = jax.lax.fori_loop(
+                lower=0, upper=allowed_actions, body_fun=body_fun, init_val=(khot0, logits))
+            return khot_final
 
-        def top_k_softmax(logits, k, w):
-            def body_fun(i, y):
-                return y + softmax_w(logits, weights=1.0 - y, w=w)
-            y_final = jax.lax.fori_loop(
-                lower=0, 
-                upper=k, 
-                body_fun=body_fun, 
-                init_val=jnp.zeros_like(logits)
-            )
-            return y_final
+        def top_k(key, logits, w, train_flag):
+            if allowed_actions == 1:
+                return jax.nn.softmax(logits)
+            else:
+                return jax.lax.switch(
+                    train_flag, [differentiable_top_k, hard_top_k], key, logits, w)
 
         # predict actions from the policy network for current state
-        def _jax_wrapped_policy_network_predict(fls, hyperparams):
+        def _jax_wrapped_policy_network_predict(key, fls, hyperparams, train_flag):
             state = _jax_wrapped_policy_input(fls, hyperparams)
             
             # feed state vector through hidden layers
@@ -1128,18 +1137,16 @@ class JaxDeepReactivePolicy(JaxPlan):
                 linear = nn.Dense(
                     features=bool_action_count, kernel_init=init, name='output_bool')
                 logits = linear(hidden)
-                if allowed_actions == 1:
-                    actions[bool_key] = jax.nn.softmax(self._softmax_output_weight * logits)
-                else:
-                    actions[bool_key] = top_k_softmax(
-                        logits, k=allowed_actions, w=self._softmax_output_weight)
+                actions[bool_key] = top_k(
+                    key, logits, w=self._softmax_output_weight, train_flag=train_flag)
             return actions
         
         # we need pure JAX functions for the policy network prediction
         class _FlaxWrappedPolicy(nn.Module):
             @nn.compact
-            def __call__(self, fls, hyperparams):
-                return _jax_wrapped_policy_network_predict(fls, hyperparams)
+            def __call__(self, fls, hyperparams, train_flag):
+                key = self.make_rng("policy")
+                return _jax_wrapped_policy_network_predict(key, fls, hyperparams, train_flag)
         predict_fn = _FlaxWrappedPolicy()       
         
         # given a softmax output, this simply unpacks the result of the softmax back into
@@ -1159,8 +1166,9 @@ class JaxDeepReactivePolicy(JaxPlan):
         
         # the main subroutine to compute the trainable rddl actions from the trainable
         # parameters and the current state/obs dictionary       
-        def _jax_wrapped_drp_predict_train(key, params, hyperparams, step, fls):
-            actions = predict_fn.apply(params, fls, hyperparams)
+        def _jax_wrapped_drp_predict_train(key, params, hyperparams, step, fls, train_flag=0):
+            actions = predict_fn.apply(
+                params, fls, hyperparams, train_flag=train_flag, rngs={"policy": key})
             if not wrap_non_bool:
                 for (var, action) in actions.items():
                     if var != bool_key and ranges[var] != 'bool':
@@ -1176,7 +1184,8 @@ class JaxDeepReactivePolicy(JaxPlan):
         # parameters and state/obs dict: the difference here is that actions are converted 
         # to their required types (i.e. bool, int, float)
         def _jax_wrapped_drp_predict_test(key, params, hyperparams, step, fls):
-            actions = _jax_wrapped_drp_predict_train(key, params, hyperparams, step, fls)
+            actions = _jax_wrapped_drp_predict_train(
+                key, params, hyperparams, step, fls, train_flag=1)
             new_actions = {}
             for (var, action) in actions.items():
                 prange = ranges[var]
@@ -1212,7 +1221,7 @@ class JaxDeepReactivePolicy(JaxPlan):
             obs_vars = {var: value[0, ...] 
                         for (var, value) in fls.items()
                         if var in observed_vars}
-            return predict_fn.init(key, obs_vars, hyperparams)
+            return predict_fn.init(key, obs_vars, hyperparams, train_flag=0)
         self.initializer = _jax_wrapped_drp_init
         
     def guess_next_epoch(self, params: Pytree) -> Pytree:
