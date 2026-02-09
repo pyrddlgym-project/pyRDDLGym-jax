@@ -362,6 +362,7 @@ class JaxRDDLCompiler:
         :param constraint_func: produces the h(s, a) function described above
         in addition to the usual outputs
         :param cache_path_info: whether to save full path traces as part of the log
+        :param aux_constr: auxiliary info to pass when compiling constraint_func
         '''
         NORMAL = JaxRDDLCompiler.ERROR_CODES['NORMAL']      
         
@@ -537,6 +538,7 @@ class JaxRDDLCompiler:
         :param cache_path_info: whether to save full path traces as part of the log
         :param model_params_reduction: how to aggregate updated model_params across runs
         in the batch (defaults to selecting the first element's parameters in the batch)
+        :param aux_constr: auxiliary info to pass when compiling constraint_func
         '''
         jax_fn = self.compile_transition(
             check_constraints, constraint_func, cache_path_info, aux_constr)
