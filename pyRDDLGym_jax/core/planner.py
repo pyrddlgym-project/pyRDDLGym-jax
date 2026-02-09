@@ -1103,7 +1103,11 @@ class JaxDeepReactivePolicy(JaxPlan):
         # if there are nontrivial concurrency constraints in the problem description
         bool_action_count, allowed_actions = self._count_bool_actions(rddl)
         use_constraint_satisfaction = allowed_actions < bool_action_count
-        branched_top_k = JaxDifferentiableTopKProjection().compile(compiled, allowed_actions)
+        
+        if use_constraint_satisfaction:
+            branched_top_k = JaxDifferentiableTopKProjection().compile(compiled, allowed_actions)
+        else:
+            branched_top_k = None
 
         # predict actions from the policy network for current state
         def _jax_wrapped_policy_network_predict(key, fls, hyperparams, train_flag):
