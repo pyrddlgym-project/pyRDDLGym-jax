@@ -900,6 +900,50 @@ class JaxStraightLinePlan(JaxPlan):
         return jax.tree_util.tree_map(JaxStraightLinePlan._guess_next_epoch, params)
 
 
+class JaxDifferentiableTopKProjection:
+    '''A differentiable top-k generalization of softmax.'''
+
+    def compile(self, compiled: JaxRDDLCompilerWithGrad, allowed_actions: int) -> Callable:
+
+        # forward relaxation
+        # implements the approach in https://gist.github.com/rahular/6091da25c8c8ce32f6310ec7399a135b
+        def differentiable_top_k(key, logits, w):
+            g = random.gumbel(key=key, shape=jnp.shape(logits), dtype=compiled.REAL)
+            logits = logits + g
+            def body_fun(i, carry):
+                khot, logits_i = carry
+                khot_mask = jnp.maximum(1.0 - khot, 1e-12)
+                logits_new = logits_i + jnp.log(khot_mask)
+                khot_new = khot + jax.nn.softmax(w * logits_new)
+                return (khot_new, logits_new)
+            khot0 = jnp.zeros_like(logits)
+            khot_final, _ = jax.lax.fori_loop(
+                lower=0, upper=allowed_actions, body_fun=body_fun, init_val=(khot0, logits))
+            return khot_final
+        
+        # forward exact evaluation
+        def exact_top_k(key, logits, w):
+            def body_fun(i, carry):
+                khot, logits_i = carry
+                idx = jnp.argmax(logits_i)
+                khot = khot.at[idx].set(1.0)
+                logits_i = logits_i.at[idx].set(-jnp.inf)
+                return (khot, logits_i)
+            khot0 = jnp.zeros_like(logits)
+            khot_final, _ = jax.lax.fori_loop(
+                lower=0, upper=allowed_actions, body_fun=body_fun, init_val=(khot0, logits))
+            return khot_final
+
+        # branched evaluation to relax when training and use exact when infering
+        def _jax_wrapped_drp_branched_top_k(key, logits, w, train_flag):
+            if allowed_actions == 1:
+                return jax.nn.softmax(logits)
+            else:
+                return jax.lax.switch(
+                    train_flag, [differentiable_top_k, exact_top_k], key, logits, w)
+        return _jax_wrapped_drp_branched_top_k
+
+
 class JaxDeepReactivePolicy(JaxPlan):
     '''A deep reactive policy network implementation in JAX.'''
     
@@ -1059,40 +1103,7 @@ class JaxDeepReactivePolicy(JaxPlan):
         # if there are nontrivial concurrency constraints in the problem description
         bool_action_count, allowed_actions = self._count_bool_actions(rddl)
         use_constraint_satisfaction = allowed_actions < bool_action_count
-        
-        # implements the approach in https://gist.github.com/rahular/6091da25c8c8ce32f6310ec7399a135b
-        def differentiable_top_k(key, logits, w):
-            g = random.gumbel(key=key, shape=jnp.shape(logits), dtype=compiled.REAL)
-            logits = logits + g
-            def body_fun(i, carry):
-                khot, logits_i = carry
-                khot_mask = jnp.maximum(1.0 - khot, 1e-12)
-                logits_new = logits_i + jnp.log(khot_mask)
-                khot_new = khot + jax.nn.softmax(w * logits_new)
-                return (khot_new, logits_new)
-            khot0 = jnp.zeros_like(logits)
-            khot_final, _ = jax.lax.fori_loop(
-                lower=0, upper=allowed_actions, body_fun=body_fun, init_val=(khot0, logits))
-            return khot_final
-        
-        def hard_top_k(key, logits, w):
-            def body_fun(i, carry):
-                khot, logits_i = carry
-                idx = jnp.argmax(logits_i)
-                khot = khot.at[idx].set(1.0)
-                logits_i = logits_i.at[idx].set(-jnp.inf)
-                return (khot, logits_i)
-            khot0 = jnp.zeros_like(logits)
-            khot_final, _ = jax.lax.fori_loop(
-                lower=0, upper=allowed_actions, body_fun=body_fun, init_val=(khot0, logits))
-            return khot_final
-
-        def top_k(key, logits, w, train_flag):
-            if allowed_actions == 1:
-                return jax.nn.softmax(logits)
-            else:
-                return jax.lax.switch(
-                    train_flag, [differentiable_top_k, hard_top_k], key, logits, w)
+        branched_top_k = JaxDifferentiableTopKProjection().compile(compiled, allowed_actions)
 
         # predict actions from the policy network for current state
         def _jax_wrapped_policy_network_predict(key, fls, hyperparams, train_flag):
@@ -1137,7 +1148,7 @@ class JaxDeepReactivePolicy(JaxPlan):
                 linear = nn.Dense(
                     features=bool_action_count, kernel_init=init, name='output_bool')
                 logits = linear(hidden)
-                actions[bool_key] = top_k(
+                actions[bool_key] = branched_top_k(
                     key, logits, w=self._softmax_output_weight, train_flag=train_flag)
             return actions
         
