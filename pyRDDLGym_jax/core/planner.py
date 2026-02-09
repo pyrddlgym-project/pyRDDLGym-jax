@@ -3026,6 +3026,7 @@ class JaxBackpropPlanner:
         :param state: the dict of state p-variables
         :param policy_hyperparams: hyper-parameters for the policy/plan, such as
         weights for sigmoid wrapping boolean actions (optional)
+        :param history: history of past fluents for history-dependent policy (optional)
         '''
         state = state.copy()
 
