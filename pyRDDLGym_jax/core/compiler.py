@@ -437,43 +437,64 @@ class JaxRDDLCompiler:
     
     def _compile_policy_step(self, policy, transition_fn):
         def _jax_wrapped_policy_step(key, policy_params, hyperparams, step, fls, nfls, 
-                                     model_params):
+                                     model_params, fls_hist):
             key, subkey = random.split(key)
-            actions = policy(key, policy_params, hyperparams, step, fls)
+            actions = policy(key, policy_params, hyperparams, step, fls, fls_hist)
             return transition_fn(subkey, actions, fls, nfls, model_params)
         return _jax_wrapped_policy_step
 
     def _compile_batched_policy_step(self, policy_step_fn, n_batch, model_params_reduction):
         def _jax_wrapped_batched_policy_step(carry, step):
-            key, policy_params, hyperparams, fls, nfls, model_params = carry  
+            key, policy_params, hyperparams, fls, nfls, model_params, fls_hist = carry  
+
+            # update history 
+            if fls_hist:
+                fls_hist = jax.tree_util.tree_map(
+                    lambda h, f: h.at[step].set(f), fls_hist, fls)
+
+            # perform a batched single step from the model
             keys = random.split(key, num=1 + n_batch)
             key, subkeys = keys[0], keys[1:]
             fls, log, model_params = jax.vmap(
-                policy_step_fn, in_axes=(0, None, None, None, 0, None, None)
-            )(subkeys, policy_params, hyperparams, step, fls, nfls, model_params)
+                policy_step_fn, in_axes=(0, None, None, None, 0, None, None, 1)
+            )(subkeys, policy_params, hyperparams, step, fls, nfls, model_params, fls_hist)
+
+            # must aggregate model params across branches into a single pytree
             model_params = jax.tree_util.tree_map(model_params_reduction, model_params)
-            carry = (key, policy_params, hyperparams, fls, nfls, model_params)
+
+            carry = (key, policy_params, hyperparams, fls, nfls, model_params, fls_hist)
             return carry, log 
         return _jax_wrapped_batched_policy_step
         
-    def _compile_unrolled_policy_step(self, batched_policy_step_fn, n_steps):
+    def _compile_unrolled_policy_step(self, batched_policy_step_fn, n_steps, history_dependent):
         def _jax_wrapped_batched_policy_rollout(key, policy_params, hyperparams, fls, nfls, 
-                                                model_params):
-            start = (key, policy_params, hyperparams, fls, nfls, model_params)
+                                                model_params):            
+            # initialize history the policy sees
+            if history_dependent:
+                fls_hist = jax.tree_util.tree_map(
+                    lambda f: jnp.zeros((n_steps,) + jnp.shape(f), dtype=f.dtype), fls)
+            else:
+                fls_hist = {}
+
+            # perform the trajectory unrolling in batched mode
+            start = (key, policy_params, hyperparams, fls, nfls, model_params, fls_hist)
             steps = jnp.arange(n_steps)
             end, log = jax.lax.scan(batched_policy_step_fn, start, steps)
+
+            # swap the batch and time axis so the batch axis is first
             log = jax.tree_util.tree_map(partial(jnp.swapaxes, axis1=0, axis2=1), log)
             if not log['fluents']:
                 fls_end = end[3]
                 log['fluents'] = {name: jnp.expand_dims(fl, axis=1) 
                                   for (name, fl) in fls_end.items()}
-            model_params = end[-1]
+            model_params = end[-2]
             return log, model_params        
         return _jax_wrapped_batched_policy_rollout
     
     def compile_rollouts(self, policy: Callable,
                          n_steps: int,
                          n_batch: int,
+                         history_dependent: bool=False,
                          check_constraints: bool=False,
                          constraint_func: bool=False, 
                          cache_path_info: bool=False,
@@ -500,12 +521,14 @@ class JaxRDDLCompiler:
             - params is a pytree of trainable policy weights
             - hyperparams is a pytree of (optional) fixed policy hyper-parameters
             - step is the time index of the decision in the current rollout
-            - fls is a dict of fluent tensors for the current epoch.
+            - fls is a dict of fluent tensors for the current epoch
+            - fls_hist is a dict of fluent tensors up to the current epoch
         
         :param policy: a Jax compiled function for the policy as described above
         decision epoch, state dict, and an RNG key and returns an action dict
         :param n_steps: the rollout horizon
         :param n_batch: how many rollouts each batch performs
+        :param history_dependent: whether the policy is fed a history of past fluent values
         :param check_constraints: whether state, action and termination 
         conditions should be checked on each time step: this info is stored in the
         returned log and does not raise an exception
@@ -519,7 +542,7 @@ class JaxRDDLCompiler:
             check_constraints, constraint_func, cache_path_info, aux_constr)
         jax_fn = self._compile_policy_step(policy, jax_fn)
         jax_fn = self._compile_batched_policy_step(jax_fn, n_batch, model_params_reduction)
-        jax_fn = self._compile_unrolled_policy_step(jax_fn, n_steps)
+        jax_fn = self._compile_unrolled_policy_step(jax_fn, n_steps, history_dependent)
         return jax_fn
     
     # ===========================================================================
