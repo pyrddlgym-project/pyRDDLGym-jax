@@ -336,6 +336,8 @@ class StaticNormalizer(Preprocessor):
 
 class JaxPlan(metaclass=ABCMeta):
     '''Base class for all JAX policy representations.'''
+
+    history_dependent = False
     
     def __init__(self) -> None:
         self._initializer = None
@@ -605,6 +607,8 @@ class JaxSogbofaActionProjection(JaxActionProjection):
 
 class JaxStraightLinePlan(JaxPlan):
     '''A straight line plan implementation in JAX'''
+
+    history_dependent = False
     
     def __init__(self, initializer: initializers.Initializer=initializers.normal(),
                  wrap_sigmoid: bool=True,
@@ -745,7 +749,7 @@ class JaxStraightLinePlan(JaxPlan):
                 
         # the main subroutine to compute the trainable rddl actions from the trainable
         # parameters (TODO: implement one-hot for integer actions)        
-        def _jax_wrapped_slp_predict_train(key, params, hyperparams, step, fls):
+        def _jax_wrapped_slp_predict_train(key, params, hyperparams, step, fls, fls_hist):
             actions = {}
             for (var, param) in params.items():
                 action = jnp.asarray(param[step, ...], dtype=compiled.REAL)
@@ -763,7 +767,7 @@ class JaxStraightLinePlan(JaxPlan):
         # the main subroutine to compute the test rddl actions from the trainable 
         # parameters: the difference here is that actions are converted to their required
         # types (i.e. bool, int, float)
-        def _jax_wrapped_slp_predict_test(key, params, hyperparams, step, fls):
+        def _jax_wrapped_slp_predict_test(key, params, hyperparams, step, fls, fls_hist):
             actions = {}
             for (var, param) in params.items():
                 action = jnp.asarray(param[step, ...], dtype=compiled.REAL)
@@ -946,6 +950,8 @@ class JaxDifferentiableTopKProjection:
 
 class JaxDeepReactivePolicy(JaxPlan):
     '''A deep reactive policy network implementation in JAX.'''
+
+    history_dependent = False
     
     def __init__(self, topology: Optional[Sequence[int]]=None,
                  activation: Activation=jnp.tanh,
@@ -1181,7 +1187,8 @@ class JaxDeepReactivePolicy(JaxPlan):
         
         # the main subroutine to compute the trainable rddl actions from the trainable
         # parameters and the current state/obs dictionary       
-        def _jax_wrapped_drp_predict_train(key, params, hyperparams, step, fls, train_flag=0):
+        def _jax_wrapped_drp_predict_train(key, params, hyperparams, step, fls, fls_hist, 
+                                           train_flag=0):
             actions = predict_fn.apply(
                 params, fls, hyperparams, train_flag=train_flag, rngs={"policy": key})
             if not wrap_non_bool:
@@ -1198,9 +1205,9 @@ class JaxDeepReactivePolicy(JaxPlan):
         # the main subroutine to compute the test rddl actions from the trainable 
         # parameters and state/obs dict: the difference here is that actions are converted 
         # to their required types (i.e. bool, int, float)
-        def _jax_wrapped_drp_predict_test(key, params, hyperparams, step, fls):
+        def _jax_wrapped_drp_predict_test(key, params, hyperparams, step, fls, fls_hist):
             actions = _jax_wrapped_drp_predict_train(
-                key, params, hyperparams, step, fls, train_flag=1)
+                key, params, hyperparams, step, fls, fls_hist, train_flag=1)
             new_actions = {}
             for (var, action) in actions.items():
                 prange = ranges[var]
@@ -2079,12 +2086,14 @@ class JaxBackpropPlanner:
             policy=self.plan.train_policy,
             n_steps=self.horizon,
             n_batch=self.batch_size_train,
+            history_dependent=self.plan.history_dependent,
             cache_path_info=self.preprocessor is not None or self.dashboard is not None
         )
         test_rollouts = self.test_compiled.compile_rollouts(
             policy=self.plan.test_policy,
             n_steps=self.horizon,
             n_batch=self.batch_size_test,
+            history_dependent=self.plan.history_dependent,
             cache_path_info=self.dashboard is not None
         )
         self.test_rollouts = jax.jit(test_rollouts)
@@ -2124,6 +2133,7 @@ class JaxBackpropPlanner:
     
     def _jax_critic(self):
         critic_fn = self.critic_fn
+        policy_fn = self.train_policy
 
         def _jax_wrapped_critic(critic_params, key, policy_params, policy_hyperparams, fls):
 
@@ -2135,7 +2145,8 @@ class JaxBackpropPlanner:
                     for (state, next_state) in self.rddl.next_state.items()}    
 
             # calculate action of the last observation   
-            act = self.train_policy(key, policy_params, policy_hyperparams, 0, obs)    
+            # TODO: allow history dependent and nonstationary policies
+            act = policy_fn(key, policy_params, policy_hyperparams, 0, obs, {})    
 
             # evaluate and validate critic
             critic_value = jnp.squeeze(critic_fn(critic_params, obs, act))
@@ -3005,7 +3016,8 @@ class JaxBackpropPlanner:
                    params: Pytree,
                    step: int,
                    state: Dict[str, Any],
-                   policy_hyperparams: Optional[Dict[str, Any]]=None) -> Dict[str, Any]:
+                   policy_hyperparams: Optional[Dict[str, Any]]=None, 
+                   history: Optional[Dict[str, Any]]=None) -> Dict[str, Any]:
         '''Returns an action dictionary from the policy or plan with the given parameters.
         
         :param key: the JAX PRNG key
@@ -3016,6 +3028,12 @@ class JaxBackpropPlanner:
         weights for sigmoid wrapping boolean actions (optional)
         '''
         state = state.copy()
+
+        if history is None: 
+            if self.plan.history_dependent:
+                raise ValueError(
+                    'Policy has history_dependent = True, but history was not provided.')
+            history = {}
         
         # check compatibility of the state dictionary
         for (var, values) in state.items():
@@ -3044,7 +3062,7 @@ class JaxBackpropPlanner:
                         )
             
         # cast device arrays to numpy
-        actions = self.test_policy(key, params, policy_hyperparams, step, state)
+        actions = self.test_policy(key, params, policy_hyperparams, step, state, history)
         actions = jax.tree_util.tree_map(np.asarray, actions)
         return actions      
        
