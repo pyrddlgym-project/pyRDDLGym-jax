@@ -219,7 +219,7 @@ class SigmoidRelational(JaxRDDLCompilerWithGrad):
 
     def _jax_greater(self, expr, aux):
         if not self.traced.cached_is_fluent(expr):
-            return super()._jax_greater(expr, aux)
+            return JaxRDDLCompilerWithGrad._jax_greater(self, expr, aux)
         id_ = expr.id
         aux['params'][id_] = self.sigmoid_weight
         aux['overriden'][id_] = __class__.__name__
@@ -232,7 +232,7 @@ class SigmoidRelational(JaxRDDLCompilerWithGrad):
     
     def _jax_greater_equal(self, expr, aux):
         if not self.traced.cached_is_fluent(expr):
-            return super()._jax_greater(expr, aux)
+            return JaxRDDLCompilerWithGrad._jax_greater_equal(self, expr, aux)
         id_ = expr.id
         aux['params'][id_] = self.sigmoid_weight
         aux['overriden'][id_] = __class__.__name__
@@ -245,7 +245,7 @@ class SigmoidRelational(JaxRDDLCompilerWithGrad):
     
     def _jax_less(self, expr, aux):
         if not self.traced.cached_is_fluent(expr):
-            return super()._jax_less(expr, aux)
+            return JaxRDDLCompilerWithGrad._jax_less(self, expr, aux)
         id_ = expr.id
         aux['params'][id_] = self.sigmoid_weight
         aux['overriden'][id_] = __class__.__name__
@@ -258,7 +258,7 @@ class SigmoidRelational(JaxRDDLCompilerWithGrad):
     
     def _jax_less_equal(self, expr, aux):
         if not self.traced.cached_is_fluent(expr):
-            return super()._jax_less(expr, aux)
+            return JaxRDDLCompilerWithGrad._jax_less_equal(self, expr, aux)
         id_ = expr.id
         aux['params'][id_] = self.sigmoid_weight
         aux['overriden'][id_] = __class__.__name__
@@ -271,7 +271,7 @@ class SigmoidRelational(JaxRDDLCompilerWithGrad):
     
     def _jax_equal(self, expr, aux):
         if not self.traced.cached_is_fluent(expr):
-            return super()._jax_equal(expr, aux)
+            return JaxRDDLCompilerWithGrad._jax_equal(self, expr, aux)
         id_ = expr.id
         aux['params'][id_] = self.sigmoid_weight
         aux['overriden'][id_] = __class__.__name__
@@ -284,7 +284,7 @@ class SigmoidRelational(JaxRDDLCompilerWithGrad):
     
     def _jax_not_equal(self, expr, aux):
         if not self.traced.cached_is_fluent(expr):
-            return super()._jax_not_equal(expr, aux)
+            return JaxRDDLCompilerWithGrad._jax_not_equal(self, expr, aux)
         id_ = expr.id
         aux['params'][id_] = self.sigmoid_weight
         aux['overriden'][id_] = __class__.__name__
@@ -297,7 +297,7 @@ class SigmoidRelational(JaxRDDLCompilerWithGrad):
     
     def _jax_sgn(self, expr, aux):
         if not self.traced.cached_is_fluent(expr):
-            return super()._jax_sgn(expr, aux)
+            return JaxRDDLCompilerWithGrad._jax_sgn(self, expr, aux)
         id_ = expr.id
         aux['params'][id_] = self.sigmoid_weight
         aux['overriden'][id_] = __class__.__name__
@@ -328,7 +328,7 @@ class SoftmaxArgmax(JaxRDDLCompilerWithGrad):
 
     def _jax_argmax(self, expr, aux):
         if not self.traced.cached_is_fluent(expr):
-            return super()._jax_argmax(expr, aux)
+            return JaxRDDLCompilerWithGrad._jax_argmax(self, expr, aux)
         id_ = expr.id
         aux['params'][id_] = self.argmax_weight
         aux['overriden'][id_] = __class__.__name__
@@ -342,7 +342,7 @@ class SoftmaxArgmax(JaxRDDLCompilerWithGrad):
 
     def _jax_argmin(self, expr, aux):
         if not self.traced.cached_is_fluent(expr):
-            return super()._jax_argmin(expr, aux)
+            return JaxRDDLCompilerWithGrad._jax_argmin(self, expr, aux)
         id_ = expr.id
         aux['params'][id_] = self.argmax_weight
         aux['overriden'][id_] = __class__.__name__
@@ -373,7 +373,7 @@ class ProductNormLogical(JaxRDDLCompilerWithGrad):
 
     def _jax_not(self, expr, aux):
         if not self.traced.cached_is_fluent(expr):
-            return super()._jax_not(expr, aux)
+            return JaxRDDLCompilerWithGrad._jax_not(self, expr, aux)
         aux['overriden'][expr.id] = __class__.__name__
         def not_op(x):
             sample = 1. - x
@@ -385,7 +385,7 @@ class ProductNormLogical(JaxRDDLCompilerWithGrad):
 
     def _jax_and(self, expr, aux):
         if not self.traced.cached_is_fluent(expr):
-            return super()._jax_and(expr, aux)
+            return JaxRDDLCompilerWithGrad._jax_and(self, expr, aux)
         aux['overriden'][expr.id] = __class__.__name__
         def and_op(x, y):
             sample = jnp.multiply(x, y)
@@ -397,7 +397,7 @@ class ProductNormLogical(JaxRDDLCompilerWithGrad):
 
     def _jax_or(self, expr, aux):
         if not self.traced.cached_is_fluent(expr):
-            return super()._jax_or(expr, aux)
+            return JaxRDDLCompilerWithGrad._jax_or(self, expr, aux)
         aux['overriden'][expr.id] = __class__.__name__
         def or_op(x, y):
             sample = 1. - (1. - x) * (1. - y)
@@ -409,7 +409,7 @@ class ProductNormLogical(JaxRDDLCompilerWithGrad):
 
     def _jax_xor(self, expr, aux):
         if not self.traced.cached_is_fluent(expr):
-            return super()._jax_xor(expr, aux)
+            return JaxRDDLCompilerWithGrad._jax_xor(self, expr, aux)
         aux['overriden'][expr.id] = __class__.__name__
         def xor_op(x, y):
             sample = (1. - (1. - x) * (1. - y)) * (1. - x * y)
@@ -421,7 +421,7 @@ class ProductNormLogical(JaxRDDLCompilerWithGrad):
 
     def _jax_implies(self, expr, aux):
         if not self.traced.cached_is_fluent(expr):
-            return super()._jax_implies(expr, aux)
+            return JaxRDDLCompilerWithGrad._jax_implies(self, expr, aux)
         aux['overriden'][expr.id] = __class__.__name__
         def implies_op(x, y):
             sample = 1. - x * (1. - y)
@@ -433,7 +433,7 @@ class ProductNormLogical(JaxRDDLCompilerWithGrad):
 
     def _jax_equiv(self, expr, aux):
         if not self.traced.cached_is_fluent(expr):
-            return super()._jax_equiv(expr, aux)
+            return JaxRDDLCompilerWithGrad._jax_equiv(self, expr, aux)
         aux['overriden'][expr.id] = __class__.__name__
         def equiv_op(x, y):
             sample = (1. - x * (1. - y)) * (1. - y * (1. - x))
@@ -447,7 +447,7 @@ class ProductNormLogical(JaxRDDLCompilerWithGrad):
     
     def _jax_forall(self, expr, aux):
         if not self.traced.cached_is_fluent(expr):
-            return super()._jax_forall(expr, aux)
+            return JaxRDDLCompilerWithGrad._jax_forall(self, expr, aux)
         aux['overriden'][expr.id] = __class__.__name__
         def forall_op(x, axis):
             sample = jnp.prod(x, axis=axis)
@@ -459,7 +459,7 @@ class ProductNormLogical(JaxRDDLCompilerWithGrad):
     
     def _jax_exists(self, expr, aux):
         if not self.traced.cached_is_fluent(expr):
-            return super()._jax_exists(expr, aux)
+            return JaxRDDLCompilerWithGrad._jax_exists(self, expr, aux)
         aux['overriden'][expr.id] = __class__.__name__
         def exists_op(x, axis):
             sample = 1. - jnp.prod(1. - x, axis=axis)
@@ -484,7 +484,7 @@ class GodelNormLogical(JaxRDDLCompilerWithGrad):
 
     def _jax_not(self, expr, aux):
         if not self.traced.cached_is_fluent(expr):
-            return super()._jax_not(expr, aux)
+            return JaxRDDLCompilerWithGrad._jax_not(self, expr, aux)
         aux['overriden'][expr.id] = __class__.__name__
         def not_op(x):
             sample = 1. - x
@@ -496,7 +496,7 @@ class GodelNormLogical(JaxRDDLCompilerWithGrad):
     
     def _jax_and(self, expr, aux):
         if not self.traced.cached_is_fluent(expr):
-            return super()._jax_and(expr, aux)
+            return JaxRDDLCompilerWithGrad._jax_and(self, expr, aux)
         aux['overriden'][expr.id] = __class__.__name__
         def and_op(x, y):
             sample = jnp.minimum(x, y)
@@ -508,7 +508,7 @@ class GodelNormLogical(JaxRDDLCompilerWithGrad):
 
     def _jax_or(self, expr, aux):
         if not self.traced.cached_is_fluent(expr):
-            return super()._jax_or(expr, aux)
+            return JaxRDDLCompilerWithGrad._jax_or(self, expr, aux)
         aux['overriden'][expr.id] = __class__.__name__
         def or_op(x, y):
             sample = jnp.maximum(x, y)
@@ -520,7 +520,7 @@ class GodelNormLogical(JaxRDDLCompilerWithGrad):
 
     def _jax_xor(self, expr, aux):
         if not self.traced.cached_is_fluent(expr):
-            return super()._jax_xor(expr, aux)
+            return JaxRDDLCompilerWithGrad._jax_xor(self, expr, aux)
         aux['overriden'][expr.id] = __class__.__name__
         def xor_op(x, y):
             sample = jnp.minimum(jnp.maximum(x, y), 1. - jnp.minimum(x, y))
@@ -532,7 +532,7 @@ class GodelNormLogical(JaxRDDLCompilerWithGrad):
 
     def _jax_implies(self, expr, aux):
         if not self.traced.cached_is_fluent(expr):
-            return super()._jax_implies(expr, aux)
+            return JaxRDDLCompilerWithGrad._jax_implies(self, expr, aux)
         aux['overriden'][expr.id] = __class__.__name__
         def implies_op(x, y):
             sample = jnp.maximum(1. - x, y)
@@ -544,7 +544,7 @@ class GodelNormLogical(JaxRDDLCompilerWithGrad):
 
     def _jax_equiv(self, expr, aux):
         if not self.traced.cached_is_fluent(expr):
-            return super()._jax_equiv(expr, aux)
+            return JaxRDDLCompilerWithGrad._jax_equiv(self, expr, aux)
         aux['overriden'][expr.id] = __class__.__name__
         def equiv_op(x, y):
             sample = jnp.minimum(jnp.maximum(1. - x, y), jnp.maximum(1. - y, x))
@@ -558,7 +558,7 @@ class GodelNormLogical(JaxRDDLCompilerWithGrad):
     
     def _jax_forall(self, expr, aux):
         if not self.traced.cached_is_fluent(expr):
-            return super()._jax_forall(expr, aux)
+            return JaxRDDLCompilerWithGrad._jax_forall(self, expr, aux)
         aux['overriden'][expr.id] = __class__.__name__
         def all_op(x, axis):
             sample = jnp.min(x, axis=axis)
@@ -570,7 +570,7 @@ class GodelNormLogical(JaxRDDLCompilerWithGrad):
     
     def _jax_exists(self, expr, aux):
         if not self.traced.cached_is_fluent(expr):
-            return super()._jax_exists(expr, aux)
+            return JaxRDDLCompilerWithGrad._jax_exists(self, expr, aux)
         aux['overriden'][expr.id] = __class__.__name__
         def exists_op(x, axis):
             sample = jnp.max(x, axis=axis)
@@ -595,7 +595,7 @@ class LukasiewiczNormLogical(JaxRDDLCompilerWithGrad):
 
     def _jax_not(self, expr, aux):
         if not self.traced.cached_is_fluent(expr):
-            return super()._jax_not(expr, aux)
+            return JaxRDDLCompilerWithGrad._jax_not(self, expr, aux)
         aux['overriden'][expr.id] = __class__.__name__
         def not_op(x):
             sample = 1. - x
@@ -607,7 +607,7 @@ class LukasiewiczNormLogical(JaxRDDLCompilerWithGrad):
     
     def _jax_and(self, expr, aux):
         if not self.traced.cached_is_fluent(expr):
-            return super()._jax_and(expr, aux)
+            return JaxRDDLCompilerWithGrad._jax_and(self, expr, aux)
         aux['overriden'][expr.id] = __class__.__name__
         def and_op(x, y):
             sample = jax.nn.relu(x + y - 1.)
@@ -619,7 +619,7 @@ class LukasiewiczNormLogical(JaxRDDLCompilerWithGrad):
 
     def _jax_or(self, expr, aux):
         if not self.traced.cached_is_fluent(expr):
-            return super()._jax_or(expr, aux)
+            return JaxRDDLCompilerWithGrad._jax_or(self, expr, aux)
         aux['overriden'][expr.id] = __class__.__name__
         def or_op(x, y):
             sample = 1. - jax.nn.relu(1. - x - y)
@@ -631,7 +631,7 @@ class LukasiewiczNormLogical(JaxRDDLCompilerWithGrad):
 
     def _jax_xor(self, expr, aux):
         if not self.traced.cached_is_fluent(expr):
-            return super()._jax_xor(expr, aux)
+            return JaxRDDLCompilerWithGrad._jax_xor(self, expr, aux)
         aux['overriden'][expr.id] = __class__.__name__
         def xor_op(x, y):
             sample = jax.nn.relu(1. - jnp.abs(1. - x - y))
@@ -643,7 +643,7 @@ class LukasiewiczNormLogical(JaxRDDLCompilerWithGrad):
 
     def _jax_implies(self, expr, aux):
         if not self.traced.cached_is_fluent(expr):
-            return super()._jax_implies(expr, aux)
+            return JaxRDDLCompilerWithGrad._jax_implies(self, expr, aux)
         aux['overriden'][expr.id] = __class__.__name__
         def implies_op(x, y):
             sample = 1. - jax.nn.relu(x - y)
@@ -655,7 +655,7 @@ class LukasiewiczNormLogical(JaxRDDLCompilerWithGrad):
 
     def _jax_equiv(self, expr, aux):
         if not self.traced.cached_is_fluent(expr):
-            return super()._jax_equiv(expr, aux)
+            return JaxRDDLCompilerWithGrad._jax_equiv(self, expr, aux)
         aux['overriden'][expr.id] = __class__.__name__
         def equiv_op(x, y):
             sample = jax.nn.relu(1. - jnp.abs(x - y))
@@ -669,7 +669,7 @@ class LukasiewiczNormLogical(JaxRDDLCompilerWithGrad):
     
     def _jax_forall(self, expr, aux):
         if not self.traced.cached_is_fluent(expr):
-            return super()._jax_forall(expr, aux)
+            return JaxRDDLCompilerWithGrad._jax_forall(self, expr, aux)
         aux['overriden'][expr.id] = __class__.__name__
         def forall_op(x, axis):
             sample = jax.nn.relu(jnp.sum(x - 1., axis=axis) + 1.)
@@ -681,7 +681,7 @@ class LukasiewiczNormLogical(JaxRDDLCompilerWithGrad):
     
     def _jax_exists(self, expr, aux):
         if not self.traced.cached_is_fluent(expr):
-            return super()._jax_exists(expr, aux)
+            return JaxRDDLCompilerWithGrad._jax_exists(self, expr, aux)
         aux['overriden'][expr.id] = __class__.__name__
         def exists_op(x, axis):
             sample = 1. - jax.nn.relu(jnp.sum(-x, axis=axis) + 1.)
@@ -738,7 +738,7 @@ class SoftFloor(JaxRDDLCompilerWithGrad):
 
     def _jax_floor(self, expr, aux):
         if not self.traced.cached_is_fluent(expr):
-            return super()._jax_floor(expr, aux)
+            return JaxRDDLCompilerWithGrad._jax_floor(self, expr, aux)
         id_ = expr.id
         aux['params'][id_] = self.floor_weight
         aux['overriden'][id_] = __class__.__name__
@@ -751,7 +751,7 @@ class SoftFloor(JaxRDDLCompilerWithGrad):
 
     def _jax_ceil(self, expr, aux):
         if not self.traced.cached_is_fluent(expr):
-            return super()._jax_ceil(expr, aux)
+            return JaxRDDLCompilerWithGrad._jax_ceil(self, expr, aux)
         id_ = expr.id
         aux['params'][id_] = self.floor_weight
         aux['overriden'][id_] = __class__.__name__
@@ -764,7 +764,7 @@ class SoftFloor(JaxRDDLCompilerWithGrad):
 
     def _jax_div(self, expr, aux):
         if not self.traced.cached_is_fluent(expr):
-            return super()._jax_div(expr, aux)
+            return JaxRDDLCompilerWithGrad._jax_div(self, expr, aux)
         id_ = expr.id
         aux['params'][id_] = self.floor_weight
         aux['overriden'][id_] = __class__.__name__
@@ -777,7 +777,7 @@ class SoftFloor(JaxRDDLCompilerWithGrad):
 
     def _jax_mod(self, expr, aux):
         if not self.traced.cached_is_fluent(expr):
-            return super()._jax_mod(expr, aux)
+            return JaxRDDLCompilerWithGrad._jax_mod(self, expr, aux)
         id_ = expr.id
         aux['params'][id_] = self.floor_weight
         aux['overriden'][id_] = __class__.__name__
@@ -807,7 +807,7 @@ class SoftRound(JaxRDDLCompilerWithGrad):
 
     def _jax_round(self, expr, aux):
         if not self.traced.cached_is_fluent(expr):
-            return super()._jax_round(expr, aux)
+            return JaxRDDLCompilerWithGrad._jax_round(self, expr, aux)
         id_ = expr.id
         aux['params'][id_] = self.round_weight
         aux['overriden'][id_] = __class__.__name__
@@ -843,7 +843,7 @@ class LinearIfElse(JaxRDDLCompilerWithGrad):
 
         # if predicate is non-fluent, always use the exact operation
         if not self.traced.cached_is_fluent(pred):
-            return super()._jax_if(expr, aux)  
+            return JaxRDDLCompilerWithGrad._jax_if(self, expr, aux)  
         
         # recursively compile arguments   
         aux['overriden'][expr.id] = __class__.__name__
@@ -882,7 +882,7 @@ class SoftmaxSwitch(JaxRDDLCompilerWithGrad):
         # case conditions are currently only literals so they are non-fluent
         pred = expr.args[0]
         if not self.traced.cached_is_fluent(pred):
-            return super()._jax_switch(expr, aux)  
+            return JaxRDDLCompilerWithGrad._jax_switch(self, expr, aux)  
         
         id_ = expr.id
         aux['params'][id_] = self.switch_weight
@@ -950,7 +950,7 @@ class ReparameterizedGeometric(JaxRDDLCompilerWithGrad):
 
         # if prob is non-fluent, always use the exact operation
         if not self.traced.cached_is_fluent(arg_prob):
-            return super()._jax_geometric(expr, aux)  
+            return JaxRDDLCompilerWithGrad._jax_geometric(self, expr, aux)  
           
         id_ = expr.id
         aux['params'][id_] = (self.geometric_floor_weight, self.geometric_eps)
@@ -985,7 +985,7 @@ class DeterminizedGeometric(JaxRDDLCompilerWithGrad):
         
         # if prob is non-fluent, always use the exact operation
         if not self.traced.cached_is_fluent(arg_prob):
-            return super()._jax_geometric(expr, aux)
+            return JaxRDDLCompilerWithGrad._jax_geometric(self, expr, aux)
           
         aux['overriden'][expr.id] = __class__.__name__
 
@@ -1022,7 +1022,7 @@ class ReparameterizedSigmoidBernoulli(JaxRDDLCompilerWithGrad):
         
         # if prob is non-fluent, always use the exact operation
         if not self.traced.cached_is_fluent(arg_prob):
-            return super()._jax_bernoulli(expr, aux)  
+            return JaxRDDLCompilerWithGrad._jax_bernoulli(self, expr, aux)  
         
         id_ = expr.id
         aux['params'][id_] = self.bernoulli_sigmoid_weight
@@ -1063,7 +1063,7 @@ class GumbelSoftmaxBernoulli(JaxRDDLCompilerWithGrad):
         
         # if prob is non-fluent, always use the exact operation
         if not self.traced.cached_is_fluent(arg_prob):
-            return super()._jax_bernoulli(expr, aux)  
+            return JaxRDDLCompilerWithGrad._jax_bernoulli(self, expr, aux)  
         
         id_ = expr.id
         aux['params'][id_] = (self.bernoulli_softmax_weight, self.bernoulli_eps)
@@ -1099,7 +1099,7 @@ class DeterminizedBernoulli(JaxRDDLCompilerWithGrad):
         
         # if prob is non-fluent, always use the exact operation
         if not self.traced.cached_is_fluent(arg_prob):
-            return super()._jax_bernoulli(expr, aux)  
+            return JaxRDDLCompilerWithGrad._jax_bernoulli(self, expr, aux)  
         
         aux['overriden'][expr.id] = __class__.__name__
 
@@ -1139,7 +1139,7 @@ class GumbelSoftmaxDiscrete(JaxRDDLCompilerWithGrad):
         # if all probabilities are non-fluent, then always sample exact
         ordered_args = self.traced.cached_sim_info(expr)
         if not any(self.traced.cached_is_fluent(arg) for arg in ordered_args):
-            return super()._jax_discrete(expr, aux) 
+            return JaxRDDLCompilerWithGrad._jax_discrete(self, expr, aux) 
         
         id_ = expr.id
         aux['params'][id_] = (self.discrete_softmax_weight, self.discrete_eps)
@@ -1165,7 +1165,7 @@ class GumbelSoftmaxDiscrete(JaxRDDLCompilerWithGrad):
 
         # if all probabilities are non-fluent, then always sample exact
         if not self.traced.cached_is_fluent(arg):
-            return super()._jax_discrete_pvar(expr, aux) 
+            return JaxRDDLCompilerWithGrad._jax_discrete_pvar(self, expr, aux) 
         
         id_ = expr.id
         aux['params'][id_] = (self.discrete_softmax_weight, self.discrete_eps)
@@ -1198,7 +1198,7 @@ class DeterminizedDiscrete(JaxRDDLCompilerWithGrad):
         # if all probabilities are non-fluent, then always sample exact
         ordered_args = self.traced.cached_sim_info(expr)
         if not any(self.traced.cached_is_fluent(arg) for arg in ordered_args):
-            return super()._jax_discrete(expr, aux) 
+            return JaxRDDLCompilerWithGrad._jax_discrete(self, expr, aux) 
         
         aux['overriden'][expr.id] = __class__.__name__
         
@@ -1220,7 +1220,7 @@ class DeterminizedDiscrete(JaxRDDLCompilerWithGrad):
 
         # if all probabilities are non-fluent, then always sample exact
         if not self.traced.cached_is_fluent(arg):
-            return super()._jax_discrete_pvar(expr, aux) 
+            return JaxRDDLCompilerWithGrad._jax_discrete_pvar(self, expr, aux) 
 
         aux['overriden'][expr.id] = __class__.__name__
         
@@ -1292,7 +1292,7 @@ class GumbelSoftmaxBinomial(JaxRDDLCompilerWithGrad):
         # if prob is non-fluent, always use the exact operation
         if (not self.traced.cached_is_fluent(arg_trials) and 
             not self.traced.cached_is_fluent(arg_prob)):
-            return super()._jax_binomial(expr, aux)
+            return JaxRDDLCompilerWithGrad._jax_binomial(self, expr, aux)
         
         id_ = expr.id
         aux['params'][id_] = (self.binomial_softmax_weight, self.binomial_eps)
@@ -1340,7 +1340,7 @@ class DeterminizedBinomial(JaxRDDLCompilerWithGrad):
         # if prob is non-fluent, always use the exact operation
         if (not self.traced.cached_is_fluent(arg_trials) and 
             not self.traced.cached_is_fluent(arg_prob)):
-            return super()._jax_binomial(expr, aux)
+            return JaxRDDLCompilerWithGrad._jax_binomial(self, expr, aux)
         
         aux['overriden'][expr.id] = __class__.__name__
         
@@ -1408,7 +1408,7 @@ class ExponentialPoisson(JaxRDDLCompilerWithGrad):
         
         # if rate is non-fluent, always use the exact operation
         if not self.traced.cached_is_fluent(arg_rate):
-            return super()._jax_poisson(expr, aux)
+            return JaxRDDLCompilerWithGrad._jax_poisson(self, expr, aux)
         
         id_ = expr.id
         aux['params'][id_] = (self.poisson_comparison_weight, self.poisson_min_cdf)
@@ -1435,7 +1435,7 @@ class ExponentialPoisson(JaxRDDLCompilerWithGrad):
         # if prob and trials is non-fluent, always use the exact operation
         if (not self.traced.cached_is_fluent(arg_trials) and 
             not self.traced.cached_is_fluent(arg_prob)):
-            return super()._jax_negative_binomial(expr, aux)
+            return JaxRDDLCompilerWithGrad._jax_negative_binomial(self, expr, aux)
         
         id_ = expr.id
         aux['params'][id_] = (self.poisson_comparison_weight, self.poisson_min_cdf)
@@ -1508,7 +1508,7 @@ class GumbelSoftmaxPoisson(JaxRDDLCompilerWithGrad):
         
         # if rate is non-fluent, always use the exact operation
         if not self.traced.cached_is_fluent(arg_rate):
-            return super()._jax_poisson(expr, aux)
+            return JaxRDDLCompilerWithGrad._jax_poisson(self, expr, aux)
         
         id_ = expr.id
         aux['params'][id_] = (self.poisson_softmax_weight, self.poisson_min_cdf, self.poisson_eps)
@@ -1535,7 +1535,7 @@ class GumbelSoftmaxPoisson(JaxRDDLCompilerWithGrad):
         # if prob and trials is non-fluent, always use the exact operation
         if (not self.traced.cached_is_fluent(arg_trials) and 
             not self.traced.cached_is_fluent(arg_prob)):
-            return super()._jax_negative_binomial(expr, aux)
+            return JaxRDDLCompilerWithGrad._jax_negative_binomial(self, expr, aux)
         
         id_ = expr.id
         aux['params'][id_] = (self.poisson_softmax_weight, self.poisson_min_cdf, self.poisson_eps)
@@ -1576,7 +1576,7 @@ class DeterminizedPoisson(JaxRDDLCompilerWithGrad):
         
         # if rate is non-fluent, always use the exact operation
         if not self.traced.cached_is_fluent(arg_rate):
-            return super()._jax_poisson(expr, aux)
+            return JaxRDDLCompilerWithGrad._jax_poisson(self, expr, aux)
         
         aux['overriden'][expr.id] = __class__.__name__
 
@@ -1598,7 +1598,7 @@ class DeterminizedPoisson(JaxRDDLCompilerWithGrad):
         # if prob and trials is non-fluent, always use the exact operation
         if (not self.traced.cached_is_fluent(arg_trials) and 
             not self.traced.cached_is_fluent(arg_prob)):
-            return super()._jax_negative_binomial(expr, aux)
+            return JaxRDDLCompilerWithGrad._jax_negative_binomial(self, expr, aux)
         
         aux['overriden'][expr.id] = __class__.__name__
         

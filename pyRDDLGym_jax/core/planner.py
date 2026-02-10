@@ -2003,15 +2003,20 @@ class JaxBackpropPlanner:
         '''
         result = ''
         overriden_ops_info = self.compiled.overriden_ops_info()
+        exact_ops_info = self.compiled.exact_ops_info()
         if overriden_ops_info:
             result += ('[INFO] Some RDDL operations are non-differentiable '
                        'and will be approximated as follows:' + '\n')
             for (class_, op_to_ids_dict) in overriden_ops_info.items():
                 result += f'    {class_}:\n'
-                for (op, ids) in op_to_ids_dict.items():
+                for (op, relaxed_ids) in op_to_ids_dict.items():
+                    exact_ids = exact_ops_info.get(op, [])
                     result += (
                         f'        {op} ' + 
-                        termcolor.colored(f'[{len(ids)} occurences]\n', 'dark_grey')
+                        termcolor.colored(
+                            f'[{len(relaxed_ids)} relaxed, {len(exact_ids)} exact]\n', 
+                            'dark_grey'
+                        )
                     )
         return result
         

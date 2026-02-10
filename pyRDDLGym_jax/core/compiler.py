@@ -154,7 +154,7 @@ class JaxRDDLCompiler:
         :param heading: the heading to print before compilation information
         :param extra_aux: extra info to save during compilations
         '''
-        self.model_aux = {'params': {}, 'overriden': {}}
+        self.model_aux = {'params': {}, 'overriden': {}, 'exact': set()}
         self.model_aux.update(extra_aux)
         
         self.invariants = self._compile_constraints(self.rddl.invariants, self.model_aux)
@@ -599,6 +599,15 @@ class JaxRDDLCompiler:
             rddl_op = ' '.join(expr.etype)
             result.setdefault(class_, {}).setdefault(rddl_op, []).append(id)
         return result
+    
+    def exact_ops_info(self) -> Dict[str, List[int]]:
+        '''Returns a dictionary of operations that use the exact operations in this class.'''
+        result = {}
+        for id in self.model_aux['exact']:
+            expr = self.traced.lookup(id)
+            rddl_op = ' '.join(expr.etype)
+            result.setdefault(rddl_op, []).append(id)
+        return result
 
     @staticmethod
     def _check_valid_op(expr, valid_ops):
@@ -934,18 +943,23 @@ class JaxRDDLCompiler:
             return self._jax_multiply(expr, aux)
     
     def _jax_negate(self, expr, aux):
+        aux['exact'].add(expr.id)
         return self._jax_unary_helper(expr, aux, jnp.negative, at_least_int=True)
     
     def _jax_add(self, expr, aux):
+        aux['exact'].add(expr.id)
         return self._jax_nary_helper(expr, aux, jnp.add, at_least_int=True)
     
     def _jax_subtract(self, expr, aux):
+        aux['exact'].add(expr.id)
         return self._jax_binary_helper(expr, aux, jnp.subtract, at_least_int=True)
     
     def _jax_multiply(self, expr, aux):
+        aux['exact'].add(expr.id)
         return self._jax_nary_helper(expr, aux, jnp.multiply, at_least_int=True)
     
     def _jax_divide(self, expr, aux):
+        aux['exact'].add(expr.id)
         return self._jax_binary_helper(expr, aux, jnp.divide, at_least_int=True)
     
     # ===========================================================================
@@ -969,21 +983,27 @@ class JaxRDDLCompiler:
             return self._jax_not_equal(expr, aux)
 
     def _jax_greater_equal(self, expr, aux):
+        aux['exact'].add(expr.id)
         return self._jax_binary_helper(expr, aux, jnp.greater_equal, at_least_int=True)
         
     def _jax_less_equal(self, expr, aux):
+        aux['exact'].add(expr.id)
         return self._jax_binary_helper(expr, aux, jnp.less_equal, at_least_int=True)
 
     def _jax_greater(self, expr, aux):
+        aux['exact'].add(expr.id)
         return self._jax_binary_helper(expr, aux, jnp.greater, at_least_int=True)
     
     def _jax_less(self, expr, aux):
+        aux['exact'].add(expr.id)
         return self._jax_binary_helper(expr, aux, jnp.less, at_least_int=True)
     
     def _jax_equal(self, expr, aux):
+        aux['exact'].add(expr.id)
         return self._jax_binary_helper(expr, aux, jnp.equal, at_least_int=True)
     
     def _jax_not_equal(self, expr, aux):
+        aux['exact'].add(expr.id)
         return self._jax_binary_helper(expr, aux, jnp.not_equal, at_least_int=True)
     
     # ===========================================================================
@@ -1008,23 +1028,29 @@ class JaxRDDLCompiler:
             return self._jax_equiv(expr, aux)        
     
     def _jax_not(self, expr, aux):
+        aux['exact'].add(expr.id)
         return self._jax_unary_helper(expr, aux, jnp.logical_not, check_dtype=jnp.bool_)
     
     def _jax_and(self, expr, aux):
+        aux['exact'].add(expr.id)
         return self._jax_nary_helper(expr, aux, jnp.logical_and, check_dtype=jnp.bool_)
     
     def _jax_or(self, expr, aux):
+        aux['exact'].add(expr.id)
         return self._jax_nary_helper(expr, aux, jnp.logical_or, check_dtype=jnp.bool_)
     
     def _jax_xor(self, expr, aux):
+        aux['exact'].add(expr.id)
         return self._jax_binary_helper(expr, aux, jnp.logical_xor, check_dtype=jnp.bool_)
     
     def _jax_implies(self, expr, aux):
+        aux['exact'].add(expr.id)
         def implies_op(x, y):
             return jnp.logical_or(jnp.logical_not(x), y)
         return self._jax_binary_helper(expr, aux, implies_op, check_dtype=jnp.bool_)
     
     def _jax_equiv(self, expr, aux):
+        aux['exact'].add(expr.id)
         return self._jax_binary_helper(expr, aux, jnp.equal, check_dtype=jnp.bool_)
     
     # ===========================================================================
@@ -1066,30 +1092,39 @@ class JaxRDDLCompiler:
         )
 
     def _jax_sum(self, expr, aux):
+        aux['exact'].add(expr.id)
         return self._jax_aggregation_helper(expr, aux, jnp.sum)
     
     def _jax_avg(self, expr, aux):
+        aux['exact'].add(expr.id)
         return self._jax_aggregation_helper(expr, aux, jnp.mean)
     
     def _jax_prod(self, expr, aux):
+        aux['exact'].add(expr.id)
         return self._jax_aggregation_helper(expr, aux, jnp.prod)
     
     def _jax_minimum(self, expr, aux):
+        aux['exact'].add(expr.id)
         return self._jax_aggregation_helper(expr, aux, jnp.min)
     
     def _jax_maximum(self, expr, aux):
+        aux['exact'].add(expr.id)
         return self._jax_aggregation_helper(expr, aux, jnp.max)
     
     def _jax_forall(self, expr, aux):
+        aux['exact'].add(expr.id)
         return self._jax_aggregation_helper(expr, aux, jnp.all, is_bool=True)
     
     def _jax_exists(self, expr, aux):
+        aux['exact'].add(expr.id)
         return self._jax_aggregation_helper(expr, aux, jnp.any, is_bool=True)
     
     def _jax_argmin(self, expr, aux):
+        aux['exact'].add(expr.id)
         return self._jax_aggregation_helper(expr, aux, jnp.argmin)
     
     def _jax_argmax(self, expr, aux):
+        aux['exact'].add(expr.id)
         return self._jax_aggregation_helper(expr, aux, jnp.argmax)
     
     # ===========================================================================
@@ -1164,86 +1199,113 @@ class JaxRDDLCompiler:
             return self._jax_hypot(expr, aux)
         
     def _jax_abs(self, expr, aux):
+        aux['exact'].add(expr.id)
         return self._jax_unary_helper(expr, aux, jnp.abs, at_least_int=True)
     
     def _jax_sgn(self, expr, aux):
+        aux['exact'].add(expr.id)
         return self._jax_unary_helper(expr, aux, jnp.sign, at_least_int=True)
     
     def _jax_round(self, expr, aux):
+        aux['exact'].add(expr.id)
         return self._jax_unary_helper(expr, aux, jnp.round, at_least_int=True)
     
     def _jax_floor(self, expr, aux):
+        aux['exact'].add(expr.id)
         return self._jax_unary_helper(expr, aux, jnp.floor, at_least_int=True)
     
     def _jax_ceil(self, expr, aux):
+        aux['exact'].add(expr.id)
         return self._jax_unary_helper(expr, aux, jnp.ceil, at_least_int=True)
     
     def _jax_cos(self, expr, aux):
+        aux['exact'].add(expr.id)
         return self._jax_unary_helper(expr, aux, jnp.cos, at_least_int=True)
     
     def _jax_sin(self, expr, aux):
+        aux['exact'].add(expr.id)
         return self._jax_unary_helper(expr, aux, jnp.sin, at_least_int=True)
     
     def _jax_tan(self, expr, aux):
+        aux['exact'].add(expr.id)
         return self._jax_unary_helper(expr, aux, jnp.tan, at_least_int=True)
     
     def _jax_acos(self, expr, aux):
+        aux['exact'].add(expr.id)
         return self._jax_unary_helper(expr, aux, jnp.arccos, at_least_int=True)
     
     def _jax_asin(self, expr, aux):
+        aux['exact'].add(expr.id)
         return self._jax_unary_helper(expr, aux, jnp.arcsin, at_least_int=True)
     
     def _jax_atan(self, expr, aux):
+        aux['exact'].add(expr.id)
         return self._jax_unary_helper(expr, aux, jnp.arctan, at_least_int=True)
     
     def _jax_cosh(self, expr, aux):
+        aux['exact'].add(expr.id)
         return self._jax_unary_helper(expr, aux, jnp.cosh, at_least_int=True)
     
     def _jax_sinh(self, expr, aux):
+        aux['exact'].add(expr.id)
         return self._jax_unary_helper(expr, aux, jnp.sinh, at_least_int=True)
     
     def _jax_tanh(self, expr, aux):
+        aux['exact'].add(expr.id)
         return self._jax_unary_helper(expr, aux, jnp.tanh, at_least_int=True)
     
     def _jax_exp(self, expr, aux):
+        aux['exact'].add(expr.id)
         return self._jax_unary_helper(expr, aux, jnp.exp, at_least_int=True)
     
     def _jax_ln(self, expr, aux):
+        aux['exact'].add(expr.id)
         return self._jax_unary_helper(expr, aux, jnp.ln, at_least_int=True)
     
     def _jax_sqrt(self, expr, aux):
+        aux['exact'].add(expr.id)
         return self._jax_unary_helper(expr, aux, jnp.sqrt, at_least_int=True)
     
     def _jax_lngamma(self, expr, aux):
+        aux['exact'].add(expr.id)
         return self._jax_unary_helper(expr, aux, scipy.special.gammaln, at_least_int=True)
     
     def _jax_gamma(self, expr, aux):
+        aux['exact'].add(expr.id)
         return self._jax_unary_helper(expr, aux, scipy.special.gamma, at_least_int=True)
 
     def _jax_div(self, expr, aux):
+        aux['exact'].add(expr.id)
         return self._jax_binary_helper(expr, aux, jnp.floor_divide, at_least_int=True)
     
     def _jax_mod(self, expr, aux):
+        aux['exact'].add(expr.id)
         return self._jax_binary_helper(expr, aux, jnp.mod, at_least_int=True)
     
     def _jax_fmod(self, expr, aux):
+        aux['exact'].add(expr.id)
         return self._jax_binary_helper(expr, aux, jnp.mod, at_least_int=True)
     
     def _jax_min(self, expr, aux):
+        aux['exact'].add(expr.id)
         return self._jax_binary_helper(expr, aux, jnp.minimum, at_least_int=True)
     
     def _jax_max(self, expr, aux):
+        aux['exact'].add(expr.id)
         return self._jax_binary_helper(expr, aux, jnp.maximum, at_least_int=True)
     
     def _jax_pow(self, expr, aux):
+        aux['exact'].add(expr.id)
         return self._jax_binary_helper(expr, aux, jnp.power, at_least_int=True)
     
     def _jax_log(self, expr, aux):
+        aux['exact'].add(expr.id)
         def log_op(x, y):
             return jnp.log(x) / jnp.log(y)
         return self._jax_binary_helper(expr, aux, log_op, at_least_int=True)
     
     def _jax_hypot(self, expr, aux):
+        aux['exact'].add(expr.id)
         return self._jax_binary_helper(expr, aux, jnp.hypot, at_least_int=True)
     
     # ===========================================================================
@@ -1251,6 +1313,7 @@ class JaxRDDLCompiler:
     # ===========================================================================
     
     def _jax_pyfunc(self, expr, aux):
+        aux['exact'].add(expr.id)
         NORMAL = JaxRDDLCompiler.ERROR_CODES['NORMAL']
 
         # get the Python function by name
@@ -1340,6 +1403,7 @@ class JaxRDDLCompiler:
             return self._jax_switch(expr, aux) 
     
     def _jax_if(self, expr, aux):
+        aux['exact'].add(expr.id)
         ERR = JaxRDDLCompiler.ERROR_CODES['INVALID_CAST']
         JaxRDDLCompiler._check_num_args(expr, 3)
         pred, if_true, if_false = expr.args     
@@ -1361,6 +1425,7 @@ class JaxRDDLCompiler:
         return _jax_wrapped_if_then_else
     
     def _jax_switch(self, expr, aux):
+        aux['exact'].add(expr.id)
 
         # recursively compile predicate
         pred = expr.args[0]
@@ -1467,6 +1532,7 @@ class JaxRDDLCompiler:
                 f'Distribution {name} is not supported.\n' + print_stack_trace(expr))
         
     def _jax_kron(self, expr, aux):
+        aux['exact'].add(expr.id)
         ERR = JaxRDDLCompiler.ERROR_CODES['INVALID_PARAM_KRON_DELTA']
         JaxRDDLCompiler._check_num_args(expr, 1)
         arg, = expr.args
@@ -1481,12 +1547,14 @@ class JaxRDDLCompiler:
         return _jax_wrapped_distribution_kron
     
     def _jax_dirac(self, expr, aux):
+        aux['exact'].add(expr.id)
         JaxRDDLCompiler._check_num_args(expr, 1)
         arg, = expr.args
         arg = self._jax(arg, aux, dtype=self.REAL)
         return arg
     
     def _jax_uniform(self, expr, aux):
+        aux['exact'].add(expr.id)
         ERR = JaxRDDLCompiler.ERROR_CODES['INVALID_PARAM_UNIFORM']
         JaxRDDLCompiler._check_num_args(expr, 2)
         
@@ -1507,6 +1575,7 @@ class JaxRDDLCompiler:
         return _jax_wrapped_distribution_uniform
     
     def _jax_normal(self, expr, aux):
+        aux['exact'].add(expr.id)
         ERR = JaxRDDLCompiler.ERROR_CODES['INVALID_PARAM_NORMAL']
         JaxRDDLCompiler._check_num_args(expr, 2)
         
@@ -1528,6 +1597,7 @@ class JaxRDDLCompiler:
         return _jax_wrapped_distribution_normal
     
     def _jax_exponential(self, expr, aux):
+        aux['exact'].add(expr.id)
         ERR = JaxRDDLCompiler.ERROR_CODES['INVALID_PARAM_EXPONENTIAL']
         JaxRDDLCompiler._check_num_args(expr, 1)
         
@@ -1546,6 +1616,7 @@ class JaxRDDLCompiler:
         return _jax_wrapped_distribution_exp
     
     def _jax_weibull(self, expr, aux):
+        aux['exact'].add(expr.id)
         ERR = JaxRDDLCompiler.ERROR_CODES['INVALID_PARAM_WEIBULL']
         JaxRDDLCompiler._check_num_args(expr, 2)
         
@@ -1566,6 +1637,7 @@ class JaxRDDLCompiler:
         return _jax_wrapped_distribution_weibull
     
     def _jax_bernoulli(self, expr, aux):
+        aux['exact'].add(expr.id)
         ERR = JaxRDDLCompiler.ERROR_CODES['INVALID_PARAM_BERNOULLI']
         JaxRDDLCompiler._check_num_args(expr, 1)
         arg_prob, = expr.args
@@ -1583,6 +1655,7 @@ class JaxRDDLCompiler:
         return _jax_wrapped_distribution_bernoulli
     
     def _jax_poisson(self, expr, aux):
+        aux['exact'].add(expr.id)
         ERR = JaxRDDLCompiler.ERROR_CODES['INVALID_PARAM_POISSON']
         JaxRDDLCompiler._check_num_args(expr, 1)
         arg_rate, = expr.args
@@ -1601,6 +1674,7 @@ class JaxRDDLCompiler:
         return _jax_wrapped_distribution_poisson
     
     def _jax_gamma(self, expr, aux):
+        aux['exact'].add(expr.id)
         ERR = JaxRDDLCompiler.ERROR_CODES['INVALID_PARAM_GAMMA']
         JaxRDDLCompiler._check_num_args(expr, 2)
         
@@ -1622,6 +1696,7 @@ class JaxRDDLCompiler:
         return _jax_wrapped_distribution_gamma
     
     def _jax_binomial(self, expr, aux):
+        aux['exact'].add(expr.id)
         ERR = JaxRDDLCompiler.ERROR_CODES['INVALID_PARAM_BINOMIAL']
         JaxRDDLCompiler._check_num_args(expr, 2)
         arg_trials, arg_prob = expr.args
@@ -1645,6 +1720,7 @@ class JaxRDDLCompiler:
         return _jax_wrapped_distribution_binomial
     
     def _jax_negative_binomial(self, expr, aux):
+        aux['exact'].add(expr.id)
         ERR = JaxRDDLCompiler.ERROR_CODES['INVALID_PARAM_NEGATIVE_BINOMIAL']
         JaxRDDLCompiler._check_num_args(expr, 2)
         arg_trials, arg_prob = expr.args
@@ -1668,6 +1744,7 @@ class JaxRDDLCompiler:
         return _jax_wrapped_distribution_negative_binomial    
         
     def _jax_beta(self, expr, aux):
+        aux['exact'].add(expr.id)
         ERR = JaxRDDLCompiler.ERROR_CODES['INVALID_PARAM_BETA']
         JaxRDDLCompiler._check_num_args(expr, 2)
         
@@ -1687,6 +1764,7 @@ class JaxRDDLCompiler:
         return _jax_wrapped_distribution_beta
     
     def _jax_geometric(self, expr, aux):
+        aux['exact'].add(expr.id)
         ERR = JaxRDDLCompiler.ERROR_CODES['INVALID_PARAM_GEOMETRIC']
         JaxRDDLCompiler._check_num_args(expr, 1)        
         arg_prob, = expr.args
@@ -1704,6 +1782,7 @@ class JaxRDDLCompiler:
         return _jax_wrapped_distribution_geometric
     
     def _jax_pareto(self, expr, aux):
+        aux['exact'].add(expr.id)
         ERR = JaxRDDLCompiler.ERROR_CODES['INVALID_PARAM_PARETO']
         JaxRDDLCompiler._check_num_args(expr, 2)
         
@@ -1724,6 +1803,7 @@ class JaxRDDLCompiler:
         return _jax_wrapped_distribution_pareto
     
     def _jax_student(self, expr, aux):
+        aux['exact'].add(expr.id)
         ERR = JaxRDDLCompiler.ERROR_CODES['INVALID_PARAM_STUDENT']
         JaxRDDLCompiler._check_num_args(expr, 1)
         
@@ -1741,6 +1821,7 @@ class JaxRDDLCompiler:
         return _jax_wrapped_distribution_t
     
     def _jax_gumbel(self, expr, aux):
+        aux['exact'].add(expr.id)
         ERR = JaxRDDLCompiler.ERROR_CODES['INVALID_PARAM_GUMBEL']
         JaxRDDLCompiler._check_num_args(expr, 2)
         
@@ -1761,6 +1842,7 @@ class JaxRDDLCompiler:
         return _jax_wrapped_distribution_gumbel
     
     def _jax_laplace(self, expr, aux):
+        aux['exact'].add(expr.id)
         ERR = JaxRDDLCompiler.ERROR_CODES['INVALID_PARAM_LAPLACE']
         JaxRDDLCompiler._check_num_args(expr, 2)
         
@@ -1781,6 +1863,7 @@ class JaxRDDLCompiler:
         return _jax_wrapped_distribution_laplace
     
     def _jax_cauchy(self, expr, aux):
+        aux['exact'].add(expr.id)
         ERR = JaxRDDLCompiler.ERROR_CODES['INVALID_PARAM_CAUCHY']
         JaxRDDLCompiler._check_num_args(expr, 2)
         
@@ -1801,6 +1884,7 @@ class JaxRDDLCompiler:
         return _jax_wrapped_distribution_cauchy
     
     def _jax_gompertz(self, expr, aux):
+        aux['exact'].add(expr.id)
         ERR = JaxRDDLCompiler.ERROR_CODES['INVALID_PARAM_GOMPERTZ']
         JaxRDDLCompiler._check_num_args(expr, 2)
         
@@ -1821,6 +1905,7 @@ class JaxRDDLCompiler:
         return _jax_wrapped_distribution_gompertz
     
     def _jax_chisquare(self, expr, aux):
+        aux['exact'].add(expr.id)
         ERR = JaxRDDLCompiler.ERROR_CODES['INVALID_PARAM_CHISQUARE']
         JaxRDDLCompiler._check_num_args(expr, 1)
         
@@ -1839,6 +1924,7 @@ class JaxRDDLCompiler:
         return _jax_wrapped_distribution_chisquare
     
     def _jax_kumaraswamy(self, expr, aux):
+        aux['exact'].add(expr.id)
         ERR = JaxRDDLCompiler.ERROR_CODES['INVALID_PARAM_KUMARASWAMY']
         JaxRDDLCompiler._check_num_args(expr, 2)
         
@@ -1892,6 +1978,7 @@ class JaxRDDLCompiler:
         return _jax_wrapped_calc_discrete_prob
     
     def _jax_discrete(self, expr, aux, unnorm):
+        aux['exact'].add(expr.id)
         ordered_args = self.traced.cached_sim_info(expr)
         jax_probs = [self._jax(arg, aux) for arg in ordered_args]
         prob_fn = self._jax_discrete_prob(jax_probs, unnorm)
@@ -1915,6 +2002,7 @@ class JaxRDDLCompiler:
         return _jax_wrapped_calc_discrete_prob
 
     def _jax_discrete_pvar(self, expr, aux, unnorm):
+        aux['exact'].add(expr.id)
         JaxRDDLCompiler._check_num_args(expr, 2)
         _, args = expr.args
         arg, = args
@@ -1948,6 +2036,7 @@ class JaxRDDLCompiler:
                 f'Distribution {name} is not supported.\n' + print_stack_trace(expr))
     
     def _jax_multivariate_normal(self, expr, aux): 
+        aux['exact'].add(expr.id)
         _, args = expr.args
         mean, cov = args
         jax_mean = self._jax(mean, aux)
@@ -1975,6 +2064,7 @@ class JaxRDDLCompiler:
         return _jax_wrapped_distribution_multivariate_normal
     
     def _jax_multivariate_student(self, expr, aux):
+        aux['exact'].add(expr.id)
         ERR = JaxRDDLCompiler.ERROR_CODES['INVALID_PARAM_MULTIVARIATE_STUDENT']
         
         _, args = expr.args
@@ -2013,6 +2103,7 @@ class JaxRDDLCompiler:
         return _jax_wrapped_distribution_multivariate_student
     
     def _jax_dirichlet(self, expr, aux):
+        aux['exact'].add(expr.id)
         ERR = JaxRDDLCompiler.ERROR_CODES['INVALID_PARAM_DIRICHLET']
         
         _, args = expr.args
@@ -2033,6 +2124,7 @@ class JaxRDDLCompiler:
         return _jax_wrapped_distribution_dirichlet
     
     def _jax_multinomial(self, expr, aux):
+        aux['exact'].add(expr.id)
         ERR = JaxRDDLCompiler.ERROR_CODES['INVALID_PARAM_MULTINOMIAL']
         
         _, args = expr.args
@@ -2079,6 +2171,7 @@ class JaxRDDLCompiler:
                 f'Matrix operation {op} is not supported.\n' + print_stack_trace(expr))
     
     def _jax_matrix_det(self, expr, aux):
+        aux['exact'].add(expr.id)
         arg = expr.args[-1]
         jax_arg = self._jax(arg, aux)
         
@@ -2089,6 +2182,7 @@ class JaxRDDLCompiler:
         return _jax_wrapped_matrix_operation_det
     
     def _jax_matrix_inv(self, expr, aux, pseudo):
+        aux['exact'].add(expr.id)
         _, arg = expr.args
         jax_arg = self._jax(arg, aux)
         indices = self.traced.cached_sim_info(expr)
@@ -2102,6 +2196,7 @@ class JaxRDDLCompiler:
         return _jax_wrapped_matrix_operation_inv
     
     def _jax_matrix_cholesky(self, expr, aux):
+        aux['exact'].add(expr.id)
         _, arg = expr.args
         jax_arg = self._jax(arg, aux)
         indices = self.traced.cached_sim_info(expr)
