@@ -1139,7 +1139,7 @@ class GumbelSoftmaxDiscrete(JaxRDDLCompilerWithGrad):
         # if all probabilities are non-fluent, then always sample exact
         ordered_args = self.traced.cached_sim_info(expr)
         if not any(self.traced.cached_is_fluent(arg) for arg in ordered_args):
-            return JaxRDDLCompilerWithGrad._jax_discrete(self, expr, aux) 
+            return JaxRDDLCompilerWithGrad._jax_discrete(self, expr, aux, unnorm) 
         
         id_ = expr.id
         aux['params'][id_] = (self.discrete_softmax_weight, self.discrete_eps)
@@ -1165,7 +1165,7 @@ class GumbelSoftmaxDiscrete(JaxRDDLCompilerWithGrad):
 
         # if all probabilities are non-fluent, then always sample exact
         if not self.traced.cached_is_fluent(arg):
-            return JaxRDDLCompilerWithGrad._jax_discrete_pvar(self, expr, aux) 
+            return JaxRDDLCompilerWithGrad._jax_discrete_pvar(self, expr, aux, unnorm) 
         
         id_ = expr.id
         aux['params'][id_] = (self.discrete_softmax_weight, self.discrete_eps)
@@ -1198,7 +1198,7 @@ class DeterminizedDiscrete(JaxRDDLCompilerWithGrad):
         # if all probabilities are non-fluent, then always sample exact
         ordered_args = self.traced.cached_sim_info(expr)
         if not any(self.traced.cached_is_fluent(arg) for arg in ordered_args):
-            return JaxRDDLCompilerWithGrad._jax_discrete(self, expr, aux) 
+            return JaxRDDLCompilerWithGrad._jax_discrete(self, expr, aux, unnorm) 
         
         aux['overriden'][expr.id] = __class__.__name__
         
@@ -1220,7 +1220,7 @@ class DeterminizedDiscrete(JaxRDDLCompilerWithGrad):
 
         # if all probabilities are non-fluent, then always sample exact
         if not self.traced.cached_is_fluent(arg):
-            return JaxRDDLCompilerWithGrad._jax_discrete_pvar(self, expr, aux) 
+            return JaxRDDLCompilerWithGrad._jax_discrete_pvar(self, expr, aux, unnorm) 
 
         aux['overriden'][expr.id] = __class__.__name__
         
