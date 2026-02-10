@@ -2139,10 +2139,11 @@ class JaxBackpropPlanner:
 
             # fluent tensors have leading time dimension, take last observation
             if self.rddl.observ_fluents:
-                obs = {name: fls[name][-1, ...] for name in self.rddl.observ_fluents}
+                obs = {name: fls[name][-1, ...] 
+                       for name in self.rddl.observ_fluents}
             else:
                 obs = {state: fls[next_state][-1, ...] 
-                    for (state, next_state) in self.rddl.next_state.items()}    
+                       for (state, next_state) in self.rddl.next_state.items()}    
 
             # calculate action of the last observation   
             # TODO: allow history dependent and nonstationary policies
