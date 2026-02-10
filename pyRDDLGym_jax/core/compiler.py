@@ -57,6 +57,7 @@ class JaxRDDLCompiler:
                  allow_synchronous_state: bool=True,
                  logger: Optional[Logger]=None,
                  use64bit: bool=False,
+                 stochastic_is_fluent: bool=False,
                  python_functions: Optional[Dict[str, Callable]]=None, **kwargs) -> None:
         '''Creates a new RDDL to Jax compiler.
         
@@ -65,6 +66,8 @@ class JaxRDDLCompiler:
         on each other
         :param logger: to log information about compilation to file
         :param use64bit: whether to use 64 bit arithmetic
+        :param stochastic_is_fluent: whether stochastic traced nodes are considered fluent
+        even when their arguments are all non-fluent
         :param python_functions: dictionary of external Python functions to call from RDDL
         '''
 
@@ -105,7 +108,8 @@ class JaxRDDLCompiler:
         self.levels = sorter.compute_levels()        
         
         # trace expressions to cache information to be used later
-        tracer = RDDLObjectsTracer(rddl, cpf_levels=self.levels)
+        tracer = RDDLObjectsTracer(
+            rddl, cpf_levels=self.levels, stochastic_is_fluent=stochastic_is_fluent)
         self.traced = tracer.trace()
         
         # external python functions
