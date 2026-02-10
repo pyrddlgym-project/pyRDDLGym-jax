@@ -23,10 +23,7 @@ import sys
 import pyRDDLGym
 
 from pyRDDLGym_jax.core.tuning import JaxParameterTuning, Hyperparameter
-from pyRDDLGym_jax.core.planner import (
-    load_config_from_string, JaxBackpropPlanner, 
-    JaxOfflineController, JaxOnlineController
-)
+
 
 def power_2(x):
     return int(2 ** x)
@@ -63,22 +60,17 @@ def main(domain: str, instance: str, method: str,
     tuning = JaxParameterTuning(env=env,
                                 config_template=config_template,
                                 hyperparams=hyperparams,
-                                online=method == 'replan',
-                                eval_trials=trials,
-                                num_workers=workers,
-                                gp_iters=iters)
+                                online=(method == 'replan'),
+                                eval_trials=trials, num_workers=workers, gp_iters=iters)
     tuning.tune(key=42, 
                 log_file=f'gp_{method}_{domain}_{instance}.csv', 
                 show_dashboard=dashboard)
     if filepath is not None and filepath:
-        with open(filepath, "w") as file:
+        with open(filepath, 'w') as file:
             file.write(tuning.best_config)
     
     # evaluate the agent on the best parameters
-    planner_args, _, train_args = load_config_from_string(tuning.best_config)
-    planner = JaxBackpropPlanner(rddl=env.model, **planner_args)
-    class_ = JaxOnlineController if method == 'replan' else JaxOfflineController
-    controller = class_(planner, **train_args)
+    controller = tuning.build_best_controller()
     controller.evaluate(env, episodes=1, verbose=True, render=True)
     env.close()
 
