@@ -1294,6 +1294,18 @@ class JaxPlannerStatus(Enum):
     
     def is_terminal(self) -> bool:
         return self.value == 1 or self.value >= 4
+    
+    def get_type(self) -> str:
+        if self.value in {5, 6}:
+            return 'info'
+        elif self.value in {0, 1}:
+            return 'success'
+        elif self.value in {2, 3}:
+            return 'warning'
+        elif self.value == 4:
+            return 'error'
+        else:
+            raise Exception(f'Invalid value {self.value}.')
 
 
 class JaxPlannerStoppingRule(metaclass=ABCMeta):
