@@ -76,12 +76,13 @@ def walk(tree, prefix=''):
 class JaxPlannerDashboard:
     '''A dashboard app for monitoring the jax planner progress.'''
 
-    def __init__(self, theme: str=dbc.themes.BOOTSTRAP) -> None:
+    def __init__(self, theme: str=dbc.themes.BOOTSTRAP, icons: str=dbc.icons.BOOTSTRAP) -> None:
         
         self.timestamps = {}
         self.duration = {}
         self.seeds = {}
         self.status = {}
+        self.status_type = {}
         self.warnings = []
         self.progress = {}
         self.checked = {}
@@ -119,6 +120,27 @@ class JaxPlannerDashboard:
         # ======================================================================
         # CREATE PAGE LAYOUT
         # ======================================================================
+        
+        def create_info_card(id):
+            status_type = self.status_type[id]
+            if status_type == 'info':
+                content = dbc.Alert([dash.html.I(className="bi bi-info-circle-fill me-2"), self.status[id]], 
+                                    color="info", style={"padding": "0", "marginBottom": "0"})
+            elif status_type == 'success':
+                content = dbc.Alert([dash.html.I(className="bi bi-check-circle-fill me-2"), self.status[id]], 
+                                    color="success", style={"padding": "0", "marginBottom": "0"})
+            elif status_type == 'warning':
+                content = dbc.Alert([dash.html.I(className="bi bi-exclamation-triangle-fill me-2"), self.status[id]], 
+                                    color="warning", style={"padding": "0", "marginBottom": "0"})
+            elif status_type == 'error':
+                content = dbc.Alert([dash.html.I(className="bi bi-x-octagon-fill me-2"), self.status[id]], 
+                                    color="danger", style={"padding": "0", "marginBottom": "0"})
+            else:
+                content = self.status[id]
+            return dbc.Card(
+                dbc.CardBody(content, style={"padding": "0"}),
+                className="border-0 bg-transparent"
+            )
         
         def create_experiment_table(active_page, page_size):
             start = (active_page - 1) * page_size
@@ -221,10 +243,7 @@ class JaxPlannerDashboard:
                             ),
                         ], width=2),
                         dbc.Col([
-                            dbc.Card(
-                                dbc.CardBody(self.status[id], style={"padding": "0"}),
-                                className="border-0 bg-transparent"
-                            ),
+                            create_info_card(id)
                         ], width=2),
                         dbc.Col([
                             dbc.Card(
@@ -239,7 +258,7 @@ class JaxPlannerDashboard:
                     rows.append(row)
             return rows
         
-        app = dash.Dash(__name__, external_stylesheets=[theme])
+        app = dash.Dash(__name__, external_stylesheets=[theme, icons])
         app.title = f'JaxPlan Dashboard v{__version__}'
         
         app.layout = dbc.Container([
@@ -1396,6 +1415,7 @@ class JaxPlannerDashboard:
         self.duration[experiment_id] = 0
         self.seeds[experiment_id] = key    
         self.status[experiment_id] = 'N/A'  
+        self.status_type[experiment_id] = None
         self.progress[experiment_id] = 0
         self.warnings = []
         self.rddl[experiment_id] = planner_info['rddl']
@@ -1506,6 +1526,7 @@ class JaxPlannerDashboard:
         }
         # update experiment table info
         self.status[experiment_id] = str(callback['status']).split('.')[1]
+        self.status_type[experiment_id] = callback['status'].get_type()
         self.duration[experiment_id] = callback["elapsed_time"]
         self.progress[experiment_id] = int(progress)
         self.warnings = None
