@@ -76,7 +76,7 @@ def walk(tree, prefix=''):
 class JaxPlannerDashboard:
     '''A dashboard app for monitoring the jax planner progress.'''
 
-    def __init__(self, theme: str=dbc.themes.CERULEAN) -> None:
+    def __init__(self, theme: str=dbc.themes.BOOTSTRAP) -> None:
         
         self.timestamps = {}
         self.duration = {}
