@@ -42,6 +42,7 @@ from plotly.subplots import make_subplots
 
 from pyRDDLGym.core.debug.decompiler import RDDLDecompiler
 
+from pyRDDLGym_jax import __version__
 if TYPE_CHECKING:
     from pyRDDLGym_jax.core.planner import JaxBackpropPlanner
     
@@ -239,7 +240,7 @@ class JaxPlannerDashboard:
             return rows
         
         app = dash.Dash(__name__, external_stylesheets=[theme])
-        app.title = 'JaxPlan Dashboard'
+        app.title = f'JaxPlan Dashboard v{__version__}'
         
         app.layout = dbc.Container([
             Store(id='refresh-interval', data=2000),
@@ -254,7 +255,7 @@ class JaxPlannerDashboard:
             dbc.Navbar(
                 dbc.Container([
                     # Img(src=LOGO_FILE, height="30px", style={'margin-right': '10px'}),
-                    dbc.NavbarBrand(f"JaxPlan Dashboard"),
+                    dbc.NavbarBrand(app.title),
                     dbc.Nav([
                         dbc.NavItem(
                             dbc.NavLink(
