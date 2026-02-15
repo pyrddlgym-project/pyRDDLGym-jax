@@ -513,7 +513,7 @@ class JaxRDDLCompiler:
             - policy_params is a pytree of trainable policy weights
             - hyperparams is a pytree of (optional) fixed policy hyper-parameters
             - fls is the dictionary of current fluent tensor values
-            - nfls is the dictionary of next step fluent tensor value
+            - nfls is the dictionary of non-fluent tensor value
             - model_params is a dict of model hyperparameters.
         
         The returned value of the returned function is:
@@ -1288,7 +1288,7 @@ class JaxRDDLCompiler:
     
     def _jax_fmod(self, expr, aux):
         aux['exact'].add(expr.id)
-        return self._jax_binary_helper(expr, aux, jnp.mod, at_least_int=True)
+        return self._jax_binary_helper(expr, aux, jnp.fmod, at_least_int=True)
     
     def _jax_min(self, expr, aux):
         aux['exact'].add(expr.id)
