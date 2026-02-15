@@ -1375,6 +1375,7 @@ class GaussianPGPE(PGPE):
     '''PGPE with a Gaussian parameter distribution.'''
 
     def __init__(self, batch_size: int=1, 
+                 steps_per_update: int=1,
                  init_sigma: float=1.0,
                  sigma_range: Tuple[float, float]=(1e-5, 1e5),
                  scale_reward: bool=True,
@@ -1390,6 +1391,8 @@ class GaussianPGPE(PGPE):
         '''Creates a new Gaussian PGPE planner.
         
         :param batch_size: how many policy parameters to sample per optimization step
+        :param steps_per_update: how many optimization steps are performed per JaxPlan
+        update (useful for partially jit compiling the update loop)
         :param init_sigma: initial standard deviation of Gaussian
         :param sigma_range: bounds to constrain standard deviation
         :param scale_reward: whether to apply reward scaling as in the paper
@@ -1409,6 +1412,7 @@ class GaussianPGPE(PGPE):
         super().__init__()
 
         self.batch_size = batch_size
+        self.steps_per_update = steps_per_update
         self.init_sigma = init_sigma
         self.sigma_range = sigma_range
         self.scale_reward = scale_reward
@@ -1446,6 +1450,7 @@ class GaussianPGPE(PGPE):
         return (f'[INFO] PGPE hyper-parameters:\n'
                 f'    method             ={self.__class__.__name__}\n'
                 f'    batch_size         ={self.batch_size}\n'
+                f'    steps_per_update   ={self.steps_per_update}\n'
                 f'    init_sigma         ={self.init_sigma}\n'
                 f'    sigma_range        ={self.sigma_range}\n'
                 f'    scale_reward       ={self.scale_reward}\n'
@@ -1617,16 +1622,15 @@ class GaussianPGPE(PGPE):
             return -(r_sigma * s + ent / sigma)
             
         # calculate the policy gradients
-        def _jax_wrapped_pgpe_grad(key, mu, sigma, r_max, ent,
-                                   policy_hyperparams, fls, nfls, 
+        def _jax_wrapped_pgpe_grad(key, mu, sigma, r_max, ent, hparams, fls, nfls, 
                                    model_params, critic_params):
             
             # basic pgpe sampling with return estimation
             key, subkey = random.split(key)
             p1, p2, p3, p4, epsilon, epsilon_star = _jax_wrapped_sample_params(
                 key, mu, sigma)
-            r1 = -loss_fn(subkey, p1, policy_hyperparams, fls, nfls, model_params, critic_params)[0]
-            r2 = -loss_fn(subkey, p2, policy_hyperparams, fls, nfls, model_params, critic_params)[0]
+            r1 = -loss_fn(subkey, p1, hparams, fls, nfls, model_params, critic_params)[0]
+            r2 = -loss_fn(subkey, p2, hparams, fls, nfls, model_params, critic_params)[0]
 
             # do a return normalization for optimizer stability
             r_max = jnp.maximum(r_max, r1)
@@ -1634,8 +1638,8 @@ class GaussianPGPE(PGPE):
 
             # super symmetric sampling requires two more trajectories and their returns
             if super_symmetric:
-                r3 = -loss_fn(subkey, p3, policy_hyperparams, fls, nfls, model_params, critic_params)[0]
-                r4 = -loss_fn(subkey, p4, policy_hyperparams, fls, nfls, model_params, critic_params)[0]
+                r3 = -loss_fn(subkey, p3, hparams, fls, nfls, model_params, critic_params)[0]
+                r4 = -loss_fn(subkey, p4, hparams, fls, nfls, model_params, critic_params)[0]
                 r_max = jnp.maximum(r_max, r3)
                 r_max = jnp.maximum(r_max, r4)       
             else:
@@ -1656,16 +1660,14 @@ class GaussianPGPE(PGPE):
             return grad_mu, grad_sigma, r_max
 
         # calculate the policy gradients with batching on the first dimension
-        def _jax_wrapped_pgpe_grad_batched(key, pgpe_params, r_max, ent,
-                                           policy_hyperparams, fls, nfls, 
+        def _jax_wrapped_pgpe_grad_batched(key, pgpe_params, r_max, ent, hparams, fls, nfls, 
                                            model_params, critic_params):
             mu, sigma = pgpe_params
 
             # no batching required
             if batch_size == 1:
                 mu_grad, sigma_grad, new_r_max = _jax_wrapped_pgpe_grad(
-                    key, mu, sigma, r_max, ent, policy_hyperparams, fls, nfls, 
-                    model_params, critic_params)
+                    key, mu, sigma, r_max, ent, hparams, fls, nfls, model_params, critic_params)
             
             # for batching need to handle how meta-gradients of mean, sigma are aggregated
             else:
@@ -1674,8 +1676,7 @@ class GaussianPGPE(PGPE):
                 mu_grads, sigma_grads, r_maxs = jax.vmap(
                     _jax_wrapped_pgpe_grad, 
                     in_axes=(0, None, None, None, None, None, None, None, None, None)
-                )(keys, mu, sigma, r_max, ent, policy_hyperparams, fls, nfls, 
-                  model_params, critic_params)
+                )(keys, mu, sigma, r_max, ent, hparams, fls, nfls, model_params, critic_params)
 
                 # calculate the average gradient for aggregation
                 mu_grad, sigma_grad = jax.tree_util.tree_map(
@@ -1707,52 +1708,69 @@ class GaussianPGPE(PGPE):
                 partial(jnp.clip, min=sigma_lo, max=sigma_hi), new_sigma)
             return new_mu, new_sigma, new_mu_state, new_sigma_state
 
-        def _jax_wrapped_pgpe_update(key, pgpe_params, r_max, progress,
-                                     policy_hyperparams, fls, nfls, 
+        def _jax_wrapped_pgpe_update(key, pgpe_params, r_max, progress, hparams, fls, nfls, 
                                      model_params, critic_params, pgpe_opt_state):
-            # regular update for pgpe
-            mu, sigma = pgpe_params
-            mu_state, sigma_state = pgpe_opt_state
-            ent = start_entropy_coeff * jnp.power(entropy_coeff_decay, progress)
-            mu_grad, sigma_grad, new_r_max = _jax_wrapped_pgpe_grad_batched(
-                key, pgpe_params, r_max, ent, policy_hyperparams, fls, nfls, 
-                model_params, critic_params)
-            new_mu, new_sigma, new_mu_state, new_sigma_state = _jax_wrapped_pgpe_update_helper(
-                mu, sigma, mu_grad, sigma_grad, mu_state, sigma_state)
             
-            # respect KL divergence contraint with old parameters
-            if max_kl is not None:
-                old_mu_lr = new_mu_state.hyperparams['learning_rate']
-                old_sigma_lr = new_sigma_state.hyperparams['learning_rate']
-                kl_terms = jax.tree_util.tree_map(
-                    _jax_wrapped_pgpe_kl_term, new_mu, new_sigma, mu, sigma)
-                total_kl = jax.tree_util.tree_reduce(jnp.add, kl_terms)
-                kl_reduction = jnp.minimum(1.0, jnp.sqrt(max_kl / total_kl))
-                mu_state.hyperparams['learning_rate'] = old_mu_lr * kl_reduction
-                sigma_state.hyperparams['learning_rate'] = old_sigma_lr * kl_reduction
+            # calculate entropy coefficient
+            ent = start_entropy_coeff * jnp.power(entropy_coeff_decay, progress)
+
+            # do a single update step
+            def _jax_wrapped_pgpe_update_step(carry, _):
+                _pgpe_params, _pgpe_opt_state, _r_max, _key, _converged = carry
+
+                # regular update for pgpe
+                _key, _subkey = random.split(_key)
+                mu, sigma = _pgpe_params
+                mu_state, sigma_state = _pgpe_opt_state
+                mu_grad, sigma_grad, new_r_max = _jax_wrapped_pgpe_grad_batched(
+                    _subkey, _pgpe_params, _r_max, ent, hparams, fls, nfls, 
+                    model_params, critic_params)
                 new_mu, new_sigma, new_mu_state, new_sigma_state = _jax_wrapped_pgpe_update_helper(
                     mu, sigma, mu_grad, sigma_grad, mu_state, sigma_state)
-                new_mu_state.hyperparams['learning_rate'] = old_mu_lr
-                new_sigma_state.hyperparams['learning_rate'] = old_sigma_lr
+                
+                # respect KL divergence contraint with old parameters
+                if max_kl is not None:
+                    old_mu_lr = new_mu_state.hyperparams['learning_rate']
+                    old_sigma_lr = new_sigma_state.hyperparams['learning_rate']
+                    kl_terms = jax.tree_util.tree_map(
+                        _jax_wrapped_pgpe_kl_term, new_mu, new_sigma, mu, sigma)
+                    total_kl = jax.tree_util.tree_reduce(jnp.add, kl_terms)
+                    kl_reduction = jnp.minimum(1.0, jnp.sqrt(max_kl / total_kl))
+                    mu_state.hyperparams['learning_rate'] = old_mu_lr * kl_reduction
+                    sigma_state.hyperparams['learning_rate'] = old_sigma_lr * kl_reduction
+                    new_mu, new_sigma, new_mu_state, new_sigma_state = _jax_wrapped_pgpe_update_helper(
+                        mu, sigma, mu_grad, sigma_grad, mu_state, sigma_state)
+                    new_mu_state.hyperparams['learning_rate'] = old_mu_lr
+                    new_sigma_state.hyperparams['learning_rate'] = old_sigma_lr
 
-            # apply projection step to the sampled policy
-            new_mu, converged = projection(new_mu, policy_hyperparams)
+                # apply projection step to the sampled policy
+                new_mu, _converged = projection(new_mu, hparams)
 
-            new_pgpe_params = (new_mu, new_sigma)
-            new_pgpe_opt_state = (new_mu_state, new_sigma_state)
-            policy_params = new_mu
-            return new_pgpe_params, new_r_max, new_pgpe_opt_state, policy_params, converged
+                new_pgpe_params = (new_mu, new_sigma)
+                new_pgpe_opt_state = (new_mu_state, new_sigma_state)
+                new_carry = (new_pgpe_params, new_pgpe_opt_state, new_r_max, _key, _converged)
+                return new_carry, None
+            
+            # do an unrolled update
+            carry = (pgpe_params, pgpe_opt_state, r_max, key, False)
+            carry, _ = jax.lax.scan(
+                _jax_wrapped_pgpe_update_step, 
+                init=carry, xs=None, length= self.steps_per_update
+            )
+            pgpe_params, pgpe_opt_state, r_max, _, converged = carry
+            policy_params, _ = pgpe_params
+            return pgpe_params, r_max, pgpe_opt_state, policy_params, converged
 
         # for parallel policy update
         def _jax_wrapped_batched_pgpe_updates(key, pgpe_params, r_max, progress,
-                                              policy_hyperparams, fls, nfls, 
-                                              model_params, critic_params, pgpe_opt_state):
+                                              hparams, fls, nfls, model_params, 
+                                              critic_params, pgpe_opt_state):
             keys = random.split(key, num=parallel_updates)
             return jax.vmap(
                 _jax_wrapped_pgpe_update, 
                 in_axes=(0, 0, 0, None, None, None, None, 0, None, 0)
-            )(keys, pgpe_params, r_max, progress, policy_hyperparams, fls, nfls, 
-              model_params, critic_params, pgpe_opt_state)
+            )(keys, pgpe_params, r_max, progress, hparams, fls, nfls, model_params, 
+              critic_params, pgpe_opt_state)
         
         self._update = jax.jit(_jax_wrapped_batched_pgpe_updates)
 
@@ -1857,6 +1875,7 @@ class JaxBackpropPlanner:
                  batch_size_test: Optional[int]=None,
                  rollout_horizon: Optional[int]=None,
                  parallel_updates: int=1,
+                 steps_per_update: int=1,
                  action_bounds: Optional[Bounds]=None,
                  optimizer: Callable[..., optax.GradientTransformation]=optax.rmsprop,
                  optimizer_kwargs: Optional[Kwargs]=None,
@@ -1889,6 +1908,8 @@ class JaxBackpropPlanner:
         optimization step
         :param rollout_horizon: lookahead planning horizon: None uses the env horizon
         :param parallel_updates: how many optimizers to run independently in parallel
+        :param steps_per_update: how many optimization steps are performed per JaxPlan
+        update (useful for partially jit compiling the update loop)
         :param action_bounds: box constraints on actions
         :param optimizer: a factory for an optax SGD algorithm
         :param optimizer_kwargs: a dictionary of parameters to pass to the SGD
@@ -1922,6 +1943,7 @@ class JaxBackpropPlanner:
         if batch_size_test is None:
             batch_size_test = batch_size_train
         self.batch_size_test = batch_size_test
+        self.steps_per_update = steps_per_update
         self.parallel_updates = parallel_updates
         if rollout_horizon is None:
             rollout_horizon = rddl.horizon
@@ -2052,6 +2074,7 @@ class JaxBackpropPlanner:
                   f'    ema_decay         ={self.ema_decay}\n'
                   f'    batch_size_train  ={self.batch_size_train}\n'
                   f'    batch_size_test   ={self.batch_size_test}\n'
+                  f'    steps_per_update  ={self.steps_per_update}\n'
                   f'    parallel_updates  ={self.parallel_updates}\n'
                   f'    preprocessor      ={self.preprocessor}\n')
         result += str(self.plan)
@@ -2272,32 +2295,53 @@ class JaxBackpropPlanner:
             
         def _jax_wrapped_plan_update(key, policy_params, policy_hyperparams, fls, nfls, 
                                      model_params, critic_params, opt_state, opt_aux):
-            
-            # calculate the gradient of the loss with respect to the policy
             grad_fn = jax.value_and_grad(loss, argnums=1, has_aux=True)
-            (loss_val, (log, model_params)), grad = grad_fn(
-                key, policy_params, policy_hyperparams, fls, nfls, 
-                model_params, critic_params
-            )
-            
-            # require a slightly different update if line search is used
-            if use_ls:
-                updates, opt_state = optimizer.update(
-                    grad, opt_state, params=policy_params, 
-                    value=loss_val, grad=grad, value_fn=_jax_wrapped_loss_swapped,
-                    key=key, policy_hyperparams=policy_hyperparams, fls=fls, nfls=nfls,
-                    model_params=model_params, critic_params=critic_params
-                )
-            else:
-                updates, opt_state = optimizer.update(grad, opt_state, params=policy_params) 
 
-            # apply optimizer and optional policy projection
-            policy_params = optax.apply_updates(policy_params, updates)
-            policy_params, converged = projection(policy_params, policy_hyperparams)
+            # perform a single gradient descent update
+            def _jax_wrapped_plan_update_step(carry, _):
+                _policy_params, _opt_state, _model_params, _key, *_ = carry
+                _key, _subkey = random.split(_key)
+
+                # calculate the gradient of the loss with respect to the policy
+                (_loss_val, (_log, _model_params)), grad = grad_fn(
+                    _subkey, _policy_params, policy_hyperparams, fls, nfls, 
+                    _model_params, critic_params
+                )
             
-            log['grad'] = grad
-            log['updates'] = updates
-            zero_grads = _jax_wrapped_zero_gradients(grad)
+                # require a slightly different update if line search is used
+                if use_ls:
+                    updates, _opt_state = optimizer.update(
+                        grad, _opt_state, params=_policy_params, 
+                        value=_loss_val, grad=grad, value_fn=_jax_wrapped_loss_swapped,
+                        key=_subkey, policy_hyperparams=policy_hyperparams, 
+                        fls=fls, nfls=nfls, model_params=_model_params, 
+                        critic_params=critic_params
+                    )
+                else:
+                    updates, _opt_state = optimizer.update(
+                        grad, _opt_state, params=_policy_params) 
+
+                # apply optimizer and optional policy projection
+                _policy_params = optax.apply_updates(_policy_params, updates)
+                _policy_params, _converged = projection(_policy_params, policy_hyperparams)
+                _log['grad'] = grad
+                _log['updates'] = updates
+                new_carry = (_policy_params, _opt_state, _model_params, _key, 
+                             _loss_val, _converged, _log)
+                return new_carry, None
+            
+            # do a single update
+            carry = (policy_params, opt_state, model_params, key, 0.0, False, None)
+            carry, _ = _jax_wrapped_plan_update_step(carry, None)
+
+            # do an unrolled update loop in JAX for any remaining steps
+            if self.steps_per_update > 1:
+                carry, _ = jax.lax.scan(
+                    _jax_wrapped_plan_update_step, 
+                    init=carry, xs=None, length= self.steps_per_update - 1
+                )
+            policy_params, opt_state, model_params, _, loss_val, converged, log = carry
+            zero_grads = _jax_wrapped_zero_gradients(log['grad'])
             return (policy_params, converged, opt_state, opt_aux, 
                     loss_val, log, model_params, zero_grads)
         
