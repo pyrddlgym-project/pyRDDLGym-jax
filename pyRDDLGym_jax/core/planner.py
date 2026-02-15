@@ -944,7 +944,7 @@ class JaxDifferentiableTopKProjection:
                 return jax.nn.softmax(logits)
             else:
                 return jax.lax.switch(
-                    train_flag, [differentiable_top_k, exact_top_k], key, logits, w)
+                    train_flag, [exact_top_k, differentiable_top_k], key, logits, w)
         return _jax_wrapped_drp_branched_top_k
 
 
@@ -1188,7 +1188,7 @@ class JaxDeepReactivePolicy(JaxPlan):
         # the main subroutine to compute the trainable rddl actions from the trainable
         # parameters and the current state/obs dictionary       
         def _jax_wrapped_drp_predict_train(key, params, hyperparams, step, fls, fls_hist, 
-                                           train_flag=0):
+                                           train_flag=1):
             actions = predict_fn.apply(
                 params, fls, hyperparams, train_flag=train_flag, rngs={"policy": key})
             if not wrap_non_bool:
@@ -1207,7 +1207,7 @@ class JaxDeepReactivePolicy(JaxPlan):
         # to their required types (i.e. bool, int, float)
         def _jax_wrapped_drp_predict_test(key, params, hyperparams, step, fls, fls_hist):
             actions = _jax_wrapped_drp_predict_train(
-                key, params, hyperparams, step, fls, fls_hist, train_flag=1)
+                key, params, hyperparams, step, fls, fls_hist, train_flag=0)
             new_actions = {}
             for (var, action) in actions.items():
                 prange = ranges[var]
@@ -1243,7 +1243,7 @@ class JaxDeepReactivePolicy(JaxPlan):
             obs_vars = {var: value[0, ...] 
                         for (var, value) in fls.items()
                         if var in observed_vars}
-            return predict_fn.init(key, obs_vars, hyperparams, train_flag=0)
+            return predict_fn.init(key, obs_vars, hyperparams, train_flag=1)
         self.initializer = _jax_wrapped_drp_init
         
     def guess_next_epoch(self, params: Pytree) -> Pytree:
