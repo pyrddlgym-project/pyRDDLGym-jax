@@ -312,13 +312,16 @@ class SigmoidRelational(JaxRDDLCompilerWithGrad):
 class SoftmaxArgmax(JaxRDDLCompilerWithGrad):
     '''Argmin/argmax operations approximated using softmax functions.'''
 
-    def __init__(self, *args, argmax_weight: float=10., **kwargs) -> None:
+    def __init__(self, *args, argmax_weight: float=10., 
+                 use_argmax_ste: bool=True, **kwargs) -> None:
         super(SoftmaxArgmax, self).__init__(*args, **kwargs)
         self.argmax_weight = float(argmax_weight)
+        self.use_argmax_ste = use_argmax_ste
     
     def get_kwargs(self) -> Dict[str, Any]:
         kwargs = super().get_kwargs()
         kwargs['argmax_weight'] = self.argmax_weight
+        kwargs['use_argmax_ste'] = self.use_argmax_ste
         return kwargs
 
     @staticmethod
@@ -337,6 +340,9 @@ class SoftmaxArgmax(JaxRDDLCompilerWithGrad):
         jax_expr = self._jax(arg, aux) 
         def argmax_op(x, params):
             sample = self.soft_argmax(x, params[id_], axes)
+            if self.use_argmax_ste:
+                hard_sample = jnp.argmax(x, axis=axes)
+                sample = sample + jax.lax.stop_gradient(hard_sample - sample)
             return sample, params
         return self._jax_unary_with_param(jax_expr, argmax_op)
 
@@ -351,6 +357,9 @@ class SoftmaxArgmax(JaxRDDLCompilerWithGrad):
         jax_expr = self._jax(arg, aux) 
         def argmin_op(x, params):
             sample = self.soft_argmax(-x, params[id_], axes)
+            if self.use_argmax_ste:
+                hard_sample = jnp.argmax(-x, axis=axes)
+                sample = sample + jax.lax.stop_gradient(hard_sample - sample)
             return sample, params
         return self._jax_unary_with_param(jax_expr, argmin_op)
         
@@ -864,28 +873,34 @@ class LinearIfElse(JaxRDDLCompilerWithGrad):
         return _jax_wrapped_if_then_else_linear
 
 
-class SoftmaxSwitch(JaxRDDLCompilerWithGrad):
-    '''Softmax switch control flow using a probabilistic interpretation.'''
+class TriangleKernelSwitch(JaxRDDLCompilerWithGrad):
+    '''Switch control flow using a traingular kernel.'''
     
-    def __init__(self, *args, switch_weight: float=10., **kwargs) -> None:
-        super(SoftmaxSwitch, self).__init__(*args, **kwargs)
+    def __init__(self, *args, switch_weight: float=1.0, 
+                 switch_eps: float=1e-12, 
+                 use_switch_ste: bool=True, **kwargs) -> None:
+        super(TriangleKernelSwitch, self).__init__(*args, **kwargs)
         self.switch_weight = float(switch_weight)
+        self.switch_eps = switch_eps
+        self.use_switch_ste = use_switch_ste
         
     def get_kwargs(self) -> Dict[str, Any]:
         kwargs = super().get_kwargs()
         kwargs['switch_weight'] = self.switch_weight
+        kwargs['switch_eps'] = self.switch_eps
+        kwargs['use_switch_ste'] = self.use_switch_ste
         return kwargs
 
     def _jax_switch(self, expr, aux):
 
-         # if predicate is non-fluent, always use the exact operation
+        # if predicate is non-fluent, always use the exact operation
         # case conditions are currently only literals so they are non-fluent
         pred = expr.args[0]
         if not self.traced.cached_is_fluent(pred):
             return JaxRDDLCompilerWithGrad._jax_switch(self, expr, aux)  
         
         id_ = expr.id
-        aux['params'][id_] = self.switch_weight
+        aux['params'][id_] = (self.switch_weight, self.switch_eps)
         aux['overriden'][id_] = __class__.__name__
         
         # recursively compile predicate
@@ -913,13 +928,22 @@ class SoftmaxSwitch(JaxRDDLCompilerWithGrad):
             sample_cases = jnp.asarray(sample_cases)          
             sample_cases = jnp.asarray(sample_cases, dtype=self._fix_dtype(sample_cases))
             
-            # replace integer indexing with softmax
-            sample_pred = jnp.broadcast_to(
+            # replace integer indexing with weighted triangular kernel
+            sample_pred_soft = jnp.broadcast_to(
                 sample_pred[jnp.newaxis, ...], shape=jnp.shape(sample_cases))
             literals = enumerate_literals(jnp.shape(sample_cases), axis=0)
-            proximity = -jnp.square(sample_pred - literals)
-            logits = params[id_] * proximity
-            sample = stable_softmax_weight_sum(logits, sample_cases, axis=0)
+            strength, eps = params[id_]
+            weight = jax.nn.relu(1.0 - strength * jnp.abs(sample_pred_soft - literals))
+            weight = weight / (jnp.sum(weight, axis=0) + eps)
+            sample = jnp.sum(weight * sample_cases, axis=0)
+
+            # straight through estimator
+            if self.use_switch_ste:
+                sample_pred_hard = jnp.asarray(sample_pred[jnp.newaxis, ...], dtype=self.INT)
+                hard_sample = jnp.take_along_axis(sample_cases, sample_pred_hard, axis=0)
+                assert jnp.shape(hard_sample)[0] == 1
+                hard_sample = hard_sample[0, ...]
+                sample = sample + jax.lax.stop_gradient(hard_sample - sample)
             return sample, key, err, params
         return _jax_wrapped_switch_softmax
     
@@ -1166,7 +1190,8 @@ class GumbelSoftmaxDiscrete(JaxRDDLCompilerWithGrad):
             prob, key, err, params = prob_fn(fls, nfls, params, key)
             key, subkey = random.split(key)
             g = random.gumbel(key=subkey, shape=jnp.shape(prob), dtype=self.REAL)
-            sample = SoftmaxArgmax.soft_argmax(g + jnp.log(prob + eps), w=w, axes=-1)
+            logits = g + jnp.log(prob + eps)
+            sample = SoftmaxArgmax.soft_argmax(logits, w=w, axes=-1)
             err = JaxRDDLCompilerWithGrad._jax_update_discrete_oob_error(err, prob)
             return sample, key, err, params
         return _jax_wrapped_distribution_discrete_gumbel_softmax
@@ -1192,7 +1217,8 @@ class GumbelSoftmaxDiscrete(JaxRDDLCompilerWithGrad):
             prob, key, err, params = prob_fn(fls, nfls, params, key)
             key, subkey = random.split(key)
             g = random.gumbel(key=subkey, shape=jnp.shape(prob), dtype=self.REAL)
-            sample = SoftmaxArgmax.soft_argmax(g + jnp.log(prob + eps), w=w, axes=-1)
+            logits = g + jnp.log(prob + eps)
+            sample = SoftmaxArgmax.soft_argmax(logits, w=w, axes=-1)
             err = JaxRDDLCompilerWithGrad._jax_update_discrete_oob_error(err, prob)
             return sample, key, err, params
         return _jax_wrapped_distribution_discrete_pvar_gumbel_softmax
@@ -1295,7 +1321,8 @@ class GumbelSoftmaxBinomial(JaxRDDLCompilerWithGrad):
                     (trials - ks) * jnp.log1p(-prob + eps))
         log_prob = jnp.where(in_support, log_prob, jnp.log(eps))
         g = random.gumbel(key=key, shape=jnp.shape(log_prob), dtype=prob.dtype)
-        return SoftmaxArgmax.soft_argmax(g + log_prob, w=w, axes=-1)
+        logits = g + log_prob
+        return SoftmaxArgmax.soft_argmax(logits, w=w, axes=-1)
         
     def _jax_binomial(self, expr, aux):
         ERR = JaxRDDLCompilerWithGrad.ERROR_CODES['INVALID_PARAM_BINOMIAL']
@@ -1501,7 +1528,8 @@ class GumbelSoftmaxPoisson(JaxRDDLCompilerWithGrad):
         rate = rate[..., jnp.newaxis]
         log_prob = ks * jnp.log(rate + eps) - rate - scipy.special.gammaln(ks + 1)
         g = random.gumbel(key=key, shape=jnp.shape(log_prob), dtype=rate.dtype)
-        return SoftmaxArgmax.soft_argmax(g + log_prob, w=w, axes=-1)
+        logits = g + log_prob
+        return SoftmaxArgmax.soft_argmax(logits, w=w, axes=-1)
     
     def branched_approx_to_poisson(self, key: random.PRNGKey, 
                                    rate: jnp.ndarray, 
@@ -1634,7 +1662,7 @@ class DeterminizedPoisson(JaxRDDLCompilerWithGrad):
 class DefaultJaxRDDLCompilerWithGrad(SigmoidRelational, SoftmaxArgmax, 
                                      ProductNormLogical, 
                                      SafeSqrt, SoftFloor, SoftRound, 
-                                     LinearIfElse, SoftmaxSwitch,
+                                     LinearIfElse, TriangleKernelSwitch,
                                      ReparameterizedGeometric, 
                                      GumbelSigmoidBernoulli,
                                      GumbelSoftmaxDiscrete, GumbelSoftmaxBinomial,
