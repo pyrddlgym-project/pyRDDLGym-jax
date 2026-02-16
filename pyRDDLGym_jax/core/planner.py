@@ -1715,7 +1715,7 @@ class GaussianPGPE(PGPE):
             ent = start_entropy_coeff * jnp.power(entropy_coeff_decay, progress)
 
             # do a single update step
-            def _jax_wrapped_pgpe_update_step(carry, _):
+            def _jax_wrapped_pgpe_update_step(_, carry):
                 _pgpe_params, _pgpe_opt_state, _r_max, _key, _converged = carry
 
                 # regular update for pgpe
@@ -1749,15 +1749,15 @@ class GaussianPGPE(PGPE):
                 new_pgpe_params = (new_mu, new_sigma)
                 new_pgpe_opt_state = (new_mu_state, new_sigma_state)
                 new_carry = (new_pgpe_params, new_pgpe_opt_state, new_r_max, _key, _converged)
-                return new_carry, None
+                return new_carry
             
             # do an unrolled update
             carry = (pgpe_params['stats'], pgpe_opt_state, pgpe_params['r_max'], key, False)
-            carry, _ = jax.lax.scan(
-                _jax_wrapped_pgpe_update_step, 
-                init=carry, xs=None, length= self.steps_per_update
+            stats, pgpe_opt_state, r_max, _, converged = jax.lax.fori_loop(
+                lower=0, upper=self.steps_per_update, 
+                body_fun=_jax_wrapped_pgpe_update_step, 
+                init_val=carry
             )
-            stats, pgpe_opt_state, r_max, _, converged = carry
             new_pgpe_params = {'stats': stats, 'r_max': r_max}
             policy_params, _ = stats
             return new_pgpe_params, pgpe_opt_state, policy_params, converged
@@ -2298,7 +2298,7 @@ class JaxBackpropPlanner:
             grad_fn = jax.value_and_grad(loss, argnums=1, has_aux=True)
 
             # perform a single gradient descent update
-            def _jax_wrapped_plan_update_step(carry, _):
+            def _jax_wrapped_plan_update_step(_, carry):
                 _policy_params, _opt_state, _model_params, _key, *_ = carry
                 _key, _subkey = random.split(_key)
 
@@ -2328,17 +2328,18 @@ class JaxBackpropPlanner:
                 _log['updates'] = updates
                 new_carry = (_policy_params, _opt_state, _model_params, _key, 
                              _loss_val, _converged, _log)
-                return new_carry, None
+                return new_carry
             
             # do a single update
             carry = (policy_params, opt_state, model_params, key, 0.0, False, None)
-            carry, _ = _jax_wrapped_plan_update_step(carry, None)
+            carry = _jax_wrapped_plan_update_step(0, carry)
 
             # do an unrolled update loop in JAX for any remaining steps
             if self.steps_per_update > 1:
-                carry, _ = jax.lax.scan(
-                    _jax_wrapped_plan_update_step, 
-                    init=carry, xs=None, length= self.steps_per_update - 1
+                carry = jax.lax.fori_loop(
+                    lower=0, upper=self.steps_per_update - 1, 
+                    body_fun=_jax_wrapped_plan_update_step, 
+                    init_val=carry
                 )
             policy_params, opt_state, model_params, _, loss_val, converged, log = carry
             zero_grads = _jax_wrapped_zero_gradients(log['grad'])
