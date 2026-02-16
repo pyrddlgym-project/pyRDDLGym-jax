@@ -605,6 +605,15 @@ class JaxSogbofaActionProjection(JaxActionProjection):
         return _jax_wrapped_sogbofa_project
 
 
+def jax_bound_action(branches, lower, upper, param):
+    f_both = lower + (upper - lower) * stable_sigmoid(param)
+    f_lowe = lower + jax.nn.softplus(param)
+    f_uppe = upper - jax.nn.softplus(-param)
+    f_none = param
+    action = jnp.select(branches, [f_both, f_lowe, f_uppe, f_none])
+    return action
+    
+
 class JaxStraightLinePlan(JaxPlan):
     '''A straight line plan implementation in JAX'''
 
@@ -714,14 +723,9 @@ class JaxStraightLinePlan(JaxPlan):
         def _jax_non_bool_param_to_action(var, param, hyperparams):
             if wrap_non_bool:
                 lower, upper = bounds_safe[var]
-                mb, ml, mu, mn = [jnp.asarray(mask, dtype=compiled.REAL) 
-                                  for mask in cond_lists[var]]       
-                action = (
-                    mb * (lower + (upper - lower) * stable_sigmoid(param)) + 
-                    ml * (lower + jax.nn.softplus(param)) + 
-                    mu * (upper - jax.nn.softplus(-param)) + 
-                    mn * param
-                )
+                branches = [jnp.asarray(mask, dtype=compiled.REAL) 
+                            for mask in cond_lists[var]]       
+                action = jax_bound_action(branches, lower, upper, param)
             else:
                 action = param
             return action
@@ -1142,14 +1146,9 @@ class JaxDeepReactivePolicy(JaxPlan):
                 else:
                     if wrap_non_bool:
                         lower, upper = bounds_safe[var]
-                        mb, ml, mu, mn = [jnp.asarray(mask, dtype=compiled.REAL) 
-                                          for mask in cond_lists[var]]       
-                        actions[var] = (
-                            mb * (lower + (upper - lower) * stable_sigmoid(output)) + 
-                            ml * (lower + jax.nn.softplus(output)) + 
-                            mu * (upper - jax.nn.softplus(-output)) + 
-                            mn * output
-                        )
+                        branches = [jnp.asarray(mask, dtype=compiled.REAL) 
+                                    for mask in cond_lists[var]]       
+                        actions[var] = jax_bound_action(branches, lower, upper, output)
                     else:
                         actions[var] = output
             
@@ -3032,7 +3031,8 @@ class JaxBackpropPlanner:
         return mean, lower, upper
 
     def _perform_diagnosis(self, last_iter_improve, train_return, test_return, best_return, 
-                           max_grad_norm):
+                           max_grad_norm, train_test_valid_bound=0.2,
+                           grad_relative_return_bound=1.0):
         
         # divergence if the solution is not finite
         if not np.isfinite(train_return):
@@ -3058,7 +3058,7 @@ class JaxBackpropPlanner:
         # 1. the train and test return disagree
         validation_error = abs(test_return - train_return)
         validation_error_norm = max(abs(train_return), abs(test_return))
-        if not (validation_error < 0.2 * validation_error_norm):
+        if not (validation_error < train_test_valid_bound * validation_error_norm):
             return termcolor.colored(
                 f'[WARN] Progress but large rel. train/test error {validation_error:.4f}, '
                 f'adjust model or batch size.', 'yellow'
@@ -3067,16 +3067,14 @@ class JaxBackpropPlanner:
         # model likely did not converge IF:
         # 1. the max grad relative to the return is high
         if not grad_is_zero:
-            if not (abs(best_return) > 1.0 * max_grad_norm):
+            if not (abs(best_return) > grad_relative_return_bound * max_grad_norm):
                 return termcolor.colored(
                     f'[WARN] Progress but large ||g||={max_grad_norm:.4f}, '
                     f'adjust learning rate or budget.', 'yellow'
                 )
         
         # likely successful
-        return termcolor.colored(
-            '[SUCC] No convergence problems found.', 'green'
-        )
+        return termcolor.colored('[SUCC] No convergence problems found.', 'green')
         
     def get_action(self, key: random.PRNGKey,
                    params: Pytree,
