@@ -1499,17 +1499,16 @@ class GaussianPGPE(PGPE):
         def _jax_wrapped_pgpe_init(key, policy_params):
             mu = policy_params
             sigma = jax.tree_util.tree_map(partial(jnp.full_like, fill_value=sigma0), mu)
-            pgpe_params = (mu, sigma)
             pgpe_opt_state = (mu_optimizer.init(mu), sigma_optimizer.init(sigma))
-            r_max = -jnp.inf
-            return pgpe_params, pgpe_opt_state, r_max
+            pgpe_params = {'stats': (mu, sigma), 'r_max': -jnp.inf}
+            return pgpe_params, pgpe_opt_state
         
         # for parallel policy update, initialize multiple indepdendent (mean, sigma)
         # gaussians that will be optimized in parallel
         def _jax_wrapped_batched_pgpe_init(key, policy_params):
             keys = random.split(key, num=parallel_updates)
             return jax.vmap(_jax_wrapped_pgpe_init, in_axes=0)(keys, policy_params)
-    
+
         self._initializer = jax.jit(_jax_wrapped_batched_pgpe_init)
 
         # ***********************************************************************
@@ -1667,7 +1666,8 @@ class GaussianPGPE(PGPE):
             # no batching required
             if batch_size == 1:
                 mu_grad, sigma_grad, new_r_max = _jax_wrapped_pgpe_grad(
-                    key, mu, sigma, r_max, ent, hparams, fls, nfls, model_params, critic_params)
+                    key, mu, sigma, r_max, ent, hparams, fls, nfls, 
+                    model_params, critic_params)
             
             # for batching need to handle how meta-gradients of mean, sigma are aggregated
             else:
@@ -1676,7 +1676,8 @@ class GaussianPGPE(PGPE):
                 mu_grads, sigma_grads, r_maxs = jax.vmap(
                     _jax_wrapped_pgpe_grad, 
                     in_axes=(0, None, None, None, None, None, None, None, None, None)
-                )(keys, mu, sigma, r_max, ent, hparams, fls, nfls, model_params, critic_params)
+                )(keys, mu, sigma, r_max, ent, hparams, fls, nfls, 
+                  model_params, critic_params)
 
                 # calculate the average gradient for aggregation
                 mu_grad, sigma_grad = jax.tree_util.tree_map(
@@ -1708,8 +1709,8 @@ class GaussianPGPE(PGPE):
                 partial(jnp.clip, min=sigma_lo, max=sigma_hi), new_sigma)
             return new_mu, new_sigma, new_mu_state, new_sigma_state
 
-        def _jax_wrapped_pgpe_update(key, pgpe_params, r_max, progress, hparams, fls, nfls, 
-                                     model_params, critic_params, pgpe_opt_state):
+        def _jax_wrapped_pgpe_update(key, pgpe_params, pgpe_opt_state, progress, hparams, 
+                                     fls, nfls, model_params, critic_params):
             
             # calculate entropy coefficient
             ent = start_entropy_coeff * jnp.power(entropy_coeff_decay, progress)
@@ -1752,25 +1753,25 @@ class GaussianPGPE(PGPE):
                 return new_carry, None
             
             # do an unrolled update
-            carry = (pgpe_params, pgpe_opt_state, r_max, key, False)
+            carry = (pgpe_params['stats'], pgpe_opt_state, pgpe_params['r_max'], key, False)
             carry, _ = jax.lax.scan(
                 _jax_wrapped_pgpe_update_step, 
                 init=carry, xs=None, length= self.steps_per_update
             )
-            pgpe_params, pgpe_opt_state, r_max, _, converged = carry
-            policy_params, _ = pgpe_params
-            return pgpe_params, r_max, pgpe_opt_state, policy_params, converged
+            stats, pgpe_opt_state, r_max, _, converged = carry
+            new_pgpe_params = {'stats': stats, 'r_max': r_max}
+            policy_params, _ = stats
+            return new_pgpe_params, pgpe_opt_state, policy_params, converged
 
         # for parallel policy update
-        def _jax_wrapped_batched_pgpe_updates(key, pgpe_params, r_max, progress,
-                                              hparams, fls, nfls, model_params, 
-                                              critic_params, pgpe_opt_state):
+        def _jax_wrapped_batched_pgpe_updates(key, pgpe_params, pgpe_opt_state, progress,
+                                              hparams, fls, nfls, model_params, critic_params):
             keys = random.split(key, num=parallel_updates)
             return jax.vmap(
                 _jax_wrapped_pgpe_update, 
-                in_axes=(0, 0, 0, None, None, None, None, 0, None, 0)
-            )(keys, pgpe_params, r_max, progress, hparams, fls, nfls, model_params, 
-              critic_params, pgpe_opt_state)
+                in_axes=(0, 0, 0, None, None, None, None, 0, None)
+            )(keys, pgpe_params, pgpe_opt_state, progress, hparams, fls, nfls, 
+              model_params, critic_params)
         
         self._update = jax.jit(_jax_wrapped_batched_pgpe_updates)
 
@@ -2734,10 +2735,10 @@ class JaxBackpropPlanner:
         
         # initialize pgpe parameters
         if self.use_pgpe:
-            pgpe_params, pgpe_opt_state, r_max = self.pgpe.initialize(key, policy_params)
+            pgpe_params, pgpe_opt_state = self.pgpe.initialize(key, policy_params)
             rolling_pgpe_loss = RollingMean(test_rolling_window)
         else:
-            pgpe_params = pgpe_opt_state = r_max = rolling_pgpe_loss = None
+            pgpe_params = pgpe_opt_state = rolling_pgpe_loss = None
         total_pgpe_it = 0
 
         # ======================================================================
@@ -2824,10 +2825,9 @@ class JaxBackpropPlanner:
 
                 # pgpe update of the plan
                 key, subkey = random.split(key)
-                pgpe_params, r_max, pgpe_opt_state, pgpe_param, pgpe_converged = self.pgpe.update(
-                    subkey, pgpe_params, r_max, progress_percent, 
-                    policy_hyperparams, *test_subs, model_params_test, critic_params, 
-                    pgpe_opt_state
+                pgpe_params, pgpe_opt_state, pgpe_param, pgpe_converged = self.pgpe.update(
+                    subkey, pgpe_params, pgpe_opt_state, progress_percent, 
+                    policy_hyperparams, *test_subs, model_params_test, critic_params
                 )
                 
                 # evaluate
@@ -2952,11 +2952,15 @@ class JaxBackpropPlanner:
             
             # if the progress bar is used
             if print_progress:
+                if self.use_pgpe:
+                    pgpe_info = f'{np.max(pgpe_return):13.5f} [{total_pgpe_it} it] pgpe | '
+                else:
+                    pgpe_info = ''
                 progress_bar.set_description(
                     f'{position_str} {it} it | {-np.min(train_loss):13.5f} train | '
-                    f'{-np.min(test_loss_smooth):13.5f} test | '
+                    f'{-np.min(test_loss_smooth):13.5f} test | {pgpe_info}'
                     f'{-best_loss:13.5f} best | '
-                    f'{total_pgpe_it} pgpe | {status.value} status', 
+                    f'{status.value} status', 
                     refresh=False
                 )
                 progress_bar.set_postfix_str(
