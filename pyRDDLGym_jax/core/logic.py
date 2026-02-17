@@ -60,9 +60,9 @@ def stable_sigmoid(x: jnp.ndarray) -> jnp.ndarray:
 def stable_tanh(x: jnp.ndarray) -> jnp.ndarray:
     ax = jnp.abs(x)
     small = jnp.where(
-        ax < 20.0,
-        jnp.expm1(2.0 * ax) / (jnp.expm1(2.0 * ax) + 2.0),
-        1.0 - 2.0 * jnp.exp(-2.0 * ax)
+        ax < 20.,
+        jnp.expm1(2. * ax) / (jnp.expm1(2. * ax) + 2.),
+        1. - 2. * jnp.exp(-2. * ax)
     )
     return jnp.sign(x) * small
 
@@ -71,7 +71,7 @@ def stable_tanh(x: jnp.ndarray) -> jnp.ndarray:
 def stable_tanh_jvp(primals, tangents):
     (x,), (x_dot,) = primals, tangents
     t = stable_tanh(x)
-    tangent_out = x_dot * (1.0 - t * t)
+    tangent_out = x_dot * (1. - t * t)
     return t, tangent_out
 
 
@@ -876,7 +876,7 @@ class LinearIfElse(JaxRDDLCompilerWithGrad):
 class TriangleKernelSwitch(JaxRDDLCompilerWithGrad):
     '''Switch control flow using a traingular kernel.'''
     
-    def __init__(self, *args, switch_weight: float=1.0, 
+    def __init__(self, *args, switch_weight: float=1., 
                  switch_eps: float=1e-12, 
                  use_switch_ste: bool=True, **kwargs) -> None:
         super(TriangleKernelSwitch, self).__init__(*args, **kwargs)
@@ -933,7 +933,7 @@ class TriangleKernelSwitch(JaxRDDLCompilerWithGrad):
                 sample_pred[jnp.newaxis, ...], shape=jnp.shape(sample_cases))
             literals = enumerate_literals(jnp.shape(sample_cases), axis=0)
             strength, eps = params[id_]
-            weight = jax.nn.relu(1.0 - strength * jnp.abs(sample_pred_soft - literals))
+            weight = jax.nn.relu(1. - strength * jnp.abs(sample_pred_soft - literals))
             weight = weight / (jnp.sum(weight, axis=0) + eps)
             sample = jnp.sum(weight * sample_cases, axis=0)
 
@@ -1303,7 +1303,7 @@ class GumbelSoftmaxBinomial(JaxRDDLCompilerWithGrad):
                                   trials: jnp.ndarray, prob: jnp.ndarray) -> jnp.ndarray:
         normal = random.normal(key=key, shape=jnp.shape(trials), dtype=prob.dtype)
         mean = trials * prob
-        std = jnp.sqrt(trials * jnp.clip(prob * (1.0 - prob), 0.0, 1.0))
+        std = jnp.sqrt(trials * jnp.clip(prob * (1. - prob), 0., 1.))
         return mean + std * normal
     
     def gumbel_softmax_approx_to_binomial(self, key: random.PRNGKey, 
@@ -1492,7 +1492,7 @@ class ExponentialPoisson(JaxRDDLCompilerWithGrad):
             trials = jnp.asarray(trials, dtype=self.REAL)
             prob = jnp.asarray(prob, dtype=self.REAL)
             gamma = random.gamma(key=subkey, a=trials, dtype=self.REAL)
-            rate = ((1.0 - prob) / prob) * gamma
+            rate = (1. / prob - 1.) * gamma
             sample = self.branched_approx_to_poisson(subkey, rate, *params[id_])   
             out_of_bounds = jnp.logical_not(jnp.all(
                 jnp.logical_and(jnp.logical_and(prob >= 0, prob <= 1), trials > 0)))
@@ -1593,7 +1593,7 @@ class GumbelSoftmaxPoisson(JaxRDDLCompilerWithGrad):
             trials = jnp.asarray(trials, dtype=self.REAL)
             prob = jnp.asarray(prob, dtype=self.REAL)
             gamma = random.gamma(key=subkey, a=trials, dtype=self.REAL)
-            rate = ((1.0 - prob) / prob) * gamma
+            rate = (1. / prob - 1.) * gamma
             sample = self.branched_approx_to_poisson(subkey, rate, *params[id_])   
             out_of_bounds = jnp.logical_not(jnp.all(
                 jnp.logical_and(jnp.logical_and(prob >= 0, prob <= 1), trials > 0)))
@@ -1651,7 +1651,7 @@ class DeterminizedPoisson(JaxRDDLCompilerWithGrad):
             prob, key, err1, params = jax_prob(fls, nfls, params, key)
             trials = jnp.asarray(trials, dtype=self.REAL)
             prob = jnp.asarray(prob, dtype=self.REAL)
-            sample = ((1.0 - prob) / prob) * trials
+            sample = (1. / prob - 1.) * trials
             out_of_bounds = jnp.logical_not(jnp.all(
                 jnp.logical_and(jnp.logical_and(prob >= 0, prob <= 1), trials > 0)))
             err = err1 | err2 | (out_of_bounds * ERR)
