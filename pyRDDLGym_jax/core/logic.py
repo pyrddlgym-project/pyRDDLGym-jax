@@ -814,6 +814,11 @@ class SoftRound(JaxRDDLCompilerWithGrad):
         kwargs['use_round_ste'] = self.use_round_ste
         return kwargs
 
+    @staticmethod
+    def soft_round(x: jnp.ndarray, w: float) -> jnp.ndarray:
+        m = jnp.floor(x) + 0.5
+        return m + 0.5 * stable_tanh(w * (x - m)) / stable_tanh(w / 2.)
+
     def _jax_round(self, expr, aux):
         if not self.traced.cached_is_fluent(expr):
             return JaxRDDLCompilerWithGrad._jax_round(self, expr, aux)
@@ -821,9 +826,7 @@ class SoftRound(JaxRDDLCompilerWithGrad):
         aux['params'][id_] = self.round_weight
         aux['overriden'][id_] = __class__.__name__
         def round_op(x, params):
-            param = params[id_]
-            m = jnp.floor(x) + 0.5
-            sample = m + 0.5 * stable_tanh(param * (x - m)) / stable_tanh(param / 2.)
+            sample = self.soft_round(x, params[id_])
             if self.use_round_ste:
                 sample = sample + jax.lax.stop_gradient(jnp.round(x) - sample)
             return sample, params
@@ -1076,17 +1079,14 @@ class GumbelSigmoidBernoulli(JaxRDDLCompilerWithGrad):
     
     def __init__(self, *args, 
                  bernoulli_sigmoid_weight: float=10., 
-                 bernoulli_eps: float=1e-14,
                  use_ste_bernoulli: bool=False, **kwargs) -> None:
         super(GumbelSigmoidBernoulli, self).__init__(*args, **kwargs)
         self.bernoulli_sigmoid_weight = float(bernoulli_sigmoid_weight)
-        self.bernoulli_eps = float(bernoulli_eps)
         self.use_ste_bernoulli = use_ste_bernoulli
     
     def get_kwargs(self) -> Dict[str, Any]:
         kwargs = super().get_kwargs()
         kwargs['bernoulli_sigmoid_weight'] = self.bernoulli_sigmoid_weight
-        kwargs['bernoulli_eps'] = self.bernoulli_eps
         kwargs['use_ste_bernoulli'] = self.use_ste_bernoulli
         return kwargs
 
@@ -1100,20 +1100,20 @@ class GumbelSigmoidBernoulli(JaxRDDLCompilerWithGrad):
             return JaxRDDLCompilerWithGrad._jax_bernoulli(self, expr, aux)  
         
         id_ = expr.id
-        aux['params'][id_] = (self.bernoulli_sigmoid_weight, self.bernoulli_eps)
+        aux['params'][id_] = self.bernoulli_sigmoid_weight
         aux['overriden'][id_] = __class__.__name__
 
         jax_prob = self._jax(arg_prob, aux)
         
         def _jax_wrapped_distribution_bernoulli_gumbel_sigmoid(fls, nfls, params, key):
-            w, eps = params[id_]
+            w = params[id_]
             prob, key, err, params = jax_prob(fls, nfls, params, key)
             key, subkey = random.split(key)
-            g = random.gumbel(key=subkey, shape=jnp.shape(prob), dtype=self.REAL)
-            arg = g + jnp.log(prob + eps)
-            sample = stable_sigmoid(w * arg)
+            noise = random.logistic(key=subkey, shape=jnp.shape(prob), dtype=self.REAL)
+            logit = scipy.special.logit(prob) + noise          
+            sample = stable_sigmoid(w * logit)
             if self.use_ste_bernoulli:
-                hard_sample = (arg > 0).astype(arg.dtype)
+                hard_sample = (logit > 0).astype(logit.dtype)
                 sample = sample + jax.lax.stop_gradient(hard_sample - sample)
             out_of_bounds = jnp.logical_not(jnp.all(jnp.logical_and(prob >= 0, prob <= 1)))
             err = err | (out_of_bounds * ERR)
@@ -1664,7 +1664,7 @@ class DefaultJaxRDDLCompilerWithGrad(SigmoidRelational, SoftmaxArgmax,
                                      SafeSqrt, SoftFloor, SoftRound, 
                                      LinearIfElse, TriangleKernelSwitch,
                                      ReparameterizedGeometric, 
-                                     GumbelSigmoidBernoulli,
+                                     ReparameterizedSigmoidBernoulli,
                                      GumbelSoftmaxDiscrete, GumbelSoftmaxBinomial,
                                      ExponentialPoisson):
     
