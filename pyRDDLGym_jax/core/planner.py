@@ -2093,6 +2093,8 @@ class JaxBackpropPlanner:
     # ===========================================================================
 
     def _jax_compile_rddl(self):
+
+        # compile relaxed model
         self.compiled = self.compiler_type(
             rddl=self.rddl,
             logger=self.logger,
@@ -2100,8 +2102,10 @@ class JaxBackpropPlanner:
             **self.compiler_kwargs
         )
         self.print_warnings = self.compiled.print_warnings
-        self.compiled.compile(log_jax_expr=True, heading='RELAXED MODEL')
+        self.compiled.compile(log_jax_expr=True, heading='RELAXED MODEL', 
+                              compile_constraints=False)
     
+        # compile exact model for testing
         self.test_compiled = JaxRDDLCompiler(
             rddl=self.rddl,
             allow_synchronous_state=True,
@@ -2109,7 +2113,8 @@ class JaxBackpropPlanner:
             use64bit=self.compiled.use64bit,
             python_functions=self.python_functions
         )
-        self.test_compiled.compile(log_jax_expr=True, heading='EXACT MODEL')
+        self.test_compiled.compile(log_jax_expr=True, heading='EXACT MODEL',
+                                   compile_constraints=False)
 
     def _jax_compile_policy(self):
         if self.preprocessor is not None:
