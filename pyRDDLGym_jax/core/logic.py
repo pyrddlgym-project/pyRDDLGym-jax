@@ -325,8 +325,9 @@ class SoftmaxArgmax(JaxRDDLCompilerWithGrad):
         return kwargs
 
     @staticmethod
-    def soft_argmax(x: jnp.ndarray, w: float, axes: Union[int, Tuple[int, ...]]) -> jnp.ndarray:
-        literals = enumerate_literals(jnp.shape(x), axis=axes)
+    def soft_argmax(x: jnp.ndarray, w: float, axes: Union[int, Tuple[int, ...]], 
+                    dtype: type=jnp.int32) -> jnp.ndarray:
+        literals = enumerate_literals(jnp.shape(x), axis=axes, dtype=dtype)
         return stable_softmax_weight_sum(w * x, literals, axis=axes)
 
     def _jax_argmax(self, expr, aux):
@@ -339,7 +340,7 @@ class SoftmaxArgmax(JaxRDDLCompilerWithGrad):
         _, axes = self.traced.cached_sim_info(expr)   
         jax_expr = self._jax(arg, aux) 
         def argmax_op(x, params):
-            sample = self.soft_argmax(x, params[id_], axes)
+            sample = self.soft_argmax(x, w=params[id_], axes=axes, dtype=self.INT)
             if self.use_argmax_ste:
                 hard_sample = jnp.argmax(x, axis=axes)
                 sample = sample + jax.lax.stop_gradient(hard_sample - sample)
@@ -356,7 +357,7 @@ class SoftmaxArgmax(JaxRDDLCompilerWithGrad):
         _, axes = self.traced.cached_sim_info(expr)   
         jax_expr = self._jax(arg, aux) 
         def argmin_op(x, params):
-            sample = self.soft_argmax(-x, params[id_], axes)
+            sample = self.soft_argmax(-x, w=params[id_], axes=axes, dtype=self.INT)
             if self.use_argmax_ste:
                 hard_sample = jnp.argmax(-x, axis=axes)
                 sample = sample + jax.lax.stop_gradient(hard_sample - sample)
@@ -461,7 +462,7 @@ class ProductNormLogical(JaxRDDLCompilerWithGrad):
         def forall_op(x, axis):
             sample = jnp.prod(x, axis=axis)
             if self.use_logic_ste:
-                hard_sample = jnp.all(x, axis=axis)
+                hard_sample = jnp.all(x > 0.5, axis=axis)
                 sample = sample + jax.lax.stop_gradient(hard_sample - sample)
             return sample
         return self._jax_aggregation_helper(expr, aux, forall_op)
@@ -473,7 +474,7 @@ class ProductNormLogical(JaxRDDLCompilerWithGrad):
         def exists_op(x, axis):
             sample = 1. - jnp.prod(1. - x, axis=axis)
             if self.use_logic_ste:
-                hard_sample = jnp.any(x, axis=axis)
+                hard_sample = jnp.any(x > 0.5, axis=axis)
                 sample = sample + jax.lax.stop_gradient(hard_sample - sample)
             return sample
         return self._jax_aggregation_helper(expr, aux, exists_op)
@@ -572,7 +573,7 @@ class GodelNormLogical(JaxRDDLCompilerWithGrad):
         def all_op(x, axis):
             sample = jnp.min(x, axis=axis)
             if self.use_logic_ste:
-                hard_sample = jnp.all(x, axis=axis)
+                hard_sample = jnp.all(x > 0.5, axis=axis)
                 sample = sample + jax.lax.stop_gradient(hard_sample - sample)
             return sample
         return self._jax_aggregation_helper(expr, aux, all_op)
@@ -584,7 +585,7 @@ class GodelNormLogical(JaxRDDLCompilerWithGrad):
         def exists_op(x, axis):
             sample = jnp.max(x, axis=axis)
             if self.use_logic_ste:
-                hard_sample = jnp.any(x, axis=axis)
+                hard_sample = jnp.any(x > 0.5, axis=axis)
                 sample = sample + jax.lax.stop_gradient(hard_sample - sample)
             return sample
         return self._jax_aggregation_helper(expr, aux, exists_op)
@@ -683,7 +684,7 @@ class LukasiewiczNormLogical(JaxRDDLCompilerWithGrad):
         def forall_op(x, axis):
             sample = jax.nn.relu(jnp.sum(x - 1., axis=axis) + 1.)
             if self.use_logic_ste:
-                hard_sample = jnp.all(x, axis=axis)
+                hard_sample = jnp.all(x > 0.5, axis=axis)
                 sample = sample + jax.lax.stop_gradient(hard_sample - sample)
             return sample
         return self._jax_aggregation_helper(expr, aux, forall_op)
@@ -695,7 +696,7 @@ class LukasiewiczNormLogical(JaxRDDLCompilerWithGrad):
         def exists_op(x, axis):
             sample = 1. - jax.nn.relu(jnp.sum(-x, axis=axis) + 1.)
             if self.use_logic_ste:
-                hard_sample = jnp.any(x, axis=axis)
+                hard_sample = jnp.any(x > 0.5, axis=axis)
                 sample = sample + jax.lax.stop_gradient(hard_sample - sample)
             return sample
         return self._jax_aggregation_helper(expr, aux, exists_op)
@@ -868,7 +869,7 @@ class LinearIfElse(JaxRDDLCompilerWithGrad):
             sample_true, key, err2, params = jax_true(fls, nfls, params, key)
             sample_false, key, err3, params = jax_false(fls, nfls, params, key)
             if self.use_if_else_ste:
-                hard_pred = (sample_pred > 0.5).astype(sample_pred.dtype)
+                hard_pred = jnp.asarray(sample_pred > 0.5, dtype=sample_pred.dtype)
                 sample_pred = sample_pred + jax.lax.stop_gradient(hard_pred - sample_pred)
             sample = sample_pred * sample_true + (1 - sample_pred) * sample_false
             err = err1 | err2 | err3
@@ -934,7 +935,7 @@ class TriangleKernelSwitch(JaxRDDLCompilerWithGrad):
             # replace integer indexing with weighted triangular kernel
             sample_pred_soft = jnp.broadcast_to(
                 sample_pred[jnp.newaxis, ...], shape=jnp.shape(sample_cases))
-            literals = enumerate_literals(jnp.shape(sample_cases), axis=0)
+            literals = enumerate_literals(jnp.shape(sample_cases), axis=0, dtype=self.INT)
             strength, eps = params[id_]
             weight = jax.nn.relu(1. - strength * jnp.abs(sample_pred_soft - literals))
             weight = weight / (jnp.sum(weight, axis=0) + eps)
@@ -1067,7 +1068,7 @@ class ReparameterizedSigmoidBernoulli(JaxRDDLCompilerWithGrad):
             U = random.uniform(key=subkey, shape=jnp.shape(prob), dtype=self.REAL)
             sample = stable_sigmoid(params[id_] * (prob - U))
             if self.use_ste_bernoulli:
-                hard_sample = jnp.greater(prob, U).astype(sample.dtype)
+                hard_sample = jnp.asarray(prob > U, dtype=sample.dtype)
                 sample = sample + jax.lax.stop_gradient(hard_sample - sample)
             out_of_bounds = jnp.logical_not(jnp.all(jnp.logical_and(prob >= 0, prob <= 1)))
             err = err | (out_of_bounds * ERR)
@@ -1113,7 +1114,7 @@ class GumbelSigmoidBernoulli(JaxRDDLCompilerWithGrad):
             logit = scipy.special.logit(prob) + noise          
             sample = stable_sigmoid(w * logit)
             if self.use_ste_bernoulli:
-                hard_sample = (logit > 0).astype(logit.dtype)
+                hard_sample = jnp.asarray(logit > 0, dtype=logit.dtype)
                 sample = sample + jax.lax.stop_gradient(hard_sample - sample)
             out_of_bounds = jnp.logical_not(jnp.all(jnp.logical_and(prob >= 0, prob <= 1)))
             err = err | (out_of_bounds * ERR)
@@ -1191,7 +1192,7 @@ class GumbelSoftmaxDiscrete(JaxRDDLCompilerWithGrad):
             key, subkey = random.split(key)
             g = random.gumbel(key=subkey, shape=jnp.shape(prob), dtype=self.REAL)
             logits = g + jnp.log(prob + eps)
-            sample = SoftmaxArgmax.soft_argmax(logits, w=w, axes=-1)
+            sample = SoftmaxArgmax.soft_argmax(logits, w=w, axes=-1, dtype=self.INT)
             err = JaxRDDLCompilerWithGrad._jax_update_discrete_oob_error(err, prob)
             return sample, key, err, params
         return _jax_wrapped_distribution_discrete_gumbel_softmax
@@ -1218,7 +1219,7 @@ class GumbelSoftmaxDiscrete(JaxRDDLCompilerWithGrad):
             key, subkey = random.split(key)
             g = random.gumbel(key=subkey, shape=jnp.shape(prob), dtype=self.REAL)
             logits = g + jnp.log(prob + eps)
-            sample = SoftmaxArgmax.soft_argmax(logits, w=w, axes=-1)
+            sample = SoftmaxArgmax.soft_argmax(logits, w=w, axes=-1, dtype=self.INT)
             err = JaxRDDLCompilerWithGrad._jax_update_discrete_oob_error(err, prob)
             return sample, key, err, params
         return _jax_wrapped_distribution_discrete_pvar_gumbel_softmax
@@ -1246,7 +1247,7 @@ class DeterminizedDiscrete(JaxRDDLCompilerWithGrad):
         
         def _jax_wrapped_distribution_discrete_determinized(fls, nfls, params, key):
             prob, key, err, params = prob_fn(fls, nfls, params, key)
-            literals = enumerate_literals(jnp.shape(prob), axis=-1)
+            literals = enumerate_literals(jnp.shape(prob), axis=-1, dtype=self.INT)
             sample = jnp.sum(literals * prob, axis=-1)
             err = JaxRDDLCompilerWithGrad._jax_update_discrete_oob_error(err, prob)
             return sample, key, err, params
@@ -1268,7 +1269,7 @@ class DeterminizedDiscrete(JaxRDDLCompilerWithGrad):
 
         def _jax_wrapped_distribution_discrete_pvar_determinized(fls, nfls, params, key):
             prob, key, err, params = prob_fn(fls, nfls, params, key)
-            literals = enumerate_literals(jnp.shape(prob), axis=-1)
+            literals = enumerate_literals(jnp.shape(prob), axis=-1, dtype=self.INT)
             sample = jnp.sum(literals * prob, axis=-1)
             err = JaxRDDLCompilerWithGrad._jax_update_discrete_oob_error(err, prob)
             return sample, key, err, params
@@ -1322,7 +1323,7 @@ class GumbelSoftmaxBinomial(JaxRDDLCompilerWithGrad):
         log_prob = jnp.where(in_support, log_prob, jnp.log(eps))
         g = random.gumbel(key=key, shape=jnp.shape(log_prob), dtype=prob.dtype)
         logits = g + log_prob
-        return SoftmaxArgmax.soft_argmax(logits, w=w, axes=-1)
+        return SoftmaxArgmax.soft_argmax(logits, w=w, axes=-1, dtype=self.INT)
         
     def _jax_binomial(self, expr, aux):
         ERR = JaxRDDLCompilerWithGrad.ERROR_CODES['INVALID_PARAM_BINOMIAL']
@@ -1529,7 +1530,7 @@ class GumbelSoftmaxPoisson(JaxRDDLCompilerWithGrad):
         log_prob = ks * jnp.log(rate + eps) - rate - scipy.special.gammaln(ks + 1)
         g = random.gumbel(key=key, shape=jnp.shape(log_prob), dtype=rate.dtype)
         logits = g + log_prob
-        return SoftmaxArgmax.soft_argmax(logits, w=w, axes=-1)
+        return SoftmaxArgmax.soft_argmax(logits, w=w, axes=-1, dtype=self.INT)
     
     def branched_approx_to_poisson(self, key: random.PRNGKey, 
                                    rate: jnp.ndarray, 
