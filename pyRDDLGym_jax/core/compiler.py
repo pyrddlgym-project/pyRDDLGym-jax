@@ -150,20 +150,26 @@ class JaxRDDLCompiler:
      
     def compile(self, log_jax_expr: bool=False, 
                 heading: str='',
-                extra_aux: Dict[str, Any]={}) -> None: 
+                extra_aux: Dict[str, Any]={},
+                compile_constraints: bool=True) -> None: 
         '''Compiles the current RDDL into Jax expressions.
         
         :param log_jax_expr: whether to pretty-print the compiled Jax functions
         to the log file
         :param heading: the heading to print before compilation information
         :param extra_aux: extra info to save during compilations
+        :param compile_constraints: whether to compile constraints
         '''
         self.model_aux = {'params': {}, 'overriden': {}, 'exact': set()}
         self.model_aux.update(extra_aux)
         
-        self.invariants = self._compile_constraints(self.rddl.invariants, self.model_aux)
-        self.preconditions = self._compile_constraints(self.rddl.preconditions, self.model_aux)
-        self.terminations = self._compile_constraints(self.rddl.terminations, self.model_aux)
+        if compile_constraints:
+            self.invariants = self._compile_constraints(self.rddl.invariants, self.model_aux)
+            self.preconditions = self._compile_constraints(self.rddl.preconditions, self.model_aux)
+            self.terminations = self._compile_constraints(self.rddl.terminations, self.model_aux)
+        else:
+            self.invariants, self.preconditions, self.terminations = [], [], []
+        
         self.cpfs = self._compile_cpfs(self.model_aux)
         self.reward = self._compile_reward(self.model_aux)
 
@@ -375,16 +381,18 @@ class JaxRDDLCompiler:
         reward_fn = self._jax_reward()
 
         # compile optional constraints
-        precond_fn = invariant_fn = terminal_fn = None
         if check_constraints:
             precond_fn = self._jax_preconditions()
             invariant_fn = self._jax_invariants()
             terminal_fn = self._jax_terminations()
+        else:
+            precond_fn = invariant_fn = terminal_fn = None
         
         # compile optional inequalities
-        ineq_fn = None     
         if constraint_func:
             ineq_fn = self._jax_inequalities(aux_constr)
+        else:
+            ineq_fn = None
 
         # do a single step update from the RDDL model
         def _jax_wrapped_single_step(key, actions, fls, nfls, params):
