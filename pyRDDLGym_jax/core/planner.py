@@ -908,50 +908,82 @@ class JaxStraightLinePlan(JaxPlan):
         return jax.tree_util.tree_map(JaxStraightLinePlan._guess_next_epoch, params)
 
 
-class JaxDifferentiableTopKProjection:
-    '''A differentiable top-k generalization of softmax.'''
+class GumbelSoftmaxTopK(nn.Module):
+    '''A differentiable top-k generalization of gumbel-softmax.'''
+    allowed_actions: int
+    real_dtype: Any
 
-    def compile(self, compiled: JaxRDDLCompilerWithGrad, allowed_actions: int) -> Callable:
-
-        # forward relaxation
-        # implements the approach in https://gist.github.com/rahular/6091da25c8c8ce32f6310ec7399a135b
-        def differentiable_top_k(key, logits, w):
-            g = random.gumbel(key=key, shape=jnp.shape(logits), dtype=compiled.REAL)
-            logits = logits + g
-            def body_fun(i, carry):
-                khot, logits_i = carry
-                khot_mask = jnp.maximum(1.0 - khot, 1e-12)
-                logits_new = logits_i + jnp.log(khot_mask)
-                khot_new = khot + jax.nn.softmax(w * logits_new)
-                return (khot_new, logits_new)
-            khot0 = jnp.zeros_like(logits)
-            khot_final, _ = jax.lax.fori_loop(
-                lower=0, upper=allowed_actions, body_fun=body_fun, init_val=(khot0, logits))
-            return khot_final
+    @nn.compact
+    def __call__(self, rng_key, action_logits, weight, train: bool):
         
-        # forward exact evaluation
-        def exact_top_k(key, logits, w):
-            def body_fun(i, carry):
-                khot, logits_i = carry
-                idx = jnp.argmax(logits_i)
-                khot = khot.at[idx].set(1.0)
-                logits_i = logits_i.at[idx].set(-jnp.inf)
-                return (khot, logits_i)
-            khot0 = jnp.zeros_like(logits)
-            khot_final, _ = jax.lax.fori_loop(
-                lower=0, upper=allowed_actions, body_fun=body_fun, init_val=(khot0, logits))
-            return khot_final
-
+        # no constraints to propagate
+        if self.allowed_actions == 1:
+            return jax.nn.softmax(action_logits)
+        
         # branched evaluation to relax when training and use exact when infering
-        def _jax_wrapped_drp_branched_top_k(key, logits, w, train_flag):
-            if allowed_actions == 1:
-                return jax.nn.softmax(logits)
-            else:
-                return jax.lax.switch(
-                    train_flag, [exact_top_k, differentiable_top_k], key, logits, w)
-        return _jax_wrapped_drp_branched_top_k
+        else:
+            # forward relaxation
+            def differentiable_top_k(key, logits, w):
+                g = random.gumbel(key=key, shape=jnp.shape(logits), dtype=self.real_dtype)
+                logits = logits + g
+                def body_fun(i, carry):
+                    khot, logits_i = carry
+                    khot_mask = jnp.maximum(1.0 - khot, 1e-12)
+                    logits_new = logits_i + jnp.log(khot_mask)
+                    khot_new = khot + jax.nn.softmax(w * logits_new)
+                    return (khot_new, logits_new)
+                khot0 = jnp.zeros_like(logits)
+                khot_final, _ = jax.lax.fori_loop(
+                    lower=0, upper=self.allowed_actions, 
+                    body_fun=body_fun, 
+                    init_val=(khot0, logits)
+                )
+                return khot_final
+            
+            # forward exact evaluation
+            def exact_top_k(key, logits, w):
+                def body_fun(i, carry):
+                    khot, logits_i = carry
+                    idx = jnp.argmax(logits_i)
+                    khot = khot.at[idx].set(1.0)
+                    logits_i = logits_i.at[idx].set(-jnp.inf)
+                    return (khot, logits_i)
+                khot0 = jnp.zeros_like(logits)
+                khot_final, _ = jax.lax.fori_loop(
+                    lower=0, upper=self.allowed_actions, 
+                    body_fun=body_fun, 
+                    init_val=(khot0, logits)
+                )
+                return khot_final
+
+            return jax.lax.switch(
+                train, [exact_top_k, differentiable_top_k], rng_key, action_logits, weight)
 
 
+class FiLM(nn.Module):
+    '''FiLM layer for time conditioning a dense layer.'''
+    hidden_dim: int
+    name: str
+
+    @nn.compact
+    def __call__(self, h, cond):
+        gamma = nn.Dense(self.hidden_dim, name=f'{self.name}_gamma')(cond)
+        beta  = nn.Dense(self.hidden_dim, name=f'{self.name}_beta')(cond)
+        return gamma * h + beta
+
+
+class TimeEmbedding(nn.Module):
+    '''Learnable time embedding layer.'''
+    max_t: int
+    dim: int
+    init: object
+
+    @nn.compact
+    def __call__(self, t):
+        emb = self.param("time_embedding", self.init, (self.max_t + 1, self.dim))
+        return emb[t]
+    
+            
 class JaxDeepReactivePolicy(JaxPlan):
     '''A deep reactive policy network implementation in JAX.'''
 
@@ -965,7 +997,9 @@ class JaxDeepReactivePolicy(JaxPlan):
                  normalize_per_layer: bool=False,
                  normalizer_kwargs: Optional[Kwargs]=None,
                  wrap_non_bool: bool=False,
-                 softmax_output_weight: float=1.0) -> None:
+                 softmax_output_weight: float=1.0,
+                 time_dependent: bool=False,
+                 time_embedding_dim: int=32) -> None:
         '''Creates a new deep reactive policy in JAX.
         
         :param neurons: sequence consisting of the number of neurons in each
@@ -980,6 +1014,8 @@ class JaxDeepReactivePolicy(JaxPlan):
         :param wrap_non_bool: whether to wrap real or int action fluent parameters
         with non-linearity (e.g. sigmoid or ELU) to satisfy box constraints
         :param softmax_output_weight: weight in softmax action constraint satisfaction
+        :param time_dependent: whether to make the DRP time_dependent
+        :param time_embedding_dim: time embedding dimension if time dependent
         '''
         super(JaxDeepReactivePolicy, self).__init__()
         
@@ -996,14 +1032,18 @@ class JaxDeepReactivePolicy(JaxPlan):
         self._normalizer_kwargs = normalizer_kwargs
         self._wrap_non_bool = wrap_non_bool
         self._softmax_output_weight = softmax_output_weight
+        self._time_dependent = time_dependent
+        self._time_embedding_dim = time_embedding_dim
     
     def __str__(self) -> str:
         bounds = '\n        '.join(
             map(lambda kv: f'{kv[0]}: {kv[1]}', self.bounds.items()))
         return (f'[INFO] policy hyper-parameters:\n'
-                f'    topology     ={self._topology}\n'
-                f'    activation_fn={self._activations[0].__name__}\n'
-                f'    initializer  ={type(self._initializer_base).__name__}\n'
+                f'    topology          ={self._topology}\n'
+                f'    activation_fn     ={self._activations[0].__name__}\n'
+                f'    initializer       ={type(self._initializer_base).__name__}\n'
+                f'    time_dependent    ={self._time_dependent}\n'
+                f'    time_embedding_dim={self._time_embedding_dim}\n'
                 f'    input norm:\n'
                 f'        apply_input_norm    ={self._normalize}\n'
                 f'        input_norm_layerwise={self._normalize_per_layer}\n'
@@ -1077,97 +1117,108 @@ class JaxDeepReactivePolicy(JaxPlan):
                 normalize = False
         
         # convert fluents dictionary into a state vector to feed to the MLP
-        def _jax_wrapped_policy_input(fls, hyperparams):
+        normalizer_kwargs = self._normalizer_kwargs
 
-            # optional state preprocessing
-            if preprocessor is not None:
-                stats = hyperparams[preprocessor.HYPERPARAMS_KEY]
-                fls = preprocessor.transform(fls, stats)
-            
-            # concatenate all state variables into a single vector
-            # optionally apply layer norm to each input tensor
-            states_bool, states_non_bool = [], []
-            non_bool_dims = 0
-            for (var, value) in fls.items():
-                if var in observed_vars:
-                    state = jnp.ravel(value, order='C')
-                    if ranges[var] == 'bool':
-                        states_bool.append(state)
-                    else:
-                        if normalize and normalize_per_layer:
-                            name = f'input_norm_{input_names[var]}'
-                            normalizer = nn.LayerNorm(name=name, **self._normalizer_kwargs)
-                            state = normalizer(state)
-                        states_non_bool.append(state)
-                        non_bool_dims = non_bool_dims + state.size
-            state = jnp.concatenate(states_non_bool + states_bool)
-            
-            # optionally perform layer normalization on the non-bool inputs
-            if normalize and not normalize_per_layer and non_bool_dims:
-                normalizer = nn.LayerNorm(name='input_norm', **self._normalizer_kwargs)
-                normalized = normalizer(state[:non_bool_dims])
-                state = state.at[:non_bool_dims].set(normalized)
-            return state
+        class DRPStateLayer(nn.Module):
+
+            @nn.compact
+            def __call__(self, fls, hyperparams):
+
+                # optional state preprocessing
+                if preprocessor is not None:
+                    stats = hyperparams[preprocessor.HYPERPARAMS_KEY]
+                    fls = preprocessor.transform(fls, stats)
+                
+                # concatenate all state variables into a single vector
+                # optionally apply layer norm to each input tensor
+                states_bool, states_non_bool = [], []
+                non_bool_dims = 0
+                for (var, value) in fls.items():
+                    if var in observed_vars:
+                        state = jnp.ravel(value, order='C')
+                        if ranges[var] == 'bool':
+                            states_bool.append(state)
+                        else:
+                            if normalize and normalize_per_layer:
+                                name = f'input_norm_{input_names[var]}'
+                                normalizer = nn.LayerNorm(name=name, **normalizer_kwargs)
+                                state = normalizer(state)
+                            states_non_bool.append(state)
+                            non_bool_dims = non_bool_dims + state.size
+                state = jnp.concatenate(states_non_bool + states_bool)
+                
+                # optionally perform layer normalization on the non-bool inputs
+                if normalize and not normalize_per_layer and non_bool_dims:
+                    normalizer = nn.LayerNorm(name='input_norm', **normalizer_kwargs)
+                    normalized = normalizer(state[:non_bool_dims])
+                    state = state.at[:non_bool_dims].set(normalized)
+                return state
         
         # enable constraint satisfaction subroutines during optimization 
         # if there are nontrivial concurrency constraints in the problem description
         bool_action_count, allowed_actions = self._count_bool_actions(rddl)
         use_constraint_satisfaction = allowed_actions < bool_action_count
-        
-        if use_constraint_satisfaction:
-            branched_top_k = JaxDifferentiableTopKProjection().compile(compiled, allowed_actions)
-        else:
-            branched_top_k = None
 
         # predict actions from the policy network for current state
-        def _jax_wrapped_policy_network_predict(key, fls, hyperparams, train_flag):
-            state = _jax_wrapped_policy_input(fls, hyperparams)
-            
-            # feed state vector through hidden layers
-            hidden = state
-            for (i, (num_neuron, activation)) in layers:
-                linear = nn.Dense(features=num_neuron, kernel_init=init, name=f'hidden_{i}')
-                hidden = activation(linear(hidden))
-            
-            # each output is a linear layer reshaped to original lifted shape
-            actions = {}
-            for (var, size) in layer_sizes.items():
-                if ranges[var] != 'bool' or not use_constraint_satisfaction:
-                    linear = nn.Dense(features=size, kernel_init=init, name=layer_names[var])
-                    output = linear(hidden)
-                    output = jnp.reshape(output, output.shape[:-1] + shapes[var])
-                    if not shapes[var]:
-                        output = jnp.squeeze(output)
-                
-                # project action output to valid box constraints following Bueno et. al.
-                if ranges[var] == 'bool':
-                    if not use_constraint_satisfaction:
-                        actions[var] = stable_sigmoid(output)
-                else:
-                    if wrap_non_bool:
-                        lower, upper = bounds_safe[var]
-                        branches = [jnp.asarray(mask, dtype=compiled.REAL) 
-                                    for mask in cond_lists[var]]       
-                        actions[var] = jax_bound_action(branches, lower, upper, output)
-                    else:
-                        actions[var] = output
-            
-            # for constraint satisfaction wrap bool actions with softmax
-            if use_constraint_satisfaction:
-                linear = nn.Dense(
-                    features=bool_action_count, kernel_init=init, name='output_bool')
-                logits = linear(hidden)
-                actions[bool_key] = branched_top_k(
-                    key, logits, w=self._softmax_output_weight, train_flag=train_flag)
-            return actions
-        
-        # we need pure JAX functions for the policy network prediction
-        class _FlaxWrappedPolicy(nn.Module):
+        time_dependent = self._time_dependent
+        time_embed_dim = self._time_embedding_dim
+        softmax_output_weight = self._softmax_output_weight
+
+        class DRP(nn.Module):
+
             @nn.compact
-            def __call__(self, fls, hyperparams, train_flag):
+            def __call__(self, fls, hyperparams, step, train):
                 key = self.make_rng("policy")
-                return _jax_wrapped_policy_network_predict(key, fls, hyperparams, train_flag)
-        predict_fn = _FlaxWrappedPolicy()       
+
+                # input layer
+                state = DRPStateLayer()(fls, hyperparams)
+                
+                # time embedding
+                if time_dependent:
+                    t_emb = TimeEmbedding(horizon, dim=time_embed_dim, init=init)(step)
+
+                # feed state vector through hidden layers
+                hidden = state
+                for (i, (num_neuron, activation)) in layers:
+                    linear = nn.Dense(
+                        features=num_neuron, kernel_init=init, name=f'hidden_{i}')
+                    hidden = activation(linear(hidden))
+                    if time_dependent:
+                        hidden = FiLM(num_neuron, name=f'FiLM_hidden_{i}')(hidden, t_emb)
+                
+                # each output is a linear layer reshaped to original lifted shape
+                actions = {}
+                for (var, size) in layer_sizes.items():
+                    if ranges[var] != 'bool' or not use_constraint_satisfaction:
+                        linear = nn.Dense(
+                            features=size, kernel_init=init, name=layer_names[var])
+                        output = linear(hidden)
+                        output = jnp.reshape(output, output.shape[:-1] + shapes[var])
+                        if not shapes[var]:
+                            output = jnp.squeeze(output)
+                    
+                    # project action output to valid box constraints following Bueno et. al.
+                    if ranges[var] == 'bool':
+                        if not use_constraint_satisfaction:
+                            actions[var] = stable_sigmoid(output)
+                    else:
+                        if wrap_non_bool:
+                            lower, upper = bounds_safe[var]
+                            branches = [jnp.asarray(mask, dtype=compiled.REAL) 
+                                        for mask in cond_lists[var]]       
+                            actions[var] = jax_bound_action(branches, lower, upper, output)
+                        else:
+                            actions[var] = output
+                
+                # for constraint satisfaction wrap bool actions with softmax
+                if use_constraint_satisfaction:
+                    linear = nn.Dense(
+                        features=bool_action_count, kernel_init=init, name='output_bool')
+                    logits = linear(hidden)
+                    topk = GumbelSoftmaxTopK(allowed_actions, compiled.REAL)
+                    actions[bool_key] = topk(key, logits, softmax_output_weight, train=train)
+                return actions
+        predict_fn = DRP()       
         
         # given a softmax output, this simply unpacks the result of the softmax back into
         # the original action fluent dictionary
@@ -1187,9 +1238,9 @@ class JaxDeepReactivePolicy(JaxPlan):
         # the main subroutine to compute the trainable rddl actions from the trainable
         # parameters and the current state/obs dictionary       
         def _jax_wrapped_drp_predict_train(key, params, hyperparams, step, fls, fls_hist, 
-                                           train_flag=1):
+                                           train=1):
             actions = predict_fn.apply(
-                params, fls, hyperparams, train_flag=train_flag, rngs={"policy": key})
+                params, fls, hyperparams, step, train=train, rngs={"policy": key})
             if not wrap_non_bool:
                 for (var, action) in actions.items():
                     if var != bool_key and ranges[var] != 'bool':
@@ -1206,7 +1257,7 @@ class JaxDeepReactivePolicy(JaxPlan):
         # to their required types (i.e. bool, int, float)
         def _jax_wrapped_drp_predict_test(key, params, hyperparams, step, fls, fls_hist):
             actions = _jax_wrapped_drp_predict_train(
-                key, params, hyperparams, step, fls, fls_hist, train_flag=0)
+                key, params, hyperparams, step, fls, fls_hist, train=0)
             new_actions = {}
             for (var, action) in actions.items():
                 prange = ranges[var]
@@ -1242,7 +1293,7 @@ class JaxDeepReactivePolicy(JaxPlan):
             obs_vars = {var: value[0, ...] 
                         for (var, value) in fls.items()
                         if var in observed_vars}
-            return predict_fn.init(key, obs_vars, hyperparams, train_flag=1)
+            return predict_fn.init(key, obs_vars, hyperparams, 0, train=1)
         self.initializer = _jax_wrapped_drp_init
         
     def guess_next_epoch(self, params: Pytree) -> Pytree:
