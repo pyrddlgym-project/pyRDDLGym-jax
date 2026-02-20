@@ -187,6 +187,10 @@ class JaxRDDLCompilerWithGrad(JaxRDDLCompiler):
         jax_rhs = self._jax(rhs, aux)
         return self._jax_binary_with_param(jax_lhs, jax_rhs, jax_op)
 
+    def _jax_pvar(self, expr, aux):
+        pvar_fn = JaxRDDLCompiler._jax_pvar(self, expr, aux)
+        return self._jax_cast(pvar_fn, dtype=self.REAL)
+    
     def _jax_kron(self, expr, aux):
         aux['overriden'][expr.id] = __class__.__name__
         arg, = expr.args
