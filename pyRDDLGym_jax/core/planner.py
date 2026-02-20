@@ -1012,7 +1012,7 @@ class JaxDeepReactivePolicy(JaxPlan):
                  wrap_non_bool: bool=False,
                  softmax_output_weight: float=1.0,
                  time_dependent: bool=False,
-                 time_embedding_dim: int=32) -> None:
+                 time_embedding_dim: int=8) -> None:
         '''Creates a new deep reactive policy in JAX.
         
         :param neurons: sequence consisting of the number of neurons in each
