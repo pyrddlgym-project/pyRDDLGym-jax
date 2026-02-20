@@ -44,7 +44,7 @@ from pyRDDLGym_jax.core.compiler import JaxRDDLCompiler
 def enumerate_literals(shape: Tuple[int, ...], axis: int, dtype: type=jnp.int32) -> jnp.ndarray:
     literals = jnp.arange(shape[axis], dtype=dtype)
     literals = literals[(...,) + (jnp.newaxis,) * (len(shape) - 1)]
-    literals = jnp.swapaxes(literals, axis1=0, axis2=axis)
+    literals = jnp.moveaxis(literals, source=0, destination=axis)
     literals = jnp.broadcast_to(literals, shape=shape)
     return literals
 
