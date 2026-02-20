@@ -498,8 +498,8 @@ class JaxRDDLCompiler:
             log = jax.tree_util.tree_map(partial(jnp.swapaxes, axis1=0, axis2=1), log)
             if not log['fluents']:
                 fls_end = end[3]
-                log['fluents'] = {name: jnp.expand_dims(fl, axis=1) 
-                                  for (name, fl) in fls_end.items()}
+                log['fluents'] =  jax.tree_util.tree_map(
+                    partial(jnp.expand_dims, axis=1), fls_end)
             model_params = end[-2]
             return log, model_params        
         return _jax_wrapped_batched_policy_rollout
@@ -1345,6 +1345,7 @@ class JaxRDDLCompiler:
         num_free_vars = len(free_vars)
         captured_types = [t for (p, t) in scope_vars if p in captured_vars]
         require_dims = self.rddl.object_counts(captured_types)
+        source_indices = [num_free_vars + i for i in range(len(require_dims))]
 
         # compile the inputs to the function
         jax_inputs = [self._jax(arg, aux) for arg in args]
@@ -1395,8 +1396,7 @@ class JaxRDDLCompiler:
             # unravel the combinations k back into their original dimensions
             sample = jnp.reshape(sample, free_dims + pyfunc_dims)
             
-            # rearrange the output dimensions to match the outer scope
-            source_indices = [num_free_vars + i for i in range(len(pyfunc_dims))]
+            # rearrange the output dimensions to match the outer scope            
             sample = jnp.moveaxis(sample, source=source_indices, destination=dest_indices)
             return sample, key, error, params
         
@@ -1436,6 +1436,28 @@ class JaxRDDLCompiler:
             return sample, key, err, params
         return _jax_wrapped_if_then_else
     
+    def _jax_functions(self, jax_fns):
+        n_fns = len(jax_fns)
+        def _jax_wrapped_eval_functions(fls, nfls, params, key):
+
+            # evaluate the i-th function
+            def _jax_wrapped_eval_function_i(carry, i):
+                _key, _error, _params = carry
+                _sample, _key, _err, _params = jax.lax.switch(
+                    i, jax_fns, fls, nfls, _params, _key)
+                _error = _error | _err
+                return (_key, _error, _params), _sample
+            
+            # evaluate all functions in a loop
+            error = JaxRDDLCompiler.ERROR_CODES['NORMAL']
+            (key, error, params), samples = jax.lax.scan(
+                f=_jax_wrapped_eval_function_i, 
+                init=(key, error, params), 
+                xs=jnp.arange(n_fns)
+            )
+            return samples, key, error, params
+        return _jax_wrapped_eval_functions
+
     def _jax_switch(self, expr, aux):
         aux['exact'].add(expr.id)
 
@@ -1450,20 +1472,15 @@ class JaxRDDLCompiler:
             (jax_default if _case is None else self._jax(_case, aux))
             for _case in cases
         ]
+        jax_cases_fn = self._jax_functions(jax_cases)
                     
         def _jax_wrapped_switch(fls, nfls, params, key):
             
-            # sample predicate
+            # sample predicate and cases
             sample_pred, key, err, params = jax_pred(fls, nfls, params, key) 
-            
-            # sample cases
-            sample_cases = []
-            for jax_case in jax_cases:
-                sample, key, err_case, params = jax_case(fls, nfls, params, key)
-                sample_cases.append(sample)
-                err = err | err_case      
-            sample_cases = jnp.asarray(sample_cases)          
+            sample_cases, key, err_c, params = jax_cases_fn(fls, nfls, params, key)
             sample_cases = jnp.asarray(sample_cases, dtype=self._fix_dtype(sample_cases))
+            err = err | err_c
             
             # predicate (enum) is an integer - use it to extract from case array
             sample_pred = jnp.asarray(sample_pred[jnp.newaxis, ...], dtype=self.INT)
@@ -1971,18 +1988,11 @@ class JaxRDDLCompiler:
         return error
     
     def _jax_discrete_prob(self, jax_probs, unnormalized):
+        jax_eval_probs = self._jax_functions(jax_probs)
+        
         def _jax_wrapped_calc_discrete_prob(fls, nfls, params, key):
-
-            # calculate probability expressions
-            error = JaxRDDLCompiler.ERROR_CODES['NORMAL']
-            prob = []
-            for jax_prob in jax_probs:
-                sample, key, error_pdf, params = jax_prob(fls, nfls, params, key)
-                prob.append(sample)
-                error = error | error_pdf
-            prob = jnp.stack(prob, axis=-1)
-
-            # normalize them if required
+            prob, key, error, params = jax_eval_probs(fls, nfls, params, key)
+            prob = jnp.swapaxes(prob, axis1=0, axis2=-1)
             if unnormalized:
                 normalizer = jnp.sum(prob, axis=-1, keepdims=True)
                 prob = prob / normalizer
