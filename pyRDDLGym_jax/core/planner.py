@@ -334,6 +334,17 @@ class StaticNormalizer(Preprocessor):
 # ***********************************************************************
 
 
+def walk_params(tree, prefix=''):
+    if isinstance(tree, dict):
+        for k, v in tree.items():
+            yield from walk_params(v, f"{prefix}/{k}" if prefix else k)
+    elif isinstance(tree, (list, tuple)):
+        for i, v in enumerate(tree):
+            yield from walk_params(v, f"{prefix}/{i}")
+    else:
+        yield prefix, tree
+
+
 class JaxPlan(metaclass=ABCMeta):
     '''Base class for all JAX policy representations.'''
 
@@ -912,6 +923,7 @@ class GumbelSoftmaxTopK(nn.Module):
     '''A differentiable top-k generalization of gumbel-softmax.'''
     allowed_actions: int
     real_dtype: Any
+    name: str='topk'
 
     @nn.compact
     def __call__(self, rng_key, action_logits, weight, train: bool):
@@ -967,8 +979,8 @@ class FiLM(nn.Module):
 
     @nn.compact
     def __call__(self, h, cond):
-        gamma = nn.Dense(self.hidden_dim, name=f'{self.name}_gamma')(cond)
-        beta  = nn.Dense(self.hidden_dim, name=f'{self.name}_beta')(cond)
+        gamma = nn.Dense(self.hidden_dim, name='gamma')(cond)
+        beta  = nn.Dense(self.hidden_dim, name='beta')(cond)
         return gamma * h + beta
 
 
@@ -977,10 +989,11 @@ class TimeEmbedding(nn.Module):
     max_t: int
     dim: int
     init: object
+    name: str='time_embedding'
 
     @nn.compact
     def __call__(self, t):
-        emb = self.param("time_embedding", self.init, (self.max_t + 1, self.dim))
+        emb = self.param("kernel", self.init, (self.max_t + 1, self.dim))
         return emb[t]
     
             
@@ -1084,14 +1097,14 @@ class JaxDeepReactivePolicy(JaxPlan):
         layers = list(enumerate(zip(self._topology, self._activations)))
         layer_sizes = {var: np.prod(shape, dtype=np.int64) 
                        for (var, shape) in shapes.items()}
-        layer_names = {var: f'output_{var}'.replace('-', '_') for var in shapes}
+        layer_names = {var: var.replace('-', '_') for var in shapes}
         
         # inputs for the policy network are states for fully observed and obs for POMDPs
         if rddl.observ_fluents:
             observed_vars = rddl.observ_fluents
         else:
             observed_vars = rddl.state_fluents
-        input_names = {var: f'{var}'.replace('-', '_') for var in observed_vars}
+        input_names = {var: var.replace('-', '_') for var in observed_vars}
         
         # catch if input norm is applied to size 1 tensor:
         # this leads to incorrect behavior as the input is always "1"
@@ -1120,6 +1133,7 @@ class JaxDeepReactivePolicy(JaxPlan):
         normalizer_kwargs = self._normalizer_kwargs
 
         class DRPStateLayer(nn.Module):
+            name: str='inputs'
 
             @nn.compact
             def __call__(self, fls, hyperparams):
@@ -1140,8 +1154,8 @@ class JaxDeepReactivePolicy(JaxPlan):
                             states_bool.append(state)
                         else:
                             if normalize and normalize_per_layer:
-                                name = f'input_norm_{input_names[var]}'
-                                normalizer = nn.LayerNorm(name=name, **normalizer_kwargs)
+                                normalizer = nn.LayerNorm(
+                                    name=f'norm_{input_names[var]}', **normalizer_kwargs)
                                 state = normalizer(state)
                             states_non_bool.append(state)
                             non_bool_dims = non_bool_dims + state.size
@@ -1149,7 +1163,7 @@ class JaxDeepReactivePolicy(JaxPlan):
                 
                 # optionally perform layer normalization on the non-bool inputs
                 if normalize and not normalize_per_layer and non_bool_dims:
-                    normalizer = nn.LayerNorm(name='input_norm', **normalizer_kwargs)
+                    normalizer = nn.LayerNorm(name='norm', **normalizer_kwargs)
                     normalized = normalizer(state[:non_bool_dims])
                     state = state.at[:non_bool_dims].set(normalized)
                 return state
@@ -1165,33 +1179,35 @@ class JaxDeepReactivePolicy(JaxPlan):
         softmax_output_weight = self._softmax_output_weight
 
         class DRP(nn.Module):
+            name: str='drp'
 
             @nn.compact
             def __call__(self, fls, hyperparams, step, train):
                 key = self.make_rng("policy")
 
                 # input layer
-                state = DRPStateLayer()(fls, hyperparams)
+                state = DRPStateLayer(name='inputs')(fls, hyperparams)
                 
                 # time embedding
                 if time_dependent:
-                    t_emb = TimeEmbedding(horizon, dim=time_embed_dim, init=init)(step)
+                    t_emb = TimeEmbedding(
+                        horizon, dim=time_embed_dim, init=init, name='time_embedding')(step)
 
                 # feed state vector through hidden layers
                 hidden = state
                 for (i, (num_neuron, activation)) in layers:
                     linear = nn.Dense(
-                        features=num_neuron, kernel_init=init, name=f'hidden_{i}')
+                        features=num_neuron, kernel_init=init, name=f'dense_{i}')
                     hidden = activation(linear(hidden))
                     if time_dependent:
-                        hidden = FiLM(num_neuron, name=f'FiLM_hidden_{i}')(hidden, t_emb)
+                        hidden = FiLM(num_neuron, name=f'film_{i}')(hidden, t_emb)
                 
                 # each output is a linear layer reshaped to original lifted shape
                 actions = {}
                 for (var, size) in layer_sizes.items():
                     if ranges[var] != 'bool' or not use_constraint_satisfaction:
                         linear = nn.Dense(
-                            features=size, kernel_init=init, name=layer_names[var])
+                            features=size, kernel_init=init, name=f'dense_{layer_names[var]}')
                         output = linear(hidden)
                         output = jnp.reshape(output, output.shape[:-1] + shapes[var])
                         if not shapes[var]:
@@ -1213,12 +1229,13 @@ class JaxDeepReactivePolicy(JaxPlan):
                 # for constraint satisfaction wrap bool actions with softmax
                 if use_constraint_satisfaction:
                     linear = nn.Dense(
-                        features=bool_action_count, kernel_init=init, name='output_bool')
+                        features=bool_action_count, kernel_init=init, name='dense_topk')
                     logits = linear(hidden)
-                    topk = GumbelSoftmaxTopK(allowed_actions, compiled.REAL)
+                    topk = GumbelSoftmaxTopK(
+                        allowed_actions, real_dtype=compiled.REAL, name='topk')
                     actions[bool_key] = topk(key, logits, softmax_output_weight, train=train)
                 return actions
-        predict_fn = DRP()       
+        predict_fn = DRP(name='drp')       
         
         # given a softmax output, this simply unpacks the result of the softmax back into
         # the original action fluent dictionary

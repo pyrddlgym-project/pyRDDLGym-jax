@@ -3,9 +3,10 @@ __pycache__/
 *.py[cod]
 *$py.class
 
-# eclipse stuff
+# ide stuff
 .project
 .pydevproject
+.vscode
 
 # C extensions
 *.so

@@ -44,7 +44,7 @@ from pyRDDLGym.core.debug.decompiler import RDDLDecompiler
 
 from pyRDDLGym_jax import __version__
 if TYPE_CHECKING:
-    from pyRDDLGym_jax.core.planner import JaxBackpropPlanner
+    from pyRDDLGym_jax.core.planner import JaxBackpropPlanner, walk_params
     
 POLICY_DIST_HEIGHT = 400
 POLICY_DIST_PLOTS_PER_ROW = 6
@@ -60,17 +60,6 @@ GP_POSTERIOR_PIXELS = 100
 
 PLOT_AXES_FONT_SIZE = 11
 EXPERIMENT_ENTRY_FONT_SIZE = 14
-
-
-def walk(tree, prefix=''):
-    if isinstance(tree, dict):
-        for k, v in tree.items():
-            yield from walk(v, f"{prefix}/{k}" if prefix else k)
-    elif isinstance(tree, (list, tuple)):
-        for i, v in enumerate(tree):
-            yield from walk(v, f"{prefix}/{i}")
-    else:
-        yield prefix, tree
 
     
 class JaxPlannerDashboard:
@@ -868,8 +857,8 @@ class JaxPlannerDashboard:
                 policy_params_ticks = self.policy_params_ticks[row]
 
                 if checked and policy_params is not None and policy_params:
-                    titles = [name for (name, _) in walk(policy_params[-1])]                    
-                    n_rows = math.ceil(len(policy_params) / POLICY_DIST_PLOTS_PER_ROW)
+                    titles = [name for (name, _) in walk_params(policy_params[-1])]                    
+                    n_rows = math.ceil(len(titles) / POLICY_DIST_PLOTS_PER_ROW)
                     fig = make_subplots(
                         rows=n_rows, cols=POLICY_DIST_PLOTS_PER_ROW, shared_xaxes=True,
                         subplot_titles=titles
@@ -882,7 +871,7 @@ class JaxPlannerDashboard:
                     for (it, (tick, policy_params_t)) in enumerate(
                         zip(policy_params_ticks[::-1], policy_params[::-1])):
                         r, c = 1, 1
-                        for (layer_name, layer_params) in walk(policy_params_t):
+                        for (layer_name, layer_params) in walk_params(policy_params_t):
                             if r <= n_rows:
                                 fig.add_trace(go.Violin(
                                     x=np.ravel(layer_params),
