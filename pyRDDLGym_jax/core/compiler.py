@@ -1345,6 +1345,7 @@ class JaxRDDLCompiler:
         num_free_vars = len(free_vars)
         captured_types = [t for (p, t) in scope_vars if p in captured_vars]
         require_dims = self.rddl.object_counts(captured_types)
+        source_indices = [num_free_vars + i for i in range(len(require_dims))]
 
         # compile the inputs to the function
         jax_inputs = [self._jax(arg, aux) for arg in args]
@@ -1396,7 +1397,6 @@ class JaxRDDLCompiler:
             sample = jnp.reshape(sample, free_dims + pyfunc_dims)
             
             # rearrange the output dimensions to match the outer scope
-            source_indices = [num_free_vars + i for i in range(len(pyfunc_dims))]
             sample = jnp.moveaxis(sample, source=source_indices, destination=dest_indices)
             return sample, key, error, params
         
