@@ -1696,7 +1696,8 @@ class GaussianPGPE(PGPE):
                                  jnp.square(old_sigma / sigma) + 
                                  jnp.square((mu - old_mu) / sigma) - 1)
         
-        # update mean and std. deviation with a gradient step
+        # update mean and std. deviation with a gradient step        
+        clip_sigma_fn = partial(jnp.clip, min=sigma_lo, max=sigma_hi)
         def _jax_wrapped_pgpe_update_helper(mu, sigma, mu_grad, sigma_grad, 
                                             mu_state, sigma_state):
             mu_updates, new_mu_state = mu_optimizer.update(mu_grad, mu_state, params=mu) 
@@ -1704,8 +1705,7 @@ class GaussianPGPE(PGPE):
                 sigma_grad, sigma_state, params=sigma) 
             new_mu = optax.apply_updates(mu, mu_updates)
             new_sigma = optax.apply_updates(sigma, sigma_updates)
-            new_sigma = jax.tree_util.tree_map(
-                partial(jnp.clip, min=sigma_lo, max=sigma_hi), new_sigma)
+            new_sigma = jax.tree_util.tree_map(clip_sigma_fn, new_sigma)
             return new_mu, new_sigma, new_mu_state, new_sigma_state
 
         def _jax_wrapped_pgpe_update(key, pgpe_params, pgpe_opt_state, progress, hparams, 

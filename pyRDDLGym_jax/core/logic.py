@@ -44,7 +44,7 @@ from pyRDDLGym_jax.core.compiler import JaxRDDLCompiler
 def enumerate_literals(shape: Tuple[int, ...], axis: int, dtype: type=jnp.int32) -> jnp.ndarray:
     literals = jnp.arange(shape[axis], dtype=dtype)
     literals = literals[(...,) + (jnp.newaxis,) * (len(shape) - 1)]
-    literals = jnp.moveaxis(literals, source=0, destination=axis)
+    literals = jnp.swapaxes(literals, axis1=0, axis2=axis)
     literals = jnp.broadcast_to(literals, shape=shape)
     return literals
 
@@ -325,10 +325,9 @@ class SoftmaxArgmax(JaxRDDLCompilerWithGrad):
         return kwargs
 
     @staticmethod
-    def soft_argmax(x: jnp.ndarray, w: float, axes: Union[int, Tuple[int, ...]], 
-                    dtype: type=jnp.int32) -> jnp.ndarray:
-        literals = enumerate_literals(jnp.shape(x), axis=axes, dtype=dtype)
-        return stable_softmax_weight_sum(w * x, literals, axis=axes)
+    def soft_argmax(x: jnp.ndarray, w: float, axis: int, dtype: type=jnp.int32) -> jnp.ndarray:
+        literals = enumerate_literals(jnp.shape(x), axis=axis, dtype=dtype)
+        return stable_softmax_weight_sum(w * x, literals, axis=axis)
 
     def _jax_argmax(self, expr, aux):
         if not self.traced.cached_is_fluent(expr):
@@ -337,12 +336,12 @@ class SoftmaxArgmax(JaxRDDLCompilerWithGrad):
         aux['params'][id_] = self.argmax_weight
         aux['overriden'][id_] = __class__.__name__
         arg = expr.args[-1]
-        _, axes = self.traced.cached_sim_info(expr)   
+        _, axis = self.traced.cached_sim_info(expr)   
         jax_expr = self._jax(arg, aux) 
         def argmax_op(x, params):
-            sample = self.soft_argmax(x, w=params[id_], axes=axes, dtype=self.INT)
+            sample = self.soft_argmax(x, w=params[id_], axis=axis, dtype=self.INT)
             if self.use_argmax_ste:
-                hard_sample = jnp.argmax(x, axis=axes)
+                hard_sample = jnp.argmax(x, axis=axis)
                 sample = sample + jax.lax.stop_gradient(hard_sample - sample)
             return sample, params
         return self._jax_unary_with_param(jax_expr, argmax_op)
@@ -354,12 +353,12 @@ class SoftmaxArgmax(JaxRDDLCompilerWithGrad):
         aux['params'][id_] = self.argmax_weight
         aux['overriden'][id_] = __class__.__name__
         arg = expr.args[-1]
-        _, axes = self.traced.cached_sim_info(expr)   
+        _, axis = self.traced.cached_sim_info(expr)   
         jax_expr = self._jax(arg, aux) 
         def argmin_op(x, params):
-            sample = self.soft_argmax(-x, w=params[id_], axes=axes, dtype=self.INT)
+            sample = self.soft_argmax(-x, w=params[id_], axis=axis, dtype=self.INT)
             if self.use_argmax_ste:
-                hard_sample = jnp.argmax(-x, axis=axes)
+                hard_sample = jnp.argmax(-x, axis=axis)
                 sample = sample + jax.lax.stop_gradient(hard_sample - sample)
             return sample, params
         return self._jax_unary_with_param(jax_expr, argmin_op)
@@ -917,20 +916,15 @@ class TriangleKernelSwitch(JaxRDDLCompilerWithGrad):
             (jax_default if _case is None else self._jax(_case, aux))
             for _case in cases
         ]
+        jax_cases_fn = self._jax_functions(jax_cases)
                     
         def _jax_wrapped_switch_softmax(fls, nfls, params, key):
             
-            # sample predicate
+            # sample predicate and cases
             sample_pred, key, err, params = jax_pred(fls, nfls, params, key) 
-            
-            # sample cases
-            sample_cases = []
-            for jax_case in jax_cases:
-                sample, key, err_case, params = jax_case(fls, nfls, params, key)
-                sample_cases.append(sample)
-                err = err | err_case      
-            sample_cases = jnp.asarray(sample_cases)          
+            sample_cases, key, err_c, params = jax_cases_fn(fls, nfls, params, key)
             sample_cases = jnp.asarray(sample_cases, dtype=self._fix_dtype(sample_cases))
+            err = err | err_c
             
             # replace integer indexing with weighted triangular kernel
             sample_pred_soft = jnp.broadcast_to(
@@ -1192,7 +1186,7 @@ class GumbelSoftmaxDiscrete(JaxRDDLCompilerWithGrad):
             key, subkey = random.split(key)
             g = random.gumbel(key=subkey, shape=jnp.shape(prob), dtype=self.REAL)
             logits = g + jnp.log(prob + eps)
-            sample = SoftmaxArgmax.soft_argmax(logits, w=w, axes=-1, dtype=self.INT)
+            sample = SoftmaxArgmax.soft_argmax(logits, w=w, axis=-1, dtype=self.INT)
             err = JaxRDDLCompilerWithGrad._jax_update_discrete_oob_error(err, prob)
             return sample, key, err, params
         return _jax_wrapped_distribution_discrete_gumbel_softmax
@@ -1219,7 +1213,7 @@ class GumbelSoftmaxDiscrete(JaxRDDLCompilerWithGrad):
             key, subkey = random.split(key)
             g = random.gumbel(key=subkey, shape=jnp.shape(prob), dtype=self.REAL)
             logits = g + jnp.log(prob + eps)
-            sample = SoftmaxArgmax.soft_argmax(logits, w=w, axes=-1, dtype=self.INT)
+            sample = SoftmaxArgmax.soft_argmax(logits, w=w, axis=-1, dtype=self.INT)
             err = JaxRDDLCompilerWithGrad._jax_update_discrete_oob_error(err, prob)
             return sample, key, err, params
         return _jax_wrapped_distribution_discrete_pvar_gumbel_softmax
@@ -1323,7 +1317,7 @@ class GumbelSoftmaxBinomial(JaxRDDLCompilerWithGrad):
         log_prob = jnp.where(in_support, log_prob, jnp.log(eps))
         g = random.gumbel(key=key, shape=jnp.shape(log_prob), dtype=prob.dtype)
         logits = g + log_prob
-        return SoftmaxArgmax.soft_argmax(logits, w=w, axes=-1, dtype=self.INT)
+        return SoftmaxArgmax.soft_argmax(logits, w=w, axis=-1, dtype=self.INT)
         
     def _jax_binomial(self, expr, aux):
         ERR = JaxRDDLCompilerWithGrad.ERROR_CODES['INVALID_PARAM_BINOMIAL']
@@ -1530,7 +1524,7 @@ class GumbelSoftmaxPoisson(JaxRDDLCompilerWithGrad):
         log_prob = ks * jnp.log(rate + eps) - rate - scipy.special.gammaln(ks + 1)
         g = random.gumbel(key=key, shape=jnp.shape(log_prob), dtype=rate.dtype)
         logits = g + log_prob
-        return SoftmaxArgmax.soft_argmax(logits, w=w, axes=-1, dtype=self.INT)
+        return SoftmaxArgmax.soft_argmax(logits, w=w, axis=-1, dtype=self.INT)
     
     def branched_approx_to_poisson(self, key: random.PRNGKey, 
                                    rate: jnp.ndarray, 
