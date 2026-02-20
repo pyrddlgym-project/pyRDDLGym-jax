@@ -187,10 +187,6 @@ class JaxRDDLCompilerWithGrad(JaxRDDLCompiler):
         jax_rhs = self._jax(rhs, aux)
         return self._jax_binary_with_param(jax_lhs, jax_rhs, jax_op)
 
-    def _jax_pvar(self, expr, aux):
-        pvar_fn = JaxRDDLCompiler._jax_pvar(self, expr, aux)
-        return self._jax_cast(pvar_fn, dtype=self.REAL)
-    
     def _jax_kron(self, expr, aux):
         aux['overriden'][expr.id] = __class__.__name__
         arg, = expr.args
@@ -915,9 +911,13 @@ class TriangleKernelSwitch(JaxRDDLCompilerWithGrad):
         
         # recursively compile cases
         cases, default = self.traced.cached_sim_info(expr) 
-        jax_default = None if default is None else self._jax(default, aux)
+        if default is None:
+            jax_default = None
+        else:
+            jax_default = self._jax_cast(self._jax(default, aux), dtype=self.REAL)
         jax_cases = [
-            (jax_default if _case is None else self._jax(_case, aux))
+            (jax_default if _case is None 
+             else self._jax_cast(self._jax(_case, aux), dtype=self.REAL))
             for _case in cases
         ]
         jax_cases_fn = self._jax_functions(jax_cases)
