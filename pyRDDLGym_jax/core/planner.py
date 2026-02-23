@@ -247,7 +247,7 @@ def load_config_from_string(value: str) -> Tuple[Kwargs, ...]:
 class Preprocessor(metaclass=ABCMeta):
     '''Base class for all state preprocessors.'''
 
-    HYPERPARAMS_KEY = 'preprocessor__'
+    HYPERPARAMS_KEY = '__preprocessor__'
 
     def __init__(self) -> None:
         self._initializer = None
@@ -326,23 +326,9 @@ class StaticNormalizer(Preprocessor):
 
 
 # ***********************************************************************
-# ALL VERSIONS OF JAX PLANS
-# 
-# - straight line plan
-# - deep reactive policy
+# JAX BASE PLAN TEMPLATE
 #
 # ***********************************************************************
-
-
-def walk_params(tree, prefix=''):
-    if isinstance(tree, dict):
-        for k, v in tree.items():
-            yield from walk_params(v, f"{prefix}/{k}" if prefix else k)
-    elif isinstance(tree, (list, tuple)):
-        for i, v in enumerate(tree):
-            yield from walk_params(v, f"{prefix}/{i}")
-    else:
-        yield prefix, tree
 
 
 class JaxPlan(metaclass=ABCMeta):
@@ -361,7 +347,8 @@ class JaxPlan(metaclass=ABCMeta):
         return self.__str__()
     
     @abstractmethod
-    def compile(self, compiled: JaxRDDLCompilerWithGrad,
+    def compile(self, compiled: JaxRDDLCompilerWithGrad, 
+                test_compiled: JaxRDDLCompiler,
                 _bounds: Bounds,
                 horizon: int,
                 preprocessor: Optional[Preprocessor]=None) -> None:
@@ -402,66 +389,65 @@ class JaxPlan(metaclass=ABCMeta):
     @projection.setter
     def projection(self, value: Callable) -> None:
         self._projection = value
-    
-    def _calculate_action_info(self, compiled, user_bounds, horizon):
-        shapes, bounds, bounds_safe, cond_lists = {}, {}, {}, {}
-        for (name, prange) in compiled.rddl.variable_ranges.items():
-            if compiled.rddl.variable_types[name] != 'action-fluent':
-                continue
+
+
+def get_action_info(compiled: JaxRDDLCompiler, user_bounds: Bounds, horizon: int) -> Tuple[Any, Any, Any, Any]:
+    shapes, bounds, bounds_safe, cond_lists = {}, {}, {}, {}
+    for (name, prange) in compiled.rddl.variable_ranges.items():
+        if compiled.rddl.variable_types[name] != 'action-fluent':
+            continue
+        
+        # check invalid type
+        if prange not in compiled.JAX_TYPES and prange not in compiled.rddl.enum_types:
+            keys = list(compiled.JAX_TYPES.keys()) + list(compiled.rddl.enum_types)
+            raise RDDLTypeError(
+                f'Invalid range <{prange}> of action-fluent <{name}>, '
+                f'must be one of {keys}.'
+            )
             
-            # check invalid type
-            if prange not in compiled.JAX_TYPES and prange not in compiled.rddl.enum_types:
-                keys = list(compiled.JAX_TYPES.keys()) + list(compiled.rddl.enum_types)
-                raise RDDLTypeError(
-                    f'Invalid range <{prange}> of action-fluent <{name}>, '
-                    f'must be one of {keys}.'
-                )
-                
-            # clip boolean to (0, 1), otherwise use the RDDL action bounds
-            # or the user defined action bounds if provided
-            shapes[name] = (horizon,) + np.shape(compiled.init_values[name])
-            if prange == 'bool':
-                lower, upper = None, None
+        # clip boolean to (0, 1), otherwise use the RDDL action bounds
+        # or the user defined action bounds if provided
+        shapes[name] = (horizon,) + np.shape(compiled.init_values[name])
+        if prange == 'bool':
+            lower, upper = None, None
+        else:
+            # enum values are ordered from 0 to number of objects - 1
+            if prange in compiled.rddl.enum_types:
+                lower = np.zeros(shape=shapes[name][1:])
+                upper = len(compiled.rddl.type_to_objects[prange]) - 1
+                upper = np.ones(shape=shapes[name][1:]) * upper
             else:
+                lower, upper = compiled.constraints.bounds[name]
+            
+            # override with user defined bounds
+            lower, upper = user_bounds.get(name, (lower, upper))
+            lower = np.asarray(lower, dtype=compiled.REAL)
+            upper = np.asarray(upper, dtype=compiled.REAL)
 
-                # enum values are ordered from 0 to number of objects - 1
-                if prange in compiled.rddl.enum_types:
-                    lower = np.zeros(shape=shapes[name][1:])
-                    upper = len(compiled.rddl.type_to_objects[prange]) - 1
-                    upper = np.ones(shape=shapes[name][1:]) * upper
-                else:
-                    lower, upper = compiled.constraints.bounds[name]
-                
-                # override with user defined bounds
-                lower, upper = user_bounds.get(name, (lower, upper))
-                lower = np.asarray(lower, dtype=compiled.REAL)
-                upper = np.asarray(upper, dtype=compiled.REAL)
+            # get masks for a jax conditional statement to avoid numerical errors
+            # for infinite values
+            lower_finite = np.isfinite(lower)
+            upper_finite = np.isfinite(upper)
+            bounds_safe[name] = (np.where(lower_finite, lower, 0.0),
+                                    np.where(upper_finite, upper, 0.0))
+            cond_lists[name] = [lower_finite & upper_finite,
+                                lower_finite & ~upper_finite,
+                                ~lower_finite & upper_finite,
+                                ~lower_finite & ~upper_finite]
+        bounds[name] = (lower, upper)
 
-                # get masks for a jax conditional statement to avoid numerical errors
-                # for infinite values
-                lower_finite = np.isfinite(lower)
-                upper_finite = np.isfinite(upper)
-                bounds_safe[name] = (np.where(lower_finite, lower, 0.0),
-                                     np.where(upper_finite, upper, 0.0))
-                cond_lists[name] = [lower_finite & upper_finite,
-                                    lower_finite & ~upper_finite,
-                                    ~lower_finite & upper_finite,
-                                    ~lower_finite & ~upper_finite]
-            bounds[name] = (lower, upper)
+        if compiled.print_warnings:
+            print(termcolor.colored(
+                f'[INFO] Bounds of action-fluent <{name}> set to {bounds[name]}.', 
+                'dark_grey'
+            ))
+    return shapes, bounds, bounds_safe, cond_lists
+   
 
-            if compiled.print_warnings:
-                print(termcolor.colored(
-                    f'[INFO] Bounds of action-fluent <{name}> set to {bounds[name]}.', 
-                    'dark_grey'
-                ))
-        return shapes, bounds, bounds_safe, cond_lists
-    
-    def _count_bool_actions(self, rddl):
-        constraint = rddl.max_allowed_actions
-        num_bool_actions = sum(np.size(values)
-                               for (var, values) in rddl.action_fluents.items()
-                               if rddl.variable_ranges[var] == 'bool')
-        return num_bool_actions, constraint
+# ***********************************************************************
+# JAX STRAIGHT LINE PLAN
+#
+# ***********************************************************************
 
 
 class JaxActionProjection(metaclass=ABCMeta):
@@ -633,6 +619,7 @@ class JaxStraightLinePlan(JaxPlan):
     def __init__(self, initializer: initializers.Initializer=initializers.normal(),
                  wrap_sigmoid: bool=True,
                  min_action_prob: float=1e-6,
+                 sigmoid_weight: float=1.0,
                  wrap_non_bool: bool=False,
                  wrap_softmax: bool=False,
                  use_new_projection: bool=False,
@@ -645,6 +632,7 @@ class JaxStraightLinePlan(JaxPlan):
         if wrap_softmax = True)
         :param min_action_prob: minimum value a soft boolean action can take
         (maximum is 1 - min_action_prob); required positive if wrap_sigmoid = True
+        :param sigmoid_weight: weight for wrap_sigmoid operation
         :param wrap_non_bool: whether to wrap real or int action fluent parameters
         with non-linearity (e.g. sigmoid or ELU) to satisfy box constraints
         :param wrap_softmax: whether to use softmax activation approach 
@@ -663,6 +651,7 @@ class JaxStraightLinePlan(JaxPlan):
         self._initializer = initializer
         self._wrap_sigmoid = wrap_sigmoid
         self._min_action_prob = min_action_prob
+        self._sigmoid_weight = sigmoid_weight
         self._wrap_non_bool = wrap_non_bool
         self._wrap_softmax = wrap_softmax
         self._use_new_projection = use_new_projection
@@ -677,27 +666,28 @@ class JaxStraightLinePlan(JaxPlan):
                 f'        parsed_action_bounds =\n        {bounds}\n'
                 f'        wrap_sigmoid         ={self._wrap_sigmoid}\n'
                 f'        wrap_sigmoid_min_prob={self._min_action_prob}\n'
+                f'        sigmoid_weight       ={self._sigmoid_weight}\n'
                 f'        wrap_non_bool        ={self._wrap_non_bool}\n'
                 f'    constraint-sat strategy (complex):\n'
                 f'        wrap_softmax        ={self._wrap_softmax}\n'
                 f'        use_new_projection  ={self._use_new_projection}\n'
                 f'        max_projection_iters={self._max_constraint_iter}\n')
     
-    def compile(self, compiled: JaxRDDLCompilerWithGrad,
+    def compile(self, compiled: JaxRDDLCompilerWithGrad, 
+                test_compiled: JaxRDDLCompiler,
                 _bounds: Bounds,
                 horizon: int,
                 preprocessor: Optional[Preprocessor]=None) -> None:
         rddl = compiled.rddl
         
         # calculate the correct action box bounds
-        shapes, bounds, bounds_safe, cond_lists = self._calculate_action_info(
-            compiled, _bounds, horizon)
+        shapes, bounds, bounds_safe, cond_lists = get_action_info(compiled, _bounds, horizon)
         self.bounds = bounds
         
         # get the noop action values
         noop = {var: (values[0] if isinstance(values, list) else values)
                 for (var, values) in rddl.action_fluents.items()}
-        bool_key = 'bool__'
+        BOOL_KEY = '__bool__'
         
         # ***********************************************************************
         # STRAIGHT-LINE PLAN
@@ -705,22 +695,19 @@ class JaxStraightLinePlan(JaxPlan):
         # ***********************************************************************
         
         # boolean actions are parameters wrapped by sigmoid to ensure [0, 1]:
-        #
         #   action = sigmoid(weight * param)
-        #
         # here weight is a hyper-parameter and param is the trainable policy parameter
-        wrap_sigmoid = self._wrap_sigmoid
-        bool_threshold = 0.0 if wrap_sigmoid else 0.5
+        bool_threshold = 0.0 if self._wrap_sigmoid else 0.5
         
         def _jax_bool_param_to_action(var, param, hyperparams):
-            if wrap_sigmoid:
+            if self._wrap_sigmoid:
                 weight = hyperparams[var]
                 return stable_sigmoid(weight * param)
             else:
                 return param 
         
         def _jax_bool_action_to_param(var, action, hyperparams):
-            if wrap_sigmoid:
+            if self._wrap_sigmoid:
                 weight = hyperparams[var]
                 return jax.scipy.special.logit(action) / weight
             else:
@@ -729,17 +716,14 @@ class JaxStraightLinePlan(JaxPlan):
         # the same technique could be applied to non-bool actions following Bueno et al.
         # this is disabled by default since the gradient projection trick seems to work
         # better, especially for one-sided bounds (-inf, B) or (B, +inf)
-        wrap_non_bool = self._wrap_non_bool
-        
         def _jax_non_bool_param_to_action(var, param, hyperparams):
-            if wrap_non_bool:
+            if self._wrap_non_bool:
                 lower, upper = bounds_safe[var]
                 branches = [jnp.asarray(mask, dtype=compiled.REAL) 
                             for mask in cond_lists[var]]       
-                action = jax_bound_action(branches, lower, upper, param)
+                return jax_bound_action(branches, lower, upper, param)
             else:
-                action = param
-            return action
+                return param
                 
         # a different option to handle boolean action concurrency constraints with |A| = 1
         # is to use a softmax activation layer over pooled action parameters
@@ -748,8 +732,6 @@ class JaxStraightLinePlan(JaxPlan):
                         for (var, shape) in shapes.items()
                         if ranges[var] == 'bool'}
         
-        # given a softmax output, this simply unpacks the result of the softmax back into
-        # the original action fluent dictionary
         def _jax_unstack_bool_from_softmax(output):
             actions = {}
             start = 0
@@ -768,7 +750,7 @@ class JaxStraightLinePlan(JaxPlan):
             actions = {}
             for (var, param) in params.items():
                 action = jnp.asarray(param[step, ...], dtype=compiled.REAL)
-                if var == bool_key:
+                if var == BOOL_KEY:
                     output = jax.nn.softmax(action)
                     bool_actions = _jax_unstack_bool_from_softmax(output)
                     actions.update(bool_actions)
@@ -786,7 +768,7 @@ class JaxStraightLinePlan(JaxPlan):
             actions = {}
             for (var, param) in params.items():
                 action = jnp.asarray(param[step, ...], dtype=compiled.REAL)
-                if var == bool_key:
+                if var == BOOL_KEY:
                     output = jax.nn.softmax(action)
                     bool_actions = _jax_unstack_bool_from_softmax(output)
                     for (bool_var, bool_action) in bool_actions.items():
@@ -809,23 +791,21 @@ class JaxStraightLinePlan(JaxPlan):
         
         # if the user wants min/max values for clipping boolean action parameters
         # this might be a good idea to avoid saturation of action-fluents since the
-        # gradient could vanish as a result  
-        min_action = self._min_action_prob
-        max_action = 1.0 - min_action
-        
+        # gradient could vanish as a result        
         def _jax_project_bool_to_box(var, param, hyperparams):
-            lower = _jax_bool_action_to_param(var, min_action, hyperparams)
-            upper = _jax_bool_action_to_param(var, max_action, hyperparams)
+            min_p = self._min_action_prob
+            lower = _jax_bool_action_to_param(var, min_p, hyperparams)
+            upper = _jax_bool_action_to_param(var, 1. - min_p, hyperparams)
             return jnp.clip(param, lower, upper)
         
         def _jax_wrapped_slp_project_to_box(params, hyperparams):
             new_params = {}
             for (var, param) in params.items():
-                if var == bool_key:
+                if var == BOOL_KEY:
                     new_params[var] = param
                 elif ranges[var] == 'bool':
                     new_params[var] = _jax_project_bool_to_box(var, param, hyperparams)
-                elif wrap_non_bool:
+                elif self._wrap_non_bool:
                     new_params[var] = param
                 else:
                     new_params[var] = jnp.clip(param, *bounds[var])
@@ -834,45 +814,41 @@ class JaxStraightLinePlan(JaxPlan):
         
         # enable constraint satisfaction subroutines during optimization 
         # if there are nontrivial concurrency constraints in the problem description 
-        bool_action_count, allowed_actions = self._count_bool_actions(rddl)
-        use_constraint_satisfaction = allowed_actions < bool_action_count        
-        if compiled.print_warnings and use_constraint_satisfaction: 
+        allowed_actions = rddl.max_allowed_actions
+        bool_action_count = sum(np.size(values)
+                                for (var, values) in rddl.action_fluents.items()
+                                if rddl.variable_ranges[var] == 'bool')    
+        if compiled.print_warnings and allowed_actions < bool_action_count: 
             print(termcolor.colored(
                 f'[INFO] Number of boolean actions {bool_action_count} '
-                f'> max_nondef_actions {allowed_actions}: enabling projected gradient to '
+                f'> cardinality {allowed_actions}: enabling projected gradient to '
                 f'satisfy constraints on action-fluents.', 'dark_grey'
             ))
         
         # use a softmax output activation: only allow one action non-noop for now
-        if use_constraint_satisfaction and self._wrap_softmax:
-            if 1 < allowed_actions < bool_action_count:
+        if allowed_actions < bool_action_count and self._wrap_softmax:
+            if allowed_actions > 1:
                 raise RDDLNotImplementedError(
                     f'SLPs with wrap_softmax currently '
-                    f'do not support max-nondef-actions {allowed_actions} > 1.'
+                    f'do not support action cardinality constraint {allowed_actions} > 1.'
                 )
             self.projection = _jax_wrapped_slp_project_to_box
             
-        # use new gradient projection method
-        elif use_constraint_satisfaction and self._use_new_projection:
-            jax_project_fn = JaxSortingActionProjection().compile(
-                ranges, noop, wrap_sigmoid, allowed_actions, bool_threshold, 
-                _jax_project_bool_to_box
-            )
+        # use gradient projection method
+        elif allowed_actions < bool_action_count:
 
-            # clip actions to valid bounds and satisfy constraint on max actions
-            def _jax_wrapped_slp_project_to_max_constraint(params, hyperparams):
-                params, _ = _jax_wrapped_slp_project_to_box(params, hyperparams)
-                return jax.vmap(jax_project_fn, in_axes=(0, None))(params, hyperparams)
-            self.projection = _jax_wrapped_slp_project_to_max_constraint
-        
-        # use SOGBOFA projection method
-        elif use_constraint_satisfaction and not self._use_new_projection:
-            jax_project_fn = JaxSogbofaActionProjection().compile(
-                ranges, noop, allowed_actions, self._max_constraint_iter, 
-                _jax_bool_param_to_action, _jax_bool_action_to_param, 
-                min_action, max_action, compiled.REAL
-            )
-            
+            if self._use_new_projection:
+                jax_project_fn = JaxSortingActionProjection().compile(
+                    ranges, noop, self._wrap_sigmoid, allowed_actions, bool_threshold, 
+                    _jax_project_bool_to_box
+                )
+            else:
+                 jax_project_fn = JaxSogbofaActionProjection().compile(
+                    ranges, noop, allowed_actions, self._max_constraint_iter, 
+                    _jax_bool_param_to_action, _jax_bool_action_to_param, 
+                    self._min_action_prob, 1. - self._min_action_prob, compiled.REAL
+                )
+
             # clip actions to valid bounds and satisfy constraint on max actions
             def _jax_wrapped_slp_project_to_max_constraint(params, hyperparams):
                 params, _ = _jax_wrapped_slp_project_to_box(params, hyperparams)
@@ -888,25 +864,26 @@ class JaxStraightLinePlan(JaxPlan):
         #
         # ***********************************************************************
         
-        init = self._initializer
-        stack_bool_params = use_constraint_satisfaction and self._wrap_softmax
-        
         # use the user required initializer and project actions to feasible range
-        def _jax_wrapped_slp_init(key, hyperparams, fls):
+        init_fn = self._initializer
+        stack_bool_params = allowed_actions < bool_action_count and self._wrap_softmax
+
+        def _jax_wrapped_slp_init(key, fls):
+            hyperparams = {var: self._sigmoid_weight for var in rddl.action_fluents}
             params = {}
             for (var, shape) in shapes.items():
                 if ranges[var] != 'bool' or not stack_bool_params: 
                     key, subkey = random.split(key)
-                    param = init(key=subkey, shape=shape, dtype=compiled.REAL)
+                    param = init_fn(key=subkey, shape=shape, dtype=compiled.REAL)
                     if ranges[var] == 'bool':
                         param = param + bool_threshold
                     params[var] = param
             if stack_bool_params:
                 key, subkey = random.split(key)
                 bool_shape = (horizon, bool_action_count)
-                params[bool_key] = init(key=subkey, shape=bool_shape, dtype=compiled.REAL)
+                params[BOOL_KEY] = init_fn(key=subkey, shape=bool_shape, dtype=compiled.REAL)
             params, _ = _jax_wrapped_slp_project_to_box(params, hyperparams)
-            return params
+            return params, hyperparams
         self.initializer = _jax_wrapped_slp_init
     
     @staticmethod
@@ -919,8 +896,15 @@ class JaxStraightLinePlan(JaxPlan):
         return jax.tree_util.tree_map(JaxStraightLinePlan._guess_next_epoch, params)
 
 
+# ***********************************************************************
+# JAX DEEP REACTIVE POLICY
+#
+# ***********************************************************************
+
+
 class GumbelSoftmaxTopK(nn.Module):
     '''A differentiable top-k generalization of gumbel-softmax.'''
+
     allowed_actions: int
     real_dtype: Any
     name: str='topk'
@@ -932,44 +916,42 @@ class GumbelSoftmaxTopK(nn.Module):
         if self.allowed_actions == 1:
             return jax.nn.softmax(action_logits)
         
-        # branched evaluation to relax when training and use exact when infering
-        else:
-            # forward relaxation
-            def differentiable_top_k(key, logits, w):
-                g = random.gumbel(key=key, shape=jnp.shape(logits), dtype=self.real_dtype)
-                logits = logits + g
-                def body_fun(i, carry):
-                    khot, logits_i = carry
-                    khot_mask = jnp.maximum(1.0 - khot, 1e-12)
-                    logits_new = logits_i + jnp.log(khot_mask)
-                    khot_new = khot + jax.nn.softmax(w * logits_new)
-                    return (khot_new, logits_new)
-                khot0 = jnp.zeros_like(logits)
-                khot_final, _ = jax.lax.fori_loop(
-                    lower=0, upper=self.allowed_actions, 
-                    body_fun=body_fun, 
-                    init_val=(khot0, logits)
-                )
-                return khot_final
-            
-            # forward exact evaluation
-            def exact_top_k(key, logits, w):
-                def body_fun(i, carry):
-                    khot, logits_i = carry
-                    idx = jnp.argmax(logits_i)
-                    khot = khot.at[idx].set(1.0)
-                    logits_i = logits_i.at[idx].set(-jnp.inf)
-                    return (khot, logits_i)
-                khot0 = jnp.zeros_like(logits)
-                khot_final, _ = jax.lax.fori_loop(
-                    lower=0, upper=self.allowed_actions, 
-                    body_fun=body_fun, 
-                    init_val=(khot0, logits)
-                )
-                return khot_final
+        # forward relaxation
+        def differentiable_top_k(key, logits, w):
+            g = random.gumbel(key=key, shape=jnp.shape(logits), dtype=self.real_dtype)
+            logits = logits + g
+            def body_fun(i, carry):
+                khot, logits_i = carry
+                khot_mask = jnp.maximum(1.0 - khot, 1e-12)
+                logits_new = logits_i + jnp.log(khot_mask)
+                khot_new = khot + jax.nn.softmax(w * logits_new)
+                return (khot_new, logits_new)
+            khot0 = jnp.zeros_like(logits)
+            khot_final, _ = jax.lax.fori_loop(
+                lower=0, upper=self.allowed_actions, 
+                body_fun=body_fun, 
+                init_val=(khot0, logits)
+            )
+            return khot_final
+        
+        # forward exact evaluation
+        def exact_top_k(key, logits, w):
+            def body_fun(i, carry):
+                khot, logits_i = carry
+                idx = jnp.argmax(logits_i)
+                khot = khot.at[idx].set(1.0)
+                logits_i = logits_i.at[idx].set(-jnp.inf)
+                return (khot, logits_i)
+            khot0 = jnp.zeros_like(logits)
+            khot_final, _ = jax.lax.fori_loop(
+                lower=0, upper=self.allowed_actions, 
+                body_fun=body_fun, 
+                init_val=(khot0, logits)
+            )
+            return khot_final
 
-            return jax.lax.switch(
-                train, [exact_top_k, differentiable_top_k], rng_key, action_logits, weight)
+        return jax.lax.switch(
+            train, [exact_top_k, differentiable_top_k], rng_key, action_logits, weight)
 
 
 class FiLM(nn.Module):
@@ -1066,22 +1048,22 @@ class JaxDeepReactivePolicy(JaxPlan):
                 f'        wrap_non_bool        ={self._wrap_non_bool}\n'
                 f'        softmax_output_weight={self._softmax_output_weight}\n')
         
-    def compile(self, compiled: JaxRDDLCompilerWithGrad,
+    def compile(self, compiled: JaxRDDLCompilerWithGrad, 
+                test_compiled: JaxRDDLCompiler,
                 _bounds: Bounds,
                 horizon: int,
                 preprocessor: Optional[Preprocessor]=None) -> None:
         rddl = compiled.rddl
         
         # calculate the correct action box bounds
-        shapes, bounds, bounds_safe, cond_lists = self._calculate_action_info(
-            compiled, _bounds, horizon)
+        shapes, bounds, bounds_safe, cond_lists = get_action_info(compiled, _bounds, horizon)
         shapes = {var: value[1:] for (var, value) in shapes.items()}
         self.bounds = bounds
         
         # get the noop action values
         noop = {var: (values[0] if isinstance(values, list) else values)
                 for (var, values) in rddl.action_fluents.items()}                   
-        bool_key = 'bool__'
+        BOOL_KEY = '__bool__'
         
         # ***********************************************************************
         # POLICY NETWORK PREDICTION
@@ -1090,10 +1072,6 @@ class JaxDeepReactivePolicy(JaxPlan):
             
         # compute the correct shapes of the output layers based on the action-fluent shape
         ranges = rddl.variable_ranges
-        normalize = self._normalize
-        normalize_per_layer = self._normalize_per_layer
-        wrap_non_bool = self._wrap_non_bool
-        init = self._initializer
         layers = list(enumerate(zip(self._topology, self._activations)))
         layer_sizes = {var: np.prod(shape, dtype=np.int64) 
                        for (var, shape) in shapes.items()}
@@ -1108,6 +1086,8 @@ class JaxDeepReactivePolicy(JaxPlan):
         
         # catch if input norm is applied to size 1 tensor:
         # this leads to incorrect behavior as the input is always "1"
+        normalize = self._normalize
+        normalize_per_layer = self._normalize_per_layer
         if normalize:
             non_bool_dims = 0
             for (var, values) in observed_vars.items():
@@ -1140,7 +1120,7 @@ class JaxDeepReactivePolicy(JaxPlan):
 
                 # optional state preprocessing
                 if preprocessor is not None:
-                    stats = hyperparams[preprocessor.HYPERPARAMS_KEY]
+                    stats = hyperparams[Preprocessor.HYPERPARAMS_KEY]
                     fls = preprocessor.transform(fls, stats)
                 
                 # concatenate all state variables into a single vector
@@ -1170,13 +1150,17 @@ class JaxDeepReactivePolicy(JaxPlan):
         
         # enable constraint satisfaction subroutines during optimization 
         # if there are nontrivial concurrency constraints in the problem description
-        bool_action_count, allowed_actions = self._count_bool_actions(rddl)
-        use_constraint_satisfaction = allowed_actions < bool_action_count
+        bool_action_count = sum(np.size(values)
+                            for (var, values) in rddl.action_fluents.items()
+                            if rddl.variable_ranges[var] == 'bool')
+        use_constraint_satisfaction = rddl.max_allowed_actions < bool_action_count
+        SOFTMAX_KEY = 'softmax_weight'
 
         # predict actions from the policy network for current state
+        wrap_non_bool = self._wrap_non_bool
         time_dependent = self._time_dependent
         time_embed_dim = self._time_embedding_dim
-        softmax_output_weight = self._softmax_output_weight
+        init = self._initializer
 
         class DRP(nn.Module):
             name: str='drp'
@@ -1232,8 +1216,9 @@ class JaxDeepReactivePolicy(JaxPlan):
                         features=bool_action_count, kernel_init=init, name='dense_topk')
                     logits = linear(hidden)
                     topk = GumbelSoftmaxTopK(
-                        allowed_actions, real_dtype=compiled.REAL, name='topk')
-                    actions[bool_key] = topk(key, logits, softmax_output_weight, train=train)
+                        rddl.max_allowed_actions, real_dtype=compiled.REAL, name='topk')
+                    actions[BOOL_KEY] = topk(
+                        key, logits, weight=hyperparams[SOFTMAX_KEY], train=train)
                 return actions
         predict_fn = DRP(name='drp')       
         
@@ -1260,12 +1245,12 @@ class JaxDeepReactivePolicy(JaxPlan):
                 params, fls, hyperparams, step, train=train, rngs={"policy": key})
             if not wrap_non_bool:
                 for (var, action) in actions.items():
-                    if var != bool_key and ranges[var] != 'bool':
+                    if var != BOOL_KEY and ranges[var] != 'bool':
                         actions[var] = jnp.clip(action, *bounds[var])
             if use_constraint_satisfaction:
-                bool_actions = _jax_unstack_bool_from_softmax(actions[bool_key])
+                bool_actions = _jax_unstack_bool_from_softmax(actions[BOOL_KEY])
                 actions.update(bool_actions)
-                del actions[bool_key]
+                del actions[BOOL_KEY]
             return actions
         self.train_policy = _jax_wrapped_drp_predict_train
         
@@ -1306,17 +1291,21 @@ class JaxDeepReactivePolicy(JaxPlan):
         # ***********************************************************************
         
         # initialize policy parameters according to user-desired weight initializer
-        def _jax_wrapped_drp_init(key, hyperparams, fls):
+        def _jax_wrapped_drp_init(key, fls):
+            hyperparams = {SOFTMAX_KEY: self._softmax_output_weight}
+            if preprocessor is not None:
+                hyperparams[Preprocessor.HYPERPARAMS_KEY] = preprocessor.initialize()
             obs_vars = {var: value[0, ...] 
                         for (var, value) in fls.items()
                         if var in observed_vars}
-            return predict_fn.init(key, obs_vars, hyperparams, 0, train=1)
+            params = predict_fn.init(key, obs_vars, hyperparams, 0, train=1)
+            return params, hyperparams
         self.initializer = _jax_wrapped_drp_init
         
     def guess_next_epoch(self, params: Pytree) -> Pytree:
         # this is easy: just warm-start from the previously obtained policy
         return params
-    
+
     
 # ***********************************************************************
 # SUPPORTING FUNCTIONS
@@ -1326,6 +1315,16 @@ class JaxDeepReactivePolicy(JaxPlan):
 # - stopping criteria
 #
 # ***********************************************************************
+
+def walk_params(tree, prefix=''):
+    if isinstance(tree, dict):
+        for k, v in tree.items():
+            yield from walk_params(v, f"{prefix}/{k}" if prefix else k)
+    elif isinstance(tree, (list, tuple)):
+        for i, v in enumerate(tree):
+            yield from walk_params(v, f"{prefix}/{i}")
+    else:
+        yield prefix, tree
 
 
 class RollingMean:
@@ -1719,16 +1718,16 @@ class GaussianPGPE(PGPE):
 
             # calculate gradient with respect to the sigma
             grad_sigma = jax.tree_util.tree_map(
-                partial(_jax_wrapped_sigma_grad, 
-                        r1=r1, r2=r2, r3=r3, r4=r4, m=r_max, ent=ent), 
+                partial(_jax_wrapped_sigma_grad, r1=r1, r2=r2, r3=r3, r4=r4, m=r_max, ent=ent), 
                 epsilon, epsilon_star, sigma
             )
             return grad_mu, grad_sigma, r_max
 
         # calculate the policy gradients with batching on the first dimension
-        def _jax_wrapped_pgpe_grad_batched(key, pgpe_params, r_max, ent, hparams, fls, nfls, 
+        def _jax_wrapped_pgpe_grad_batched(key, pgpe_params, ent, hparams, fls, nfls, 
                                            model_params, critic_params):
-            mu, sigma = pgpe_params
+            mu, sigma = pgpe_params['stats']
+            r_max = pgpe_params['r_max']
 
             # no batching required
             if batch_size == 1:
@@ -1784,15 +1783,14 @@ class GaussianPGPE(PGPE):
 
             # do a single update step
             def _jax_wrapped_pgpe_update_step(_, carry):
-                _pgpe_params, _pgpe_opt_state, _r_max, _key, _converged = carry
+                _pgpe_params, _pgpe_opt_state, _key, _converged = carry
 
                 # regular update for pgpe
                 _key, _subkey = random.split(_key)
-                mu, sigma = _pgpe_params
+                mu, sigma = _pgpe_params['stats']
                 mu_state, sigma_state = _pgpe_opt_state
                 mu_grad, sigma_grad, new_r_max = _jax_wrapped_pgpe_grad_batched(
-                    _subkey, _pgpe_params, _r_max, ent, hparams, fls, nfls, 
-                    model_params, critic_params)
+                    _subkey, _pgpe_params, ent, hparams, fls, nfls, model_params, critic_params)
                 new_mu, new_sigma, new_mu_state, new_sigma_state = _jax_wrapped_pgpe_update_helper(
                     mu, sigma, mu_grad, sigma_grad, mu_state, sigma_state)
                 
@@ -1814,21 +1812,19 @@ class GaussianPGPE(PGPE):
                 # apply projection step to the sampled policy
                 new_mu, _converged = projection(new_mu, hparams)
 
-                new_pgpe_params = (new_mu, new_sigma)
+                new_pgpe_params = {'stats': (new_mu, new_sigma), 'r_max': new_r_max}
                 new_pgpe_opt_state = (new_mu_state, new_sigma_state)
-                new_carry = (new_pgpe_params, new_pgpe_opt_state, new_r_max, _key, _converged)
-                return new_carry
+                return (new_pgpe_params, new_pgpe_opt_state, _key, _converged)
             
             # do an unrolled update
-            carry = (pgpe_params['stats'], pgpe_opt_state, pgpe_params['r_max'], key, False)
-            stats, pgpe_opt_state, r_max, _, converged = jax.lax.fori_loop(
+            _, converged = projection(pgpe_params['stats'][0], hparams)
+            pgpe_params, pgpe_opt_state, _, converged = jax.lax.fori_loop(
                 lower=0, upper=self.steps_per_update, 
                 body_fun=_jax_wrapped_pgpe_update_step, 
-                init_val=carry
+                init_val=(pgpe_params, pgpe_opt_state, key, converged)
             )
-            new_pgpe_params = {'stats': stats, 'r_max': r_max}
-            policy_params, _ = stats
-            return new_pgpe_params, pgpe_opt_state, policy_params, converged
+            policy_params, _ = pgpe_params['stats']
+            return pgpe_params, pgpe_opt_state, policy_params, converged
 
         # for parallel policy update
         def _jax_wrapped_batched_pgpe_updates(key, pgpe_params, pgpe_opt_state, progress,
@@ -2187,7 +2183,7 @@ class JaxBackpropPlanner:
     def _jax_compile_policy(self):
         if self.preprocessor is not None:
             self.preprocessor.compile(self.compiled)   
-        self.plan.compile(self.compiled,
+        self.plan.compile(self.compiled, self.test_compiled,
                           _bounds=self._action_bounds,
                           horizon=self.horizon,
                           preprocessor=self.preprocessor)
@@ -2328,10 +2324,10 @@ class JaxBackpropPlanner:
         num_parallel = self.parallel_updates
         
         # initialize both the policy and its optimizer
-        def _jax_wrapped_init_policy(key, policy_hyperparams, fls):
-            policy_params = init(key, policy_hyperparams, fls)
+        def _jax_wrapped_init_policy(key, fls):
+            policy_params, policy_hyperparams = init(key, fls)
             opt_state = optimizer.init(policy_params)
-            return policy_params, opt_state, {}    
+            return policy_params, policy_hyperparams, opt_state, {}    
         
         # initialize just the optimizer from the policy
         def _jax_wrapped_init_opt(policy_params):
@@ -2339,11 +2335,12 @@ class JaxBackpropPlanner:
             return opt_state, {}
 
         # initialize multiple policies to be optimized in parallel
-        def _jax_wrapped_batched_init_policy(key, policy_hyperparams, fls):
+        def _jax_wrapped_batched_init_policy(key, fls):
             keys = random.split(key, num=num_parallel)
-            return jax.vmap(
-                _jax_wrapped_init_policy, in_axes=(0, None, None)
-            )(keys, policy_hyperparams, fls)      
+            params, hyperparams, opt_state, aux = jax.vmap(
+                _jax_wrapped_init_policy, in_axes=(0, None))(keys, fls)  
+            hyperparams = jax.tree_util.tree_map(lambda x: x[0], hyperparams)
+            return params, hyperparams, opt_state, aux
           
         return jax.jit(_jax_wrapped_batched_init_policy), jax.jit(_jax_wrapped_init_opt)
         
@@ -2404,7 +2401,7 @@ class JaxBackpropPlanner:
                 return new_carry
             
             # do a single update
-            carry = (policy_params, opt_state, model_params, key, 0.0, False, None)
+            carry = (policy_params, opt_state, model_params, key, 0.0, False, {})
             carry = _jax_wrapped_plan_update_step(0, carry)
 
             # do an unrolled update loop in JAX for any remaining steps
@@ -2524,9 +2521,7 @@ class JaxBackpropPlanner:
         for each problem in the format required by the downstream optimizer.
         
         :param key: JAX PRNG key (derived from clock if not provided)
-        :param policy_hyperparameters: hyper-parameters for the policy/plan, 
-        such as weights for sigmoid wrapping boolean actions (defaults to 1
-        for all action-fluents if not provided)
+        :param policy_hyperparameters: hyper-parameters for the policy/plan
         :param critic_params: optional critic network parameters
         :param loss_function_updates_key: if True, the loss function 
         updates the PRNG key internally independently of the grad function
@@ -2546,16 +2541,11 @@ class JaxBackpropPlanner:
         # initialize the initial fluents, model parameters, policy hyper-params
         (fls, nfls), _ = self._batched_init_subs(self.test_compiled.init_values)
         model_params = self.compiled.model_aux['params']
-        if policy_hyperparams is None:
-            if self.print_warnings:
-                print(termcolor.colored(
-                    '[WARN] policy_hyperparams is not set: setting values to 1.0 for '
-                    'all action-fluents, which could be suboptimal.', 'yellow'
-                ))
-            policy_hyperparams = {action: 1.0 for action in self.rddl.action_fluents}
-                
+
         # initialize the policy parameters
-        params_guess = self.initialize(key, policy_hyperparams, fls)[0]
+        params_guess, init_hyperparams, _, _ = self.initialize(key, fls)
+        if policy_hyperparams is None:
+            policy_hyperparams = init_hyperparams
         params_guess = pytree_at(params_guess, 0)
 
         # get the params mapping to a 1D vector
@@ -2712,40 +2702,7 @@ class JaxBackpropPlanner:
                     '[WARN] PRNG key is not set: setting from clock.', 'yellow'
                 ))
         dash_key = key[1].item()
-            
-        # if policy_hyperparams is not provided
-        if policy_hyperparams is None:
-            if self.print_warnings:
-                print(termcolor.colored(
-                    '[WARN] policy_hyperparams is not set: setting values to 1.0 for '
-                    'all action-fluents, which could be suboptimal.', 'yellow'
-                ))
-            policy_hyperparams = {action: 1.0 for action in self.rddl.action_fluents}
         
-        # if policy_hyperparams is a scalar
-        elif isinstance(policy_hyperparams, (int, float, np.number)):
-            policy_hyperparams = {action: float(policy_hyperparams) 
-                                  for action in self.rddl.action_fluents}
-        
-        # fill in missing entries
-        elif isinstance(policy_hyperparams, dict):
-            for action in self.rddl.action_fluents:
-                if action not in policy_hyperparams:
-                    if self.print_warnings:
-                        print(termcolor.colored(
-                            f'[WARN] policy_hyperparams[{action}] is not set: '
-                            f'setting values to 1.0 for missing action-fluents, '
-                            f'which could be suboptimal.', 'yellow'
-                        ))
-                    policy_hyperparams[action] = 1.0
-        
-        # initialize preprocessor        
-        if self.preprocessor is None:
-            preproc_key = None
-        else:
-            preproc_key = self.preprocessor.HYPERPARAMS_KEY
-            policy_hyperparams[preproc_key] = self.preprocessor.initialize()
-
         # print summary of parameters:
         if print_summary:
             print(self.summarize_system())
@@ -2800,8 +2757,10 @@ class JaxBackpropPlanner:
         # initialize policy parameters
         if guess is None:
             key, subkey = random.split(key)
-            policy_params, opt_state, opt_aux = self.initialize(
-                subkey, policy_hyperparams, train_subs[0])
+            policy_params, init_hyperparams, opt_state, opt_aux = self.initialize(
+                subkey, train_subs[0])
+            if policy_hyperparams is None:
+                policy_hyperparams = init_hyperparams
         else:
             policy_params = self._broadcast_pytree(guess)
             opt_state, opt_aux = self.init_optimizer(policy_params)
@@ -2874,10 +2833,11 @@ class JaxBackpropPlanner:
                  model_params, critic_params, opt_state, opt_aux
             )
             
-            # update the preprocessor
-            if self.preprocessor is not None:                
-                policy_hyperparams[preproc_key] = self.preprocessor.update(
-                    train_log['fluents'], policy_hyperparams[preproc_key]
+            # update the preprocessor    
+            proc_key = Preprocessor.HYPERPARAMS_KEY
+            if self.preprocessor is not None and proc_key in policy_hyperparams: 
+                policy_hyperparams[proc_key] = self.preprocessor.update(
+                    train_log['fluents'], policy_hyperparams[proc_key]
                 )
 
             # evaluate
