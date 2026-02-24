@@ -105,7 +105,8 @@ class JaxRDDLCompiler:
         # compute dependency graph for CPFs and sort them by evaluation order
         self.allow_synchronous_state = allow_synchronous_state
         sorter = RDDLLevelAnalysis(rddl, allow_synchronous_state=allow_synchronous_state)
-        self.levels = sorter.compute_levels()        
+        self.levels = sorter.compute_levels()  
+        self.policy_deps = sorter.build_policy_call_graph(include_non_fluents=True)      
         
         # trace expressions to cache information to be used later
         tracer = RDDLObjectsTracer(
@@ -151,7 +152,8 @@ class JaxRDDLCompiler:
     def compile(self, log_jax_expr: bool=False, 
                 heading: str='',
                 extra_aux: Dict[str, Any]={},
-                compile_constraints: bool=True) -> None: 
+                compile_constraints: bool=True,
+                compile_policy_block: bool=True) -> None: 
         '''Compiles the current RDDL into Jax expressions.
         
         :param log_jax_expr: whether to pretty-print the compiled Jax functions
@@ -159,6 +161,7 @@ class JaxRDDLCompiler:
         :param heading: the heading to print before compilation information
         :param extra_aux: extra info to save during compilations
         :param compile_constraints: whether to compile constraints
+        :param compile_policy_block: whether to compile the policy block
         '''
         self.model_aux = {'params': {}, 'overriden': {}, 'exact': set()}
         self.model_aux.update(extra_aux)
@@ -172,6 +175,11 @@ class JaxRDDLCompiler:
         
         self.cpfs = self._compile_cpfs(self.model_aux)
         self.reward = self._compile_reward(self.model_aux)
+
+        if compile_policy_block:
+            self.policy = self._compile_policy_block(self.model_aux)
+        else:
+            self.policy = {}
 
         # add compiled jax expression to logger
         if log_jax_expr and self.logger is not None:
@@ -216,6 +224,13 @@ class JaxRDDLCompiler:
     def _compile_reward(self, aux):
         return self._jax(self.rddl.reward, aux, dtype=self.REAL)
     
+    def _compile_policy_block(self, aux):
+        jax_actions = {}
+        for (name, (_, expr)) in self.rddl.policy.items():
+            dtype = self.JAX_TYPES.get(self.rddl.variable_ranges[name], self.INT)
+            jax_actions[name] = self._jax(expr, aux, dtype=dtype)
+        return jax_actions
+
     def _extract_inequality_constraint(self, expr):
         result = []
         etype, op = expr.etype
@@ -307,6 +322,16 @@ class JaxRDDLCompiler:
             errors = errors | err
             return reward, key, errors, params
         return _jax_wrapped_reward
+
+    def _jax_policy(self):
+        policy = self.policy
+        def _jax_wrapped_actions(key, errors, fls, nfls, params):
+            actions = {}
+            for (name, jax_act) in policy.items():
+                actions[name], key, err, params = jax_act(fls, nfls, params, key)
+                errors = errors | err  
+            return actions, key, errors, params
+        return _jax_wrapped_actions
 
     def _jax_invariants(self):
         invariants = self.invariants
@@ -2220,4 +2245,5 @@ class JaxRDDLCompiler:
             sample = jnp.moveaxis(sample, source=(-2, -1), destination=indices)
             return sample, key, error, params        
         return _jax_wrapped_matrix_operation_cholesky
+
             
