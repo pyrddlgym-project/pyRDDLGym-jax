@@ -1306,6 +1306,129 @@ class JaxDeepReactivePolicy(JaxPlan):
         # this is easy: just warm-start from the previously obtained policy
         return params
 
+
+# ***********************************************************************
+# JAX RDDL policy
+#
+# ***********************************************************************
+
+class JaxRDDLPolicy(JaxPlan):
+    '''A structured policy whose structure is defined in RDDL policy block.'''
+
+    history_dependent = False
+    
+    def compile(self, compiled: JaxRDDLCompilerWithGrad, 
+                test_compiled: JaxRDDLCompiler,
+                _bounds: Bounds,
+                horizon: int,
+                preprocessor: Optional[Preprocessor]=None) -> None:
+        rddl = compiled.rddl
+
+        # calculate the correct action box bounds
+        shapes, bounds, bounds_safe, cond_lists = get_action_info(compiled, _bounds, horizon)
+        shapes = {var: value[1:] for (var, value) in shapes.items()}
+        self.bounds = bounds
+
+        # ***********************************************************************
+        # POLICY PREDICTION
+        #
+        # ***********************************************************************
+            
+        # ensure we have the policy 
+        if not compiled.policy_deps:
+            raise ValueError('RDDL domain does not have a policy block.')
+
+        # identify the non-fluents that are direct dependencies of the actions
+        # these are the trainable parameters in the current model
+        all_deps = set()
+        for deps in compiled.policy_deps.values():
+            nf_deps = {dep for dep in deps if dep in rddl.non_fluents}
+            all_deps.update(nf_deps)
+        if not all_deps:
+            raise ValueError('Policy does not depend on any non-fluent values '
+                             'and is not trainable.')
+
+        # functions that evaluate the policy come directly from the compiled policy block
+        train_policy_fn = compiled._jax_policy()
+        test_policy_fn = test_compiled._jax_policy()
+
+        # to evaluate the train and test action, params -> nfls, hyperparams -> params
+        def _jax_wrapped_rddl_predict_train(key, params, hyperparams, step, fls, fls_hist):
+            nfls = {name: params[name] for name in all_deps}
+            actions = train_policy_fn(key, 0, fls, nfls, params=hyperparams)[0]
+            new_actions = {}
+            for (var, action) in actions.items():
+                if not shapes[var]:
+                    action = jnp.squeeze(action)
+                action = jnp.clip(action, *bounds[var])
+                action = jnp.asarray(action, dtype=compiled.REAL)
+                new_actions[var] = action
+            return new_actions
+        self.train_policy = _jax_wrapped_rddl_predict_train
+
+        def _jax_wrapped_rddl_predict_test(key, params, hyperparams, step, fls, fls_hist):
+
+            # evaluate the policy block with correct non-fluent types
+            nfls = {}
+            for var in all_deps:
+                nfl = params[var]
+                prange = rddl.variable_ranges[var]
+                if prange == 'real':
+                    nfls[var] = nfl
+                elif prange == 'bool':
+                    nfls[var] = nfl > 0.5
+                else:
+                    nfls[var] = jnp.asarray(jnp.round(nfl), dtype=test_compiled.INT)
+            actions = test_policy_fn(key, 0, fls, nfls, params=hyperparams)[0]
+
+            # convert the output of the block to the correct type
+            new_actions = {}
+            for (var, action) in actions.items():
+                if not shapes[var]:
+                    action = jnp.squeeze(action)
+                prange = rddl.variable_ranges[var]
+                if prange == 'bool':
+                    action = action > 0.5
+                elif prange == 'real':
+                    action = jnp.clip(action, *bounds[var])
+                    action = jnp.asarray(action, dtype=test_compiled.REAL)
+                elif prange == 'int' or prange in rddl.enum_types:
+                    action = jnp.clip(action, *bounds[var])
+                    action = jnp.asarray(jnp.round(action), dtype=test_compiled.INT)
+                new_actions[var] = action
+            return new_actions
+        self.test_policy = _jax_wrapped_rddl_predict_test
+        
+        # ***********************************************************************
+        # ACTION CONSTRAINT SATISFACTION
+        #
+        # ***********************************************************************
+        
+        # no projection applied since the actions are already constrained
+        def _jax_wrapped_rddl_no_projection(params, hyperparams):
+            converged = jnp.array(True, dtype=jnp.bool_)
+            return params, converged
+        self.projection = _jax_wrapped_rddl_no_projection
+
+        # ***********************************************************************
+        # POLICY NETWORK INITIALIZATION
+        #
+        # ***********************************************************************
+        
+        # params <- default non-fluent values, hyperparams <- model-params
+        def _jax_wrapped_rddl_init(key, fls):
+            hyperparams = compiled.model_aux['params']
+            policy_params = {
+                name: jnp.asarray(compiled.init_values[name], dtype=compiled.REAL) 
+                for name in all_deps
+            }
+            return policy_params, hyperparams
+        self.initializer = _jax_wrapped_rddl_init
+
+    def guess_next_epoch(self, params: Pytree) -> Pytree:
+        # this is easy: just warm-start from the previously obtained policy
+        return params
+    
     
 # ***********************************************************************
 # SUPPORTING FUNCTIONS
