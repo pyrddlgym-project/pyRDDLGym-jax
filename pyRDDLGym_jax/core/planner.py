@@ -2887,6 +2887,10 @@ class JaxBackpropPlanner:
         else:
             policy_params = self._broadcast_pytree(guess)
             opt_state, opt_aux = self.init_optimizer(policy_params)
+
+            # ensure that policy hyperparams are set
+            if policy_hyperparams is None:
+                raise ValueError('policy guess was provided without policy_hyperparams.')
         
         # initialize pgpe parameters
         if self.use_pgpe:
@@ -3419,7 +3423,9 @@ class JaxOnlineController(BaseAgent):
         # we train the policy from the current state every time we step()
         planner = self.planner
         callback = planner.optimize(
-            key=self.key, guess=self.guess, subs=state, **self.train_kwargs)
+            key=self.key, guess=self.guess, policy_hyperparams=self.hyperparams, 
+            subs=state, **self.train_kwargs
+        )
         
         # optimize again if jit compilation takes up the entire time budget
         # this can be done for several attempts until the optimizer has traced the 
@@ -3434,7 +3440,9 @@ class JaxOnlineController(BaseAgent):
                     f'[attempt {attempts}].', 'dark_grey'
                 ))
             callback = planner.optimize(
-                key=self.key, guess=self.guess, subs=state, **self.train_kwargs)   
+                key=self.key, guess=self.guess, policy_hyperparams=self.hyperparams, 
+                subs=state, **self.train_kwargs
+            )   
         if callback['iteration'] <= 1 and self.planner.print_warnings:
             print(termcolor.colored(
                 f'[FAIL] JIT compilation dominated the execution time and '
@@ -3454,9 +3462,11 @@ class JaxOnlineController(BaseAgent):
         # apply warm start for the next epoch
         if self.warm_start:
             self.guess = planner.plan.guess_next_epoch(params)
+            self.hyperparams = callback['policy_hyperparams']
         return actions
         
     def reset(self) -> None:
         self.guess = None
+        self.hyperparams = None
         self.callback = None
     
