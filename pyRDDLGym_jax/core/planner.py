@@ -746,7 +746,7 @@ class JaxStraightLinePlan(JaxPlan):
                 
         # the main subroutine to compute the trainable rddl actions from the trainable
         # parameters (TODO: implement one-hot for integer actions)        
-        def _jax_wrapped_slp_predict_train(key, params, hyperparams, step, fls, fls_hist):
+        def _jax_wrapped_slp_predict_train(key, params, hyperparams, step, fls, fls_hist, nfls):
             actions = {}
             for (var, param) in params.items():
                 action = jnp.asarray(param[step, ...], dtype=compiled.REAL)
@@ -764,7 +764,7 @@ class JaxStraightLinePlan(JaxPlan):
         # the main subroutine to compute the test rddl actions from the trainable 
         # parameters: the difference here is that actions are converted to their required
         # types (i.e. bool, int, float)
-        def _jax_wrapped_slp_predict_test(key, params, hyperparams, step, fls, fls_hist):
+        def _jax_wrapped_slp_predict_test(key, params, hyperparams, step, fls, fls_hist, nfls):
             actions = {}
             for (var, param) in params.items():
                 action = jnp.asarray(param[step, ...], dtype=compiled.REAL)
@@ -1240,7 +1240,7 @@ class JaxDeepReactivePolicy(JaxPlan):
         # the main subroutine to compute the trainable rddl actions from the trainable
         # parameters and the current state/obs dictionary       
         def _jax_wrapped_drp_predict_train(key, params, hyperparams, step, fls, fls_hist, 
-                                           train=1):
+                                           nfls, train=1):
             actions = predict_fn.apply(
                 params, fls, hyperparams, step, train=train, rngs={"policy": key})
             if not wrap_non_bool:
@@ -1257,9 +1257,9 @@ class JaxDeepReactivePolicy(JaxPlan):
         # the main subroutine to compute the test rddl actions from the trainable 
         # parameters and state/obs dict: the difference here is that actions are converted 
         # to their required types (i.e. bool, int, float)
-        def _jax_wrapped_drp_predict_test(key, params, hyperparams, step, fls, fls_hist):
+        def _jax_wrapped_drp_predict_test(key, params, hyperparams, step, fls, fls_hist, nfls):
             actions = _jax_wrapped_drp_predict_train(
-                key, params, hyperparams, step, fls, fls_hist, train=0)
+                key, params, hyperparams, step, fls, fls_hist, nfls, train=0)
             new_actions = {}
             for (var, action) in actions.items():
                 prange = ranges[var]
@@ -1349,8 +1349,10 @@ class JaxRDDLPolicy(JaxPlan):
         test_policy_fn = test_compiled._jax_policy()
 
         # to evaluate the train and test action, params -> nfls, hyperparams -> params
-        def _jax_wrapped_rddl_predict_train(key, params, hyperparams, step, fls, fls_hist):
-            actions = train_policy_fn(key, 0, fls, nfls=params, params=hyperparams)[0]
+        def _jax_wrapped_rddl_predict_train(key, params, hyperparams, step, fls, fls_hist, nfls):
+            nfls = nfls.copy()
+            nfls.update(params)
+            actions = train_policy_fn(key, 0, fls, nfls=nfls, params=hyperparams)[0]
             new_actions = {}
             for (var, action) in actions.items():
                 if not shapes[var]:
@@ -1361,19 +1363,19 @@ class JaxRDDLPolicy(JaxPlan):
             return new_actions
         self.train_policy = _jax_wrapped_rddl_predict_train
 
-        def _jax_wrapped_rddl_predict_test(key, params, hyperparams, step, fls, fls_hist):
+        def _jax_wrapped_rddl_predict_test(key, params, hyperparams, step, fls, fls_hist, nfls):
 
             # evaluate the policy block with correct non-fluent types
-            new_params = {}
+            nfls = nfls.copy()
             for (var, nfl) in params.items():
                 prange = rddl.policy.variable_ranges[var]
                 if prange == 'real':
-                    new_params[var] = nfl
+                    nfls[var] = nfl
                 elif prange == 'bool':
-                    new_params[var] = nfl > 0.5
+                    nfls[var] = nfl > 0.5
                 else:
-                    new_params[var] = jnp.asarray(jnp.round(nfl), dtype=test_compiled.INT)
-            actions = test_policy_fn(key, 0, fls, nfls=new_params, params=hyperparams)[0]
+                    nfls[var] = jnp.asarray(jnp.round(nfl), dtype=test_compiled.INT)
+            actions = test_policy_fn(key, 0, fls, nfls=nfls, params=hyperparams)[0]
 
             # convert the output of the block to the correct type
             new_actions = {}
@@ -2362,12 +2364,16 @@ class JaxBackpropPlanner:
         self._jax_compile_train_update()
         self._jax_compile_test_loss()
         self._jax_compile_pgpe()
+
+        # required by get_action()
+        self.init_nfs = self._batched_init_subs(self.test_compiled.init_values)[1][1]
     
     def _jax_critic(self):
         critic_fn = self.critic_fn
         policy_fn = self.train_policy
 
-        def _jax_wrapped_critic(critic_params, key, policy_params, policy_hyperparams, fls):
+        def _jax_wrapped_critic(critic_params, key, policy_params, policy_hyperparams, fls, 
+                                nfls):
 
             # fluent tensors have leading time dimension, take last observation
             if self.rddl.observ_fluents:
@@ -2379,7 +2385,7 @@ class JaxBackpropPlanner:
 
             # calculate action of the last observation   
             # TODO: allow history dependent and nonstationary policies
-            act = policy_fn(key, policy_params, policy_hyperparams, 0, obs, {})    
+            act = policy_fn(key, policy_params, policy_hyperparams, 0, obs, {}, nfls)    
 
             # evaluate and validate critic
             critic_value = jnp.squeeze(critic_fn(critic_params, obs, act))
@@ -2430,8 +2436,9 @@ class JaxBackpropPlanner:
             else:
                 keys = random.split(key, num=batch_size)
                 critic_values = jax.vmap(
-                    _jax_wrapped_critic, in_axes=(None, 0, None, None, 0)
-                )(critic_params, keys, policy_params, policy_hyperparams, log['fluents'])
+                    _jax_wrapped_critic, in_axes=(None, 0, None, None, 0, None)
+                )(critic_params, keys, policy_params, policy_hyperparams, log['fluents'], 
+                  nfls)
             
             # evaluate cumulative return per rollout
             returns = _jax_wrapped_returns(log['reward'], critic_values)
@@ -3288,7 +3295,8 @@ class JaxBackpropPlanner:
                         )
             
         # cast device arrays to numpy
-        actions = self.test_policy(key, params, policy_hyperparams, step, state, history)
+        actions = self.test_policy(key, params, policy_hyperparams, step, state, 
+                                   history, self.init_nfs)
         actions = jax.tree_util.tree_map(np.asarray, actions)
         return actions      
        

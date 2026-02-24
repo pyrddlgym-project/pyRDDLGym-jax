@@ -497,7 +497,7 @@ class JaxRDDLCompiler:
         def _jax_wrapped_policy_step(key, policy_params, hyperparams, step, fls, nfls, 
                                      model_params, fls_hist):
             key, subkey = random.split(key)
-            actions = policy(key, policy_params, hyperparams, step, fls, fls_hist)
+            actions = policy(key, policy_params, hyperparams, step, fls, fls_hist, nfls)
             return transition_fn(subkey, actions, fls, nfls, model_params)
         return _jax_wrapped_policy_step
 
@@ -581,6 +581,7 @@ class JaxRDDLCompiler:
             - step is the time index of the decision in the current rollout
             - fls is a dict of fluent tensors for the current epoch
             - fls_hist is a dict of fluent tensors up to the current epoch
+            - nfls is a dict of non-fluent tensors
         
         :param policy: a Jax compiled function for the policy as described above
         decision epoch, state dict, and an RNG key and returns an action dict
