@@ -1325,7 +1325,7 @@ class JaxRDDLPolicy(JaxPlan):
         rddl = compiled.rddl
 
         # calculate the correct action box bounds
-        shapes, bounds, bounds_safe, cond_lists = get_action_info(compiled, _bounds, horizon)
+        shapes, bounds, _, _ = get_action_info(compiled, _bounds, horizon)
         shapes = {var: value[1:] for (var, value) in shapes.items()}
         self.bounds = bounds
 
@@ -1334,22 +1334,14 @@ class JaxRDDLPolicy(JaxPlan):
         #
         # ***********************************************************************
             
-        # ensure we have the policy 
-        if not compiled.policy_deps:
-            raise ValueError('RDDL domain does not have a policy block.')
+        if rddl.policy is None:
+            raise ValueError('RDDL domain does not have a valid policy block.')
 
-        # identify the non-fluents that are direct dependencies of the actions
-        # these are the trainable parameters in the current model
-        all_nf_deps = set()
-        for deps in compiled.policy_deps.values():
-            nf_deps = {dep for dep in deps if dep in rddl.non_fluents}
-            all_nf_deps.update(nf_deps)
-        if not all_nf_deps:
-            raise ValueError('Policy does not depend on any non-fluent values '
-                             'and is not trainable.')
+        # trainable parameters are the non-fluents in the policy
+        all_nf_deps = set(rddl.policy.non_fluents.keys())
         print(termcolor.colored(
-              f'[INFO] JaxPlan will infer the policy structure from the RDDL description: '
-              f'non-fluent dependencies {all_nf_deps} will be optimized.', 'dark_grey'
+              f'[INFO] JaxPlan will use the policy defined in the policy block: '
+              f'policy non-fluents {all_nf_deps} will be optimized.', 'dark_grey'
         ))
 
         # functions that evaluate the policy come directly from the compiled policy block
@@ -1358,8 +1350,7 @@ class JaxRDDLPolicy(JaxPlan):
 
         # to evaluate the train and test action, params -> nfls, hyperparams -> params
         def _jax_wrapped_rddl_predict_train(key, params, hyperparams, step, fls, fls_hist):
-            nfls = {name: params[name] for name in all_nf_deps}
-            actions = train_policy_fn(key, 0, fls, nfls, params=hyperparams)[0]
+            actions = train_policy_fn(key, 0, fls, nfls=params, params=hyperparams)[0]
             new_actions = {}
             for (var, action) in actions.items():
                 if not shapes[var]:
@@ -1373,17 +1364,16 @@ class JaxRDDLPolicy(JaxPlan):
         def _jax_wrapped_rddl_predict_test(key, params, hyperparams, step, fls, fls_hist):
 
             # evaluate the policy block with correct non-fluent types
-            nfls = {}
-            for var in all_nf_deps:
-                nfl = params[var]
-                prange = rddl.variable_ranges[var]
+            new_params = {}
+            for (var, nfl) in params.items():
+                prange = rddl.policy.variable_ranges[var]
                 if prange == 'real':
-                    nfls[var] = nfl
+                    new_params[var] = nfl
                 elif prange == 'bool':
-                    nfls[var] = nfl > 0.5
+                    new_params[var] = nfl > 0.5
                 else:
-                    nfls[var] = jnp.asarray(jnp.round(nfl), dtype=test_compiled.INT)
-            actions = test_policy_fn(key, 0, fls, nfls, params=hyperparams)[0]
+                    new_params[var] = jnp.asarray(jnp.round(nfl), dtype=test_compiled.INT)
+            actions = test_policy_fn(key, 0, fls, nfls=new_params, params=hyperparams)[0]
 
             # convert the output of the block to the correct type
             new_actions = {}
@@ -1413,7 +1403,7 @@ class JaxRDDLPolicy(JaxPlan):
         def _jax_wrapped_rddl_clip_projection(params, hyperparams):
             new_params = {}
             for (var, param) in params.items():
-                if rddl.variable_ranges[var] == 'bool':
+                if rddl.policy.variable_ranges[var] == 'bool':
                     param = jnp.clip(param, 0., 1.)
                 new_params[var] = param
             converged = jnp.array(True, dtype=jnp.bool_)
@@ -1429,7 +1419,7 @@ class JaxRDDLPolicy(JaxPlan):
         def _jax_wrapped_rddl_init(key, fls):
             hyperparams = compiled.model_aux['params']
             policy_params = {
-                name: jnp.asarray(compiled.init_values[name], dtype=compiled.REAL) 
+                name: jnp.asarray(compiled.init_policy_values[name], dtype=compiled.REAL) 
                 for name in all_nf_deps
             }
             return policy_params, hyperparams

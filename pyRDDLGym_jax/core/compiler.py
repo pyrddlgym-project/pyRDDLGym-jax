@@ -101,17 +101,19 @@ class JaxRDDLCompiler:
         # compile initial values
         initializer = RDDLValueInitializer(rddl)
         self.init_values = initializer.initialize()
+        self.init_policy_values = initializer.initialize_policy()
         
         # compute dependency graph for CPFs and sort them by evaluation order
         self.allow_synchronous_state = allow_synchronous_state
         sorter = RDDLLevelAnalysis(rddl, allow_synchronous_state=allow_synchronous_state)
         self.levels = sorter.compute_levels()  
-        self.policy_deps = sorter.build_policy_call_graph(include_non_fluents=True)      
+        self.policy_levels = sorter.compute_levels_policy()     
         
         # trace expressions to cache information to be used later
         tracer = RDDLObjectsTracer(
             rddl, cpf_levels=self.levels, stochastic_is_fluent=stochastic_is_fluent)
-        self.traced = tracer.trace()
+        traced = tracer.trace()
+        self.traced = tracer.trace_policy(traced)
         
         # external python functions
         if python_functions is None:
@@ -177,9 +179,9 @@ class JaxRDDLCompiler:
         self.reward = self._compile_reward(self.model_aux)
 
         if compile_policy_block:
-            self.policy = self._compile_policy_block(self.model_aux)
+            self.policy_cpfs = self._compile_policy_cpfs(self.model_aux)
         else:
-            self.policy = {}
+            self.policy_cpfs = {}
 
         # add compiled jax expression to logger
         if log_jax_expr and self.logger is not None:
@@ -224,13 +226,27 @@ class JaxRDDLCompiler:
     def _compile_reward(self, aux):
         return self._jax(self.rddl.reward, aux, dtype=self.REAL)
     
-    def _compile_policy_block(self, aux):
-        jax_actions = {}
-        for (name, (_, expr)) in self.rddl.policy.items():
-            dtype = self.JAX_TYPES.get(self.rddl.variable_ranges[name], self.INT)
-            jax_actions[name] = self._jax(expr, aux, dtype=dtype)
-        return jax_actions
-
+    def _variable_range_from_rddl_or_policy(self, var, default=None):
+        rddl = self.rddl
+        return rddl.variable_ranges.get(
+            var, 
+            (default if rddl.policy is None 
+             else rddl.policy.variable_ranges.get(var, default))
+        )
+    
+    def _compile_policy_cpfs(self, aux):
+        jax_cpfs = {}
+        policy = self.rddl.policy
+        if policy is None:
+            return jax_cpfs
+        for cpfs in self.policy_levels.values():
+            for cpf in cpfs:
+                _, expr = policy.cpfs[cpf]
+                prange = self._variable_range_from_rddl_or_policy(cpf)
+                dtype = self.JAX_TYPES.get(prange, self.INT)
+                jax_cpfs[cpf] = self._jax(expr, aux, dtype=dtype)
+        return jax_cpfs
+    
     def _extract_inequality_constraint(self, expr):
         result = []
         etype, op = expr.etype
@@ -323,16 +339,6 @@ class JaxRDDLCompiler:
             return reward, key, errors, params
         return _jax_wrapped_reward
 
-    def _jax_policy(self):
-        policy = self.policy
-        def _jax_wrapped_actions(key, errors, fls, nfls, params):
-            actions = {}
-            for (name, jax_act) in policy.items():
-                actions[name], key, err, params = jax_act(fls, nfls, params, key)
-                errors = errors | err  
-            return actions, key, errors, params
-        return _jax_wrapped_actions
-
     def _jax_invariants(self):
         invariants = self.invariants
         def _jax_wrapped_invariants(key, errors, fls, nfls, params):
@@ -354,7 +360,21 @@ class JaxRDDLCompiler:
                 errors = errors | err
             return terminated_check, key, errors, params
         return _jax_wrapped_terminations
-
+    
+    def _jax_policy(self):
+        cpfs = self.policy_cpfs
+        def _jax_wrapped_policy_cpfs(key, errors, fls, nfls, params):
+            new_fls = fls.copy()
+            actions = {}
+            for (name, cpf) in cpfs.items():
+                sample, key, err, params = cpf(new_fls, nfls, params, key)
+                new_fls[name] = sample
+                if name in self.rddl.action_fluents:
+                    actions[name] = sample
+                errors = errors | err  
+            return actions, key, errors, params
+        return _jax_wrapped_policy_cpfs
+    
     def compile_transition(self, check_constraints: bool=False,
                            constraint_func: bool=False, 
                            cache_path_info: bool=False,

@@ -153,21 +153,26 @@ class JaxRDDLCompilerWithGrad(JaxRDDLCompiler):
  
         return jax_cpfs
     
-    def _compile_policy_block(self, aux):
-
-        # actions will all be cast to float
-        acts_cast = set()  
-        jax_actions = {}
-        for (name, (_, expr)) in self.rddl.policy.items():
-            jax_actions[name] = self._jax(expr, aux, dtype=self.REAL)
-            if self.rddl.variable_ranges[name] != 'real':
-                acts_cast.add(name)
+    def _compile_policy_cpfs(self, aux):
         
-        if self.print_warnings and acts_cast:
+        # cpfs will all be cast to float
+        cpfs_cast = set()  
+        jax_cpfs = {}
+        policy = self.rddl.policy
+        if policy is None:
+            return jax_cpfs        
+        for cpfs in self.policy_levels.values():
+            for cpf in cpfs:
+                _, expr = policy.cpfs[cpf]
+                jax_cpfs[cpf] = self._jax(expr, aux, dtype=self.REAL)
+                if self._variable_range_from_rddl_or_policy(cpf) != 'real':
+                    cpfs_cast.add(cpf)
+        
+        if self.print_warnings and cpfs_cast:
             print(termcolor.colored(
-                f'[INFO] Compiler will cast policy actions {acts_cast} to float.', 'dark_grey'))
+                f'[INFO] Compiler will cast policy cpfs {cpfs_cast} to float.', 'dark_grey'))
             
-        return jax_actions
+        return jax_cpfs
 
     def _jax_unary_with_param(self, jax_expr, jax_op):
         def _jax_wrapped_unary_op_with_param(fls, nfls, params, key):
