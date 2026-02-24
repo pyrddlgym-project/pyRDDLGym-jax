@@ -1340,13 +1340,17 @@ class JaxRDDLPolicy(JaxPlan):
 
         # identify the non-fluents that are direct dependencies of the actions
         # these are the trainable parameters in the current model
-        all_deps = set()
+        all_nf_deps = set()
         for deps in compiled.policy_deps.values():
             nf_deps = {dep for dep in deps if dep in rddl.non_fluents}
-            all_deps.update(nf_deps)
-        if not all_deps:
+            all_nf_deps.update(nf_deps)
+        if not all_nf_deps:
             raise ValueError('Policy does not depend on any non-fluent values '
                              'and is not trainable.')
+        print(termcolor.colored(
+              f'[INFO] JaxPlan will infer the policy structure from the RDDL description: '
+              f'non-fluent dependencies {all_nf_deps} will be optimized.', 'dark_grey'
+        ))
 
         # functions that evaluate the policy come directly from the compiled policy block
         train_policy_fn = compiled._jax_policy()
@@ -1354,7 +1358,7 @@ class JaxRDDLPolicy(JaxPlan):
 
         # to evaluate the train and test action, params -> nfls, hyperparams -> params
         def _jax_wrapped_rddl_predict_train(key, params, hyperparams, step, fls, fls_hist):
-            nfls = {name: params[name] for name in all_deps}
+            nfls = {name: params[name] for name in all_nf_deps}
             actions = train_policy_fn(key, 0, fls, nfls, params=hyperparams)[0]
             new_actions = {}
             for (var, action) in actions.items():
@@ -1370,7 +1374,7 @@ class JaxRDDLPolicy(JaxPlan):
 
             # evaluate the policy block with correct non-fluent types
             nfls = {}
-            for var in all_deps:
+            for var in all_nf_deps:
                 nfl = params[var]
                 prange = rddl.variable_ranges[var]
                 if prange == 'real':
@@ -1404,11 +1408,17 @@ class JaxRDDLPolicy(JaxPlan):
         #
         # ***********************************************************************
         
-        # no projection applied since the actions are already constrained
-        def _jax_wrapped_rddl_no_projection(params, hyperparams):
+        # params are optimized non-fluents and must be clipped to their valid ranges
+        # currently this is just done for bool
+        def _jax_wrapped_rddl_clip_projection(params, hyperparams):
+            new_params = {}
+            for (var, param) in params.items():
+                if rddl.variable_ranges[var] == 'bool':
+                    param = jnp.clip(param, 0., 1.)
+                new_params[var] = param
             converged = jnp.array(True, dtype=jnp.bool_)
-            return params, converged
-        self.projection = _jax_wrapped_rddl_no_projection
+            return new_params, converged
+        self.projection = _jax_wrapped_rddl_clip_projection
 
         # ***********************************************************************
         # POLICY NETWORK INITIALIZATION
@@ -1420,7 +1430,7 @@ class JaxRDDLPolicy(JaxPlan):
             hyperparams = compiled.model_aux['params']
             policy_params = {
                 name: jnp.asarray(compiled.init_values[name], dtype=compiled.REAL) 
-                for name in all_deps
+                for name in all_nf_deps
             }
             return policy_params, hyperparams
         self.initializer = _jax_wrapped_rddl_init
