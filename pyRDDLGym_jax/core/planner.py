@@ -1018,7 +1018,7 @@ class JaxDeepReactivePolicy(JaxPlan):
         super(JaxDeepReactivePolicy, self).__init__()
         
         if topology is None:
-            topology = [128, 64]
+            topology = [64, 64]
         self._topology = topology
         self._activations = [activation for _ in topology]
         self._initializer_base = initializer
