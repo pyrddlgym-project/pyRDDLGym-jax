@@ -852,7 +852,10 @@ class JaxStraightLinePlan(JaxPlan):
             # clip actions to valid bounds and satisfy constraint on max actions
             def _jax_wrapped_slp_project_to_max_constraint(params, hyperparams):
                 params, _ = _jax_wrapped_slp_project_to_box(params, hyperparams)
-                return jax.vmap(jax_project_fn, in_axes=(0, None))(params, hyperparams)
+                new_params, converged = jax.vmap(
+                    jax_project_fn, in_axes=(0, None))(params, hyperparams)
+                converged = jnp.all(converged)
+                return new_params, converged
             self.projection = _jax_wrapped_slp_project_to_max_constraint
         
         # just project to box constraints
@@ -1151,8 +1154,8 @@ class JaxDeepReactivePolicy(JaxPlan):
         # enable constraint satisfaction subroutines during optimization 
         # if there are nontrivial concurrency constraints in the problem description
         bool_action_count = sum(np.size(values)
-                            for (var, values) in rddl.action_fluents.items()
-                            if rddl.variable_ranges[var] == 'bool')
+                                for (var, values) in rddl.action_fluents.items()
+                                if rddl.variable_ranges[var] == 'bool')
         use_constraint_satisfaction = rddl.max_allowed_actions < bool_action_count
         SOFTMAX_KEY = 'softmax_weight'
 
@@ -1942,11 +1945,10 @@ class GaussianPGPE(PGPE):
                 return (new_pgpe_params, new_pgpe_opt_state, _key, _converged)
             
             # do an unrolled update
-            _, converged = projection(pgpe_params['stats'][0], hparams)
             pgpe_params, pgpe_opt_state, _, converged = jax.lax.fori_loop(
                 lower=0, upper=self.steps_per_update, 
                 body_fun=_jax_wrapped_pgpe_update_step, 
-                init_val=(pgpe_params, pgpe_opt_state, key, converged)
+                init_val=(pgpe_params, pgpe_opt_state, key, True)
             )
             policy_params, _ = pgpe_params['stats']
             return pgpe_params, pgpe_opt_state, policy_params, converged
@@ -2526,15 +2528,13 @@ class JaxBackpropPlanner:
                 _policy_params, _converged = projection(_policy_params, policy_hyperparams)
                 _log['grad'] = grad
                 _log['updates'] = updates
-                new_carry = (_policy_params, _opt_state, _model_params, _key, 
-                             _loss_val, _converged, _log)
-                return new_carry
+                return (_policy_params, _opt_state, _model_params, _key, 
+                        _loss_val, _converged, _log)
             
-            # do a single update
-            carry = (policy_params, opt_state, model_params, key, 0.0, False, {})
+            # do a single update then an unrolled update in JAX for any remaining steps
+            # necessary to fill the log
+            carry = (policy_params, opt_state, model_params, key, 0.0, True, {})
             carry = _jax_wrapped_plan_update_step(0, carry)
-
-            # do an unrolled update loop in JAX for any remaining steps
             if self.steps_per_update > 1:
                 carry = jax.lax.fori_loop(
                     lower=0, upper=self.steps_per_update - 1, 
