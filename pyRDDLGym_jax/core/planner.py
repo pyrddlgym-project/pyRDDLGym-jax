@@ -165,6 +165,11 @@ def _load_config(config, args):
         else:
             plan_kwargs['activation'] = activation
     
+    # policy embedding
+    plan_time_embed = plan_kwargs.get('time_embedding', None)
+    if plan_time_embed is not None:
+        plan_kwargs['time_embedding'] = getattr(sys.modules[__name__], plan_time_embed)
+
     # read the planner settings
     planner_args['plan'] = getattr(sys.modules[__name__], plan_method)(**plan_kwargs)
     
@@ -969,17 +974,31 @@ class FiLM(nn.Module):
         return gamma * h + beta
 
 
-class TimeEmbedding(nn.Module):
-    '''Learnable time embedding layer.'''
-    max_t: int
-    dim: int
-    init: object
-    name: str='time_embedding'
+class FixedTimeEmbedding(nn.Module):
+    '''Learnable fixed time embedding layer.'''
+    max_t: int=500
+    dim: int=8
+    init: object=nn.initializers.normal()
+    name: str='fixed_time_embed'
 
     @nn.compact
     def __call__(self, t):
         emb = self.param("kernel", self.init, (self.max_t + 1, self.dim))
         return emb[t]
+    
+
+class SinusoidalTimeEmbedding(nn.Module):
+    '''Sinusoidal positional encoding for time.'''
+    dim: int=8
+    name: str = 'sin_time_embed'
+
+    @nn.compact
+    def __call__(self, t):
+        t = jnp.asarray(t, dtype=jnp.float32)
+        freqs = 10000.0 ** (-2.0 * jnp.arange(self.dim) / self.dim)
+        angles = t * freqs
+        emb = jnp.stack([jnp.sin(angles), jnp.cos(angles)], axis=-1)
+        return jnp.ravel(emb)[:self.dim]
     
             
 class JaxDeepReactivePolicy(JaxPlan):
@@ -996,8 +1015,9 @@ class JaxDeepReactivePolicy(JaxPlan):
                  normalizer_kwargs: Optional[Kwargs]=None,
                  wrap_non_bool: bool=False,
                  softmax_output_weight: float=1.0,
-                 time_dependent: bool=False,
-                 time_embedding_dim: int=8) -> None:
+                 time_dependent: bool=True,
+                 time_embedding: Optional[Type]=SinusoidalTimeEmbedding,
+                 time_embedding_kwargs: Optional[Kwargs]=None) -> None:
         '''Creates a new deep reactive policy in JAX.
         
         :param neurons: sequence consisting of the number of neurons in each
@@ -1013,7 +1033,8 @@ class JaxDeepReactivePolicy(JaxPlan):
         with non-linearity (e.g. sigmoid or ELU) to satisfy box constraints
         :param softmax_output_weight: weight in softmax action constraint satisfaction
         :param time_dependent: whether to make the DRP time_dependent
-        :param time_embedding_dim: time embedding dimension if time dependent
+        :param time_embedding: time embedding for time dependent policy
+        :param time_embedding_kwargs: arguments to pass to time embedding on initialization
         '''
         super(JaxDeepReactivePolicy, self).__init__()
         
@@ -1030,8 +1051,13 @@ class JaxDeepReactivePolicy(JaxPlan):
         self._normalizer_kwargs = normalizer_kwargs
         self._wrap_non_bool = wrap_non_bool
         self._softmax_output_weight = softmax_output_weight
+
+        # for time embedding
         self._time_dependent = time_dependent
-        self._time_embedding_dim = time_embedding_dim
+        self._time_embedding = time_embedding
+        if time_embedding_kwargs is None:
+            time_embedding_kwargs = {}
+        self._time_embedding_kwargs = time_embedding_kwargs
     
     def __str__(self) -> str:
         bounds = '\n        '.join(
@@ -1041,7 +1067,8 @@ class JaxDeepReactivePolicy(JaxPlan):
                 f'    activation_fn     ={self._activations[0].__name__}\n'
                 f'    initializer       ={type(self._initializer_base).__name__}\n'
                 f'    time_dependent    ={self._time_dependent}\n'
-                f'    time_embedding_dim={self._time_embedding_dim}\n'
+                f'    time_embedding    ={self._time_embedding}\n'
+                f'    time_embed_kwargs ={self._time_embedding_kwargs}\n'
                 f'    input norm:\n'
                 f'        apply_input_norm    ={self._normalize}\n'
                 f'        input_norm_layerwise={self._normalize_per_layer}\n'
@@ -1162,7 +1189,8 @@ class JaxDeepReactivePolicy(JaxPlan):
         # predict actions from the policy network for current state
         wrap_non_bool = self._wrap_non_bool
         time_dependent = self._time_dependent
-        time_embed_dim = self._time_embedding_dim
+        time_embedding = self._time_embedding
+        time_embedding_kwargs = self._time_embedding_kwargs
         init = self._initializer
 
         class DRP(nn.Module):
@@ -1177,8 +1205,7 @@ class JaxDeepReactivePolicy(JaxPlan):
                 
                 # time embedding
                 if time_dependent:
-                    t_emb = TimeEmbedding(
-                        horizon, dim=time_embed_dim, init=init, name='time_embedding')(step)
+                    t_emb = time_embedding(**time_embedding_kwargs)(step)
 
                 # feed state vector through hidden layers
                 hidden = state
