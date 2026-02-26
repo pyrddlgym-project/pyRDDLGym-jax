@@ -1039,7 +1039,7 @@ class JaxDeepReactivePolicy(JaxPlan):
         super(JaxDeepReactivePolicy, self).__init__()
         
         if topology is None:
-            topology = [64, 64]
+            topology = [128, 128]
         self._topology = topology
         self._activations = [activation for _ in topology]
         self._initializer_base = initializer
@@ -2074,6 +2074,32 @@ UTILITY_LOOKUP = {
 # 
 # ***********************************************************************
 
+def build_optax_optimizer(optimizer, optimizer_kwargs, clip_grad, noise_kwargs, 
+                          line_search_kwargs, ema_decay):
+
+    # set optimizer
+    try:
+        optimizer = optax.inject_hyperparams(optimizer)(**optimizer_kwargs)
+    except Exception as _:
+        print(termcolor.colored(
+            '[WARN] Could not inject hyperparameters into JaxPlan optimizer: '
+            'runtime modification of hyperparameters will be disabled.', 'yellow'
+        ))
+        optimizer = optimizer(**optimizer_kwargs)   
+    
+    # apply optimizer chain of transformations
+    pipeline = []  
+    if clip_grad is not None:
+        pipeline.append(optax.clip(clip_grad))
+    if noise_kwargs is not None:
+        pipeline.append(optax.add_noise(**noise_kwargs))
+    pipeline.append(optimizer)
+    if line_search_kwargs is not None:
+        pipeline.append(optax.scale_by_zoom_linesearch(**line_search_kwargs))
+    if ema_decay is not None:
+        pipeline.append(optax.ema(ema_decay))
+    return optax.chain(*pipeline)
+
 
 @jax.jit
 def pytree_at(tree: Pytree, i: int) -> Pytree:
@@ -2182,27 +2208,10 @@ class JaxBackpropPlanner:
         self.python_functions = python_functions
 
         # set optimizer
-        try:
-            optimizer = optax.inject_hyperparams(optimizer)(**optimizer_kwargs)
-        except Exception as _:
-            print(termcolor.colored(
-                '[WARN] Could not inject hyperparameters into JaxPlan optimizer: '
-                'runtime modification of hyperparameters will be disabled.', 'yellow'
-            ))
-            optimizer = optimizer(**optimizer_kwargs)   
-        
-        # apply optimizer chain of transformations
-        pipeline = []  
-        if clip_grad is not None:
-            pipeline.append(optax.clip(clip_grad))
-        if noise_kwargs is not None:
-            pipeline.append(optax.add_noise(**noise_kwargs))
-        pipeline.append(optimizer)
-        if line_search_kwargs is not None:
-            pipeline.append(optax.scale_by_zoom_linesearch(**line_search_kwargs))
-        if ema_decay is not None:
-            pipeline.append(optax.ema(ema_decay))
-        self.optimizer = optax.chain(*pipeline)
+        self.optimizer = build_optax_optimizer(
+            optimizer, optimizer_kwargs, clip_grad, noise_kwargs, line_search_kwargs, 
+            ema_decay
+        )
         
         # set utility
         if isinstance(utility, str):
