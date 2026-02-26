@@ -1015,7 +1015,7 @@ class JaxDeepReactivePolicy(JaxPlan):
                  normalizer_kwargs: Optional[Kwargs]=None,
                  wrap_non_bool: bool=False,
                  softmax_output_weight: float=1.0,
-                 time_dependent: bool=True,
+                 time_dependent: bool=False,
                  time_embedding: Optional[Type]=SinusoidalTimeEmbedding,
                  time_embedding_kwargs: Optional[Kwargs]=None) -> None:
         '''Creates a new deep reactive policy in JAX.
@@ -1039,7 +1039,7 @@ class JaxDeepReactivePolicy(JaxPlan):
         super(JaxDeepReactivePolicy, self).__init__()
         
         if topology is None:
-            topology = [128, 128]
+            topology = [64, 64]
         self._topology = topology
         self._activations = [activation for _ in topology]
         self._initializer_base = initializer
