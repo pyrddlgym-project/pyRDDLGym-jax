@@ -101,16 +101,19 @@ class JaxRDDLCompiler:
         # compile initial values
         initializer = RDDLValueInitializer(rddl)
         self.init_values = initializer.initialize()
+        self.init_policy_values = initializer.initialize_policy()
         
         # compute dependency graph for CPFs and sort them by evaluation order
         self.allow_synchronous_state = allow_synchronous_state
         sorter = RDDLLevelAnalysis(rddl, allow_synchronous_state=allow_synchronous_state)
-        self.levels = sorter.compute_levels()        
+        self.levels = sorter.compute_levels()  
+        self.policy_levels = sorter.compute_levels_policy()     
         
         # trace expressions to cache information to be used later
         tracer = RDDLObjectsTracer(
             rddl, cpf_levels=self.levels, stochastic_is_fluent=stochastic_is_fluent)
-        self.traced = tracer.trace()
+        traced = tracer.trace()
+        self.traced = tracer.trace_policy(traced)
         
         # external python functions
         if python_functions is None:
@@ -151,7 +154,8 @@ class JaxRDDLCompiler:
     def compile(self, log_jax_expr: bool=False, 
                 heading: str='',
                 extra_aux: Dict[str, Any]={},
-                compile_constraints: bool=True) -> None: 
+                compile_constraints: bool=True,
+                compile_policy_block: bool=True) -> None: 
         '''Compiles the current RDDL into Jax expressions.
         
         :param log_jax_expr: whether to pretty-print the compiled Jax functions
@@ -159,6 +163,7 @@ class JaxRDDLCompiler:
         :param heading: the heading to print before compilation information
         :param extra_aux: extra info to save during compilations
         :param compile_constraints: whether to compile constraints
+        :param compile_policy_block: whether to compile the policy block
         '''
         self.model_aux = {'params': {}, 'overriden': {}, 'exact': set()}
         self.model_aux.update(extra_aux)
@@ -172,6 +177,11 @@ class JaxRDDLCompiler:
         
         self.cpfs = self._compile_cpfs(self.model_aux)
         self.reward = self._compile_reward(self.model_aux)
+
+        if compile_policy_block:
+            self.policy_cpfs = self._compile_policy_cpfs(self.model_aux)
+        else:
+            self.policy_cpfs = {}
 
         # add compiled jax expression to logger
         if log_jax_expr and self.logger is not None:
@@ -215,6 +225,27 @@ class JaxRDDLCompiler:
     
     def _compile_reward(self, aux):
         return self._jax(self.rddl.reward, aux, dtype=self.REAL)
+    
+    def _variable_range_from_rddl_or_policy(self, var, default=None):
+        rddl = self.rddl
+        return rddl.variable_ranges.get(
+            var, 
+            (default if rddl.policy is None 
+             else rddl.policy.variable_ranges.get(var, default))
+        )
+    
+    def _compile_policy_cpfs(self, aux):
+        jax_cpfs = {}
+        policy = self.rddl.policy
+        if policy is None:
+            return jax_cpfs
+        for cpfs in self.policy_levels.values():
+            for cpf in cpfs:
+                _, expr = policy.cpfs[cpf]
+                prange = self._variable_range_from_rddl_or_policy(cpf)
+                dtype = self.JAX_TYPES.get(prange, self.INT)
+                jax_cpfs[cpf] = self._jax(expr, aux, dtype=dtype)
+        return jax_cpfs
     
     def _extract_inequality_constraint(self, expr):
         result = []
@@ -329,7 +360,21 @@ class JaxRDDLCompiler:
                 errors = errors | err
             return terminated_check, key, errors, params
         return _jax_wrapped_terminations
-
+    
+    def _jax_policy(self):
+        cpfs = self.policy_cpfs
+        def _jax_wrapped_policy_cpfs(key, errors, fls, nfls, params):
+            new_fls = fls.copy()
+            actions = {}
+            for (name, cpf) in cpfs.items():
+                sample, key, err, params = cpf(new_fls, nfls, params, key)
+                new_fls[name] = sample
+                if name in self.rddl.action_fluents:
+                    actions[name] = sample
+                errors = errors | err  
+            return actions, key, errors, params
+        return _jax_wrapped_policy_cpfs
+    
     def compile_transition(self, check_constraints: bool=False,
                            constraint_func: bool=False, 
                            cache_path_info: bool=False,
@@ -452,7 +497,7 @@ class JaxRDDLCompiler:
         def _jax_wrapped_policy_step(key, policy_params, hyperparams, step, fls, nfls, 
                                      model_params, fls_hist):
             key, subkey = random.split(key)
-            actions = policy(key, policy_params, hyperparams, step, fls, fls_hist)
+            actions = policy(key, policy_params, hyperparams, step, fls, fls_hist, nfls)
             return transition_fn(subkey, actions, fls, nfls, model_params)
         return _jax_wrapped_policy_step
 
@@ -536,6 +581,7 @@ class JaxRDDLCompiler:
             - step is the time index of the decision in the current rollout
             - fls is a dict of fluent tensors for the current epoch
             - fls_hist is a dict of fluent tensors up to the current epoch
+            - nfls is a dict of non-fluent tensors
         
         :param policy: a Jax compiled function for the policy as described above
         decision epoch, state dict, and an RNG key and returns an action dict
@@ -2220,4 +2266,5 @@ class JaxRDDLCompiler:
             sample = jnp.moveaxis(sample, source=(-2, -1), destination=indices)
             return sample, key, error, params        
         return _jax_wrapped_matrix_operation_cholesky
+
             

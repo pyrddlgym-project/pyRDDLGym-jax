@@ -49,7 +49,6 @@ def main(domain: str, instance: str, method: str,
     # map parameters in the config that will be tuned
     hyperparams = [
         Hyperparameter('MODEL_WEIGHT_TUNE', -1., 4., power_10),
-        Hyperparameter('POLICY_WEIGHT_TUNE', -2., 2., power_10),
         Hyperparameter('LEARNING_RATE_TUNE', -5., 0., power_10),
         Hyperparameter('LAYER1_TUNE', 1, 8, power_2),
         Hyperparameter('LAYER2_TUNE', 1, 8, power_2),
