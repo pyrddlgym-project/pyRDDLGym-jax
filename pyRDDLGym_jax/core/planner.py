@@ -1606,6 +1606,9 @@ class GaussianPGPE(PGPE):
                  optimizer: Callable[..., optax.GradientTransformation]=optax.adam,
                  optimizer_kwargs_mu: Optional[Kwargs]=None,
                  optimizer_kwargs_sigma: Optional[Kwargs]=None,
+                 clip_grad_mu: Optional[float]=None,
+                 clip_grad_sigma: Optional[float]=None,
+                 ema_decay: Optional[float]=None,
                  start_entropy_coeff: float=1e-3,
                  end_entropy_coeff: float=1e-8,
                  max_kl_update: Optional[float]=None) -> None:
@@ -1626,6 +1629,9 @@ class GaussianPGPE(PGPE):
         factory for the mean optimizer
         :param optimizer_kwargs_sigma: a dictionary of parameters to pass to the SGD
         factory for the standard deviation optimizer
+        :param clip_grad_mu: gradient clipping for mean optimizer
+        :param clip_grad_sigma: gradient clipping for standard deviation optimizer
+        :param ema_decay: EMA decay of parameters during optimization
         :param start_entropy_coeff: starting entropy regularization coeffient for Gaussian
         :param end_entropy_coeff: ending entropy regularization coeffient for Gaussian
         :param max_kl_update: bound on kl-divergence between parameter updates
@@ -1640,7 +1646,8 @@ class GaussianPGPE(PGPE):
         self.min_reward_scale = min_reward_scale
         self.super_symmetric = super_symmetric
         self.super_symmetric_accurate = super_symmetric_accurate
-        self.max_kl = max_kl_update
+        self.clip_grad_mu = clip_grad_mu
+        self.clip_grad_sigma = clip_grad_sigma
 
         # entropy regularization penalty is decayed exponentially between these values
         self.start_entropy_coeff = start_entropy_coeff
@@ -1654,37 +1661,37 @@ class GaussianPGPE(PGPE):
             optimizer_kwargs_sigma = {'learning_rate': 0.1}
         self.optimizer_kwargs_sigma = optimizer_kwargs_sigma
         self.optimizer_name = optimizer
-        try:
-            mu_optimizer = optax.inject_hyperparams(optimizer)(**optimizer_kwargs_mu)
-            sigma_optimizer = optax.inject_hyperparams(optimizer)(**optimizer_kwargs_sigma)
-        except Exception as _:
-            print(termcolor.colored(
-                '[WARN] Could not inject hyperparameters into PGPE optimizer: '
-                'kl-divergence constraint will be disabled.', 'yellow'
-            ))
-            mu_optimizer = optimizer(**optimizer_kwargs_mu)   
-            sigma_optimizer = optimizer(**optimizer_kwargs_sigma) 
-            max_kl_update = None
+        mu_optimizer, inject_mu = build_optax_optimizer(
+            optimizer, optimizer_kwargs_mu, clip_grad_mu, None, None, ema_decay
+        )
+        sigma_optimizer, inject_sigma = build_optax_optimizer(
+            optimizer, optimizer_kwargs_sigma, clip_grad_sigma, None, None, ema_decay
+        )
         self.optimizer = optax.multi_transform(
             {'mu': mu_optimizer, 'sigma': sigma_optimizer},
             param_labels={'mu': 'mu', 'sigma': 'sigma'}
         )
+        self.max_kl = max_kl_update if inject_mu and inject_sigma else None
     
     def __str__(self) -> str:
         return (f'[INFO] PGPE hyper-parameters:\n'
                 f'    method             ={self.__class__.__name__}\n'
-                f'    batch_size         ={self.batch_size}\n'
-                f'    steps_per_update   ={self.steps_per_update}\n'
                 f'    init_sigma         ={self.init_sigma}\n'
                 f'    sigma_range        ={self.sigma_range}\n'
                 f'    scale_reward       ={self.scale_reward}\n'
                 f'    min_reward_scale   ={self.min_reward_scale}\n'
                 f'    super_symmetric    ={self.super_symmetric}\n'
                 f'        accurate       ={self.super_symmetric_accurate}\n'
+                f'[INFO] PGPE optimizer hyper-parameters:\n'
                 f'    optimizer          ={self.optimizer_name}\n'
                 f'    optimizer_kwargs:\n'
                 f'        mu   ={self.optimizer_kwargs_mu}\n'
                 f'        sigma={self.optimizer_kwargs_sigma}\n'
+                f'    batch_size         ={self.batch_size}\n'
+                f'    steps_per_update   ={self.steps_per_update}\n'
+                f'    clip_grad:\n'
+                f'        mu   ={self.clip_grad_mu}\n'
+                f'        sigma={self.clip_grad_sigma}\n'
                 f'    start_entropy_coeff={self.start_entropy_coeff}\n'
                 f'    end_entropy_coeff  ={self.end_entropy_coeff}\n'
                 f'    max_kl_update      ={self.max_kl}\n'
@@ -2080,12 +2087,14 @@ def build_optax_optimizer(optimizer, optimizer_kwargs, clip_grad, noise_kwargs,
     # set optimizer
     try:
         optimizer = optax.inject_hyperparams(optimizer)(**optimizer_kwargs)
+        injected = True
     except Exception as _:
         print(termcolor.colored(
             '[WARN] Could not inject hyperparameters into JaxPlan optimizer: '
             'runtime modification of hyperparameters will be disabled.', 'yellow'
         ))
         optimizer = optimizer(**optimizer_kwargs)   
+        injected = False
     
     # apply optimizer chain of transformations
     pipeline = []  
@@ -2098,7 +2107,7 @@ def build_optax_optimizer(optimizer, optimizer_kwargs, clip_grad, noise_kwargs,
         pipeline.append(optax.scale_by_zoom_linesearch(**line_search_kwargs))
     if ema_decay is not None:
         pipeline.append(optax.ema(ema_decay))
-    return optax.chain(*pipeline)
+    return optax.chain(*pipeline), injected
 
 
 @jax.jit
@@ -2208,7 +2217,7 @@ class JaxBackpropPlanner:
         self.python_functions = python_functions
 
         # set optimizer
-        self.optimizer = build_optax_optimizer(
+        self.optimizer, _ = build_optax_optimizer(
             optimizer, optimizer_kwargs, clip_grad, noise_kwargs, line_search_kwargs, 
             ema_decay
         )
