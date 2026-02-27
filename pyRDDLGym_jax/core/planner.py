@@ -1577,6 +1577,7 @@ class PGPE(metaclass=ABCMeta):
     def __init__(self) -> None:
         self._initializer = None
         self._update = None
+        self._policy_params = None
 
     @property
     def initialize(self) -> Callable:
@@ -1586,6 +1587,10 @@ class PGPE(metaclass=ABCMeta):
     def update(self) -> Callable:
         return self._update
 
+    @property
+    def policy_params(self) -> Callable:
+        return self._policy_params
+    
     @abstractmethod
     def compile(self, loss_fn: Callable, projection: Callable, real_dtype: Type,
                 print_warnings: bool, parallel_updates: int=1) -> None:
@@ -1981,12 +1986,12 @@ class GaussianPGPE(PGPE):
                 body_fun=_jax_wrapped_pgpe_update_step, 
                 init_val=(pgpe_params, pgpe_opt_state, key, True)
             )
-            policy_params = pgpe_params['stats']['mu']
-            return pgpe_params, pgpe_opt_state, policy_params, converged
+            return pgpe_params, pgpe_opt_state, converged
 
         # for parallel policy update
         def _jax_wrapped_batched_pgpe_updates(key, pgpe_params, pgpe_opt_state, progress,
-                                              hparams, fls, nfls, model_params, critic_params):
+                                              policy_params, hparams, fls, nfls, 
+                                              model_params, critic_params):
             keys = random.split(key, num=parallel_updates)
             return jax.vmap(
                 _jax_wrapped_pgpe_update, 
@@ -1995,6 +2000,12 @@ class GaussianPGPE(PGPE):
               model_params, critic_params)
         
         self._update = jax.jit(_jax_wrapped_batched_pgpe_updates)
+
+        # extract policy parameters
+        def _jax_wrapped_pgpe_policy_params(pgpe_params):
+            return pgpe_params['stats']['mu']
+        
+        self._policy_params = jax.jit(_jax_wrapped_pgpe_policy_params)
 
 
 # ***********************************************************************
@@ -2603,15 +2614,15 @@ class JaxBackpropPlanner:
 
         # currently implements a hard replacement where the jaxplan parameter
         # is replaced by the PGPE parameter if the latter is an improvement
-        def _jax_wrapped_batched_pgpe_merge(pgpe_mask, pgpe_param, policy_params, 
+        def _jax_wrapped_batched_pgpe_merge(pgpe_mask, pgpe_policy_params, policy_params, 
                                             pgpe_loss, test_loss, 
                                             pgpe_loss_smooth, test_loss_smooth, 
                                             pgpe_converged, converged):
             mask_tree = jax.tree_util.tree_map(
                 lambda leaf: pgpe_mask[(...,) + (jnp.newaxis,) * (jnp.ndim(leaf) - 1)],
-                pgpe_param)
+                pgpe_policy_params)
             policy_params = jax.tree_util.tree_map(
-                jnp.where, mask_tree, pgpe_param, policy_params)
+                jnp.where, mask_tree, pgpe_policy_params, policy_params)
             test_loss = jnp.where(pgpe_mask, pgpe_loss, test_loss)
             test_loss_smooth = jnp.where(pgpe_mask, pgpe_loss_smooth, test_loss_smooth)
             converged = jnp.where(pgpe_mask, pgpe_converged, converged)
@@ -3034,14 +3045,16 @@ class JaxBackpropPlanner:
 
                 # pgpe update of the plan
                 key, subkey = random.split(key)
-                pgpe_params, pgpe_opt_state, pgpe_param, pgpe_converged = self.pgpe.update(
+                pgpe_params, pgpe_opt_state, pgpe_converged = self.pgpe.update(
                     subkey, pgpe_params, pgpe_opt_state, progress_percent, 
-                    policy_hyperparams, *test_subs, model_params_test, critic_params
+                    policy_params, policy_hyperparams, *test_subs, model_params_test, 
+                    critic_params
                 )
+                pgpe_policy_params = self.pgpe.policy_params(pgpe_params)
                 
                 # evaluate
                 pgpe_loss, _ = self.test_loss(
-                    subkey, pgpe_param, policy_hyperparams, *test_subs, 
+                    subkey, pgpe_policy_params, policy_hyperparams, *test_subs, 
                     model_params_test, critic_params
                 )
                 pgpe_loss = np.asarray(pgpe_loss)
@@ -3052,7 +3065,7 @@ class JaxBackpropPlanner:
                 pgpe_mask = (pgpe_loss_smooth < pbest_loss) | ~np.isfinite(train_loss)
                 if np.any(pgpe_mask):
                     policy_params, test_loss, test_loss_smooth, converged = self.merge_pgpe(
-                        pgpe_mask, pgpe_param, policy_params, 
+                        pgpe_mask, pgpe_policy_params, policy_params, 
                         pgpe_loss, test_loss, pgpe_loss_smooth, test_loss_smooth, 
                         pgpe_converged, converged
                     )
