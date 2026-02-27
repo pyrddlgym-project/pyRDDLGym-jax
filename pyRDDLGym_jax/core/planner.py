@@ -1463,107 +1463,6 @@ class JaxRDDLPolicy(JaxPlan):
     
     
 # ***********************************************************************
-# SUPPORTING FUNCTIONS
-# 
-# - smoothed mean calculation
-# - planner status
-# - stopping criteria
-#
-# ***********************************************************************
-
-def walk_params(tree, prefix=''):
-    if isinstance(tree, dict):
-        for k, v in tree.items():
-            yield from walk_params(v, f"{prefix}/{k}" if prefix else k)
-    elif isinstance(tree, (list, tuple)):
-        for i, v in enumerate(tree):
-            yield from walk_params(v, f"{prefix}/{i}")
-    else:
-        yield prefix, tree
-
-
-class RollingMean:
-    '''Maintains the rolling mean of a stream of real-valued observations.'''
-    
-    def __init__(self, window_size: int) -> None:
-        self._window_size = window_size
-        self._memory = deque(maxlen=window_size)
-        self._total = 0
-    
-    def update(self, x: Union[float, np.ndarray]) -> Union[float, np.ndarray]:
-        memory = self._memory
-        self._total = self._total + x
-        if len(memory) == self._window_size:
-            self._total = self._total - memory.popleft()
-        memory.append(x)
-        return self._total / len(memory)
-
-
-class JaxPlannerStatus(Enum):
-    '''Represents the status of a policy update from the JAX planner, 
-    including whether the update resulted in nan gradient, 
-    whether progress was made, budget was reached, or other information that
-    can be used to monitor and act based on the planner's progress.'''
-    
-    NORMAL = 0
-    STOPPING_RULE_REACHED = 1
-    NO_PROGRESS = 2
-    PRECONDITION_POSSIBLY_UNSATISFIED = 3
-    INVALID_GRADIENT = 4
-    TIME_BUDGET_REACHED = 5
-    ITER_BUDGET_REACHED = 6
-    
-    def is_terminal(self) -> bool:
-        return self.value == 1 or self.value >= 4
-    
-    def get_type(self) -> str:
-        if self.value in {5, 6}:
-            return 'info'
-        elif self.value in {0, 1}:
-            return 'success'
-        elif self.value in {2, 3}:
-            return 'warning'
-        elif self.value == 4:
-            return 'error'
-        else:
-            raise Exception(f'Invalid value {self.value}.')
-
-
-class JaxPlannerStoppingRule(metaclass=ABCMeta):
-    '''The base class of all planner stopping rules.'''
-    
-    @abstractmethod
-    def reset(self) -> None:
-        pass
-    
-    @abstractmethod
-    def monitor(self, callback: Dict[str, Any]) -> bool:
-        pass
-    
-
-class NoImprovementStoppingRule(JaxPlannerStoppingRule):
-    '''Stopping rule based on no improvement for a fixed number of iterations.'''
-    
-    def __init__(self, patience: int) -> None:
-        self.patience = patience
-    
-    def reset(self) -> None:
-        self.callback = None
-        self.iters_since_last_update = 0
-        
-    def monitor(self, callback: Dict[str, Any]) -> bool:
-        if self.callback is None or callback['best_return'] > self.callback['best_return']:
-            self.callback = callback
-            self.iters_since_last_update = 0
-        else:
-            self.iters_since_last_update += 1
-        return self.iters_since_last_update >= self.patience
-    
-    def __str__(self) -> str:
-        return f'No improvement for {self.patience} iterations'
-        
-
-# ***********************************************************************
 # PARAMETER EXPLORING POLICY GRADIENTS (PGPE)
 # 
 # - simple Gaussian PGPE
@@ -2084,6 +1983,107 @@ UTILITY_LOOKUP = {
     'cvar': cvar_utility
 }
 
+
+# ***********************************************************************
+# SUPPORTING FUNCTIONS
+# 
+# - smoothed mean calculation
+# - planner status
+# - stopping criteria
+#
+# ***********************************************************************
+
+def walk_params(tree, prefix=''):
+    if isinstance(tree, dict):
+        for k, v in tree.items():
+            yield from walk_params(v, f"{prefix}/{k}" if prefix else k)
+    elif isinstance(tree, (list, tuple)):
+        for i, v in enumerate(tree):
+            yield from walk_params(v, f"{prefix}/{i}")
+    else:
+        yield prefix, tree
+
+
+class RollingMean:
+    '''Maintains the rolling mean of a stream of real-valued observations.'''
+    
+    def __init__(self, window_size: int) -> None:
+        self._window_size = window_size
+        self._memory = deque(maxlen=window_size)
+        self._total = 0
+    
+    def update(self, x: Union[float, np.ndarray]) -> Union[float, np.ndarray]:
+        memory = self._memory
+        self._total = self._total + x
+        if len(memory) == self._window_size:
+            self._total = self._total - memory.popleft()
+        memory.append(x)
+        return self._total / len(memory)
+
+
+class JaxPlannerStatus(Enum):
+    '''Represents the status of a policy update from the JAX planner, 
+    including whether the update resulted in nan gradient, 
+    whether progress was made, budget was reached, or other information that
+    can be used to monitor and act based on the planner's progress.'''
+    
+    NORMAL = 0
+    STOPPING_RULE_REACHED = 1
+    NO_PROGRESS = 2
+    PRECONDITION_POSSIBLY_UNSATISFIED = 3
+    INVALID_GRADIENT = 4
+    TIME_BUDGET_REACHED = 5
+    ITER_BUDGET_REACHED = 6
+    
+    def is_terminal(self) -> bool:
+        return self.value == 1 or self.value >= 4
+    
+    def get_type(self) -> str:
+        if self.value in {5, 6}:
+            return 'info'
+        elif self.value in {0, 1}:
+            return 'success'
+        elif self.value in {2, 3}:
+            return 'warning'
+        elif self.value == 4:
+            return 'error'
+        else:
+            raise Exception(f'Invalid value {self.value}.')
+
+
+class JaxPlannerStoppingRule(metaclass=ABCMeta):
+    '''The base class of all planner stopping rules.'''
+    
+    @abstractmethod
+    def reset(self) -> None:
+        pass
+    
+    @abstractmethod
+    def monitor(self, callback: Dict[str, Any]) -> bool:
+        pass
+    
+
+class NoImprovementStoppingRule(JaxPlannerStoppingRule):
+    '''Stopping rule based on no improvement for a fixed number of iterations.'''
+    
+    def __init__(self, patience: int) -> None:
+        self.patience = patience
+    
+    def reset(self) -> None:
+        self.callback = None
+        self.iters_since_last_update = 0
+        
+    def monitor(self, callback: Dict[str, Any]) -> bool:
+        if self.callback is None or callback['best_return'] > self.callback['best_return']:
+            self.callback = callback
+            self.iters_since_last_update = 0
+        else:
+            self.iters_since_last_update += 1
+        return self.iters_since_last_update >= self.patience
+    
+    def __str__(self) -> str:
+        return f'No improvement for {self.patience} iterations'
+        
 
 # ***********************************************************************
 # ALL VERSIONS OF JAX PLANNER
