@@ -1507,6 +1507,7 @@ class GaussianPGPE(PGPE):
                  min_reward_scale: float=1e-5,
                  super_symmetric: bool=True,
                  super_symmetric_accurate: bool=True,
+                 project_samples: bool=False,
                  optimizer: Callable[..., optax.GradientTransformation]=optax.adam,
                  optimizer_kwargs_mu: Optional[Kwargs]=None,
                  optimizer_kwargs_sigma: Optional[Kwargs]=None,
@@ -1528,6 +1529,8 @@ class GaussianPGPE(PGPE):
         :param super_symmetric: whether to use super-symmetric sampling as in the paper
         :param super_symmetric_accurate: whether to use the accurate formula for super-
         symmetric sampling or the simplified but biased formula
+        :param project_samples: whether to use projected gradient on the sampled
+        plan parameters (possibly introduces bias into the update rule)
         :param optimizer: a factory for an optax SGD algorithm
         :param optimizer_kwargs_mu: a dictionary of parameters to pass to the SGD
         factory for the mean optimizer
@@ -1552,6 +1555,7 @@ class GaussianPGPE(PGPE):
         self.super_symmetric_accurate = super_symmetric_accurate
         self.clip_grad_mu = clip_grad_mu
         self.clip_grad_sigma = clip_grad_sigma
+        self.project_samples = project_samples
 
         # entropy regularization penalty is decayed exponentially between these values
         self.start_entropy_coeff = start_entropy_coeff
@@ -1586,6 +1590,7 @@ class GaussianPGPE(PGPE):
                 f'    min_reward_scale   ={self.min_reward_scale}\n'
                 f'    super_symmetric    ={self.super_symmetric}\n'
                 f'        accurate       ={self.super_symmetric_accurate}\n'
+                f'    project_samples    ={self.project_samples}\n'
                 f'[INFO] PGPE optimizer hyper-parameters:\n'
                 f'    optimizer          ={self.optimizer_name}\n'
                 f'    optimizer_kwargs:\n'
@@ -1615,6 +1620,7 @@ class GaussianPGPE(PGPE):
         batch_size = self.batch_size
         optimizer = self.optimizer
         max_kl = self.max_kl
+        project_samples = self.project_samples
         
         # entropy regularization penalty is decayed exponentially by elapsed budget
         # this uses the optimizer progress (as percentage) to move the decay
@@ -1680,7 +1686,7 @@ class GaussianPGPE(PGPE):
 
         # implements baseline-free super-symmetric sampling to generate 4 trajectories
         # this type of sampling removes the need for the baseline completely
-        def _jax_wrapped_sample_params(key, mu, sigma):
+        def _jax_wrapped_sample_params(key, mu, sigma, hparams):
 
             # this samples the basic two policy parameters from Gaussian(mean, sigma)
             # using the control variates
@@ -1690,7 +1696,10 @@ class GaussianPGPE(PGPE):
             epsilon = jax.tree_util.tree_map(_jax_wrapped_mu_noise, keys_pytree, sigma)
             p1 = jax.tree_util.tree_map(jnp.add, mu, epsilon)
             p2 = jax.tree_util.tree_map(jnp.subtract, mu, epsilon)
-            
+            if project_samples:
+                p1, _ = projection(p1, hparams)
+                p2, _ = projection(p2, hparams)
+
             # sumer-symmetric sampling removes the need for a baseline but requires
             # two additional policies to be sampled
             if super_symmetric:
@@ -1698,6 +1707,9 @@ class GaussianPGPE(PGPE):
                     _jax_wrapped_epsilon_star, sigma, epsilon)     
                 p3 = jax.tree_util.tree_map(jnp.add, mu, epsilon_star)
                 p4 = jax.tree_util.tree_map(jnp.subtract, mu, epsilon_star)
+                if project_samples:
+                    p3, _ = projection(p3, hparams)
+                    p4, _ = projection(p4, hparams)
             else:
                 epsilon_star, p3, p4 = epsilon, p1, p2
             return p1, p2, p3, p4, epsilon, epsilon_star
@@ -1763,7 +1775,7 @@ class GaussianPGPE(PGPE):
             # basic pgpe sampling with return estimation
             key, subkey = random.split(key)
             p1, p2, p3, p4, epsilon, epsilon_star = _jax_wrapped_sample_params(
-                key, mu, sigma)
+                key, mu, sigma, hparams)
             r1 = -loss_fn(subkey, p1, hparams, fls, nfls, model_params, critic_params)[0]
             r2 = -loss_fn(subkey, p2, hparams, fls, nfls, model_params, critic_params)[0]
 
