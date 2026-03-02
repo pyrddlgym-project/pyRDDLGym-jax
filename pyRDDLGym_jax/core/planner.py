@@ -1369,7 +1369,7 @@ class JaxRDDLPolicy(JaxPlan):
 
         # TODO: cannot currently compile policies with internal state-fluents
         for var in compiled.policy_cpfs:
-            if var not in rddl.action_fluents:
+            if var in rddl.policy.prev_state:
                 raise RDDLNotImplementedError(
                     f'Jax RDDL policies cannot currently be compiled with '
                     f'internal state-fluents: found <{var}>.')
