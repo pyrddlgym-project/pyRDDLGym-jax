@@ -1367,11 +1367,18 @@ class JaxRDDLPolicy(JaxPlan):
         if rddl.policy is None:
             raise ValueError('RDDL domain does not have a valid policy block.')
 
+        # TODO: cannot currently compile policies with internal state-fluents
+        for var in compiled.policy_cpfs:
+            if var not in rddl.action_fluents:
+                raise RDDLNotImplementedError(
+                    f'Jax RDDL policies cannot currently be compiled with '
+                    f'internal state-fluents: found <{var}>.')
+
         # trainable parameters are the non-fluents in the policy
         all_nf_deps = set(rddl.policy.non_fluents.keys())
         print(termcolor.colored(
-              f'[INFO] JaxPlan will use the policy defined in the policy block: '
-              f'policy non-fluents {all_nf_deps} will be optimized.', 'dark_grey'
+            f'[INFO] JaxPlan will use the policy defined in the policy block: '
+            f'policy non-fluents {all_nf_deps} will be optimized.', 'dark_grey'
         ))
 
         # functions that evaluate the policy come directly from the compiled policy block
@@ -1382,47 +1389,49 @@ class JaxRDDLPolicy(JaxPlan):
         def _jax_wrapped_rddl_predict_train(key, params, hyperparams, step, fls, fls_hist, nfls):
             nfls = nfls.copy()
             nfls.update(params)
-            actions = train_policy_fn(key, 0, fls, nfls=nfls, params=hyperparams)[0]
-            new_actions = {}
-            for (var, action) in actions.items():
-                if not shapes[var]:
-                    action = jnp.squeeze(action)
-                action = jnp.clip(action, *bounds[var])
-                action = jnp.asarray(action, dtype=compiled.REAL)
-                new_actions[var] = action
-            return new_actions
+            policy_fls = train_policy_fn(key, 0, fls, nfls=nfls, params=hyperparams)[0]
+            new_fls = {}
+            for (var, value) in policy_fls.items():
+                if var in rddl.action_fluents:
+                    if not shapes[var]:
+                        value = jnp.squeeze(value)
+                    value = jnp.clip(value, *bounds[var])
+                    value = jnp.asarray(value, dtype=compiled.REAL)
+                new_fls[var] = value
+            return new_fls
         self.train_policy = _jax_wrapped_rddl_predict_train
 
-        def _jax_wrapped_rddl_predict_test(key, params, hyperparams, step, fls, fls_hist, nfls):
-
-            # evaluate the policy block with correct non-fluent types
+        def _jax_wrapped_rddl_cast_non_fluents(params, nfls):
             nfls = nfls.copy()
-            for (var, nfl) in params.items():
+            for (var, value) in params.items():
                 prange = rddl.policy.variable_ranges[var]
                 if prange == 'real':
-                    nfls[var] = nfl
+                    nfls[var] = value
                 elif prange == 'bool':
-                    nfls[var] = nfl > 0.5
+                    nfls[var] = value > 0.5
                 else:
-                    nfls[var] = jnp.asarray(jnp.round(nfl), dtype=test_compiled.INT)
-            actions = test_policy_fn(key, 0, fls, nfls=nfls, params=hyperparams)[0]
+                    nfls[var] = jnp.asarray(jnp.round(value), dtype=test_compiled.INT)
+            return nfls
 
-            # convert the output of the block to the correct type
-            new_actions = {}
-            for (var, action) in actions.items():
-                if not shapes[var]:
-                    action = jnp.squeeze(action)
-                prange = rddl.variable_ranges[var]
-                if prange == 'bool':
-                    action = action > 0.5
-                elif prange == 'real':
-                    action = jnp.clip(action, *bounds[var])
-                    action = jnp.asarray(action, dtype=test_compiled.REAL)
-                elif prange == 'int' or prange in rddl.enum_types:
-                    action = jnp.clip(action, *bounds[var])
-                    action = jnp.asarray(jnp.round(action), dtype=test_compiled.INT)
-                new_actions[var] = action
-            return new_actions
+        def _jax_wrapped_rddl_predict_test(key, params, hyperparams, step, fls, fls_hist, nfls):
+            nfls = _jax_wrapped_rddl_cast_non_fluents(params, nfls)
+            policy_fls = test_policy_fn(key, 0, fls, nfls=nfls, params=hyperparams)[0]
+            new_fls = {}
+            for (var, value) in policy_fls.items():
+                if var in rddl.action_fluents:
+                    if not shapes[var]:
+                        value = jnp.squeeze(value)
+                    prange = rddl.variable_ranges[var]
+                    if prange == 'bool':
+                        value = value > 0.5
+                    elif prange == 'real':
+                        value = jnp.clip(value, *bounds[var])
+                        value = jnp.asarray(value, dtype=test_compiled.REAL)
+                    elif prange == 'int' or prange in rddl.enum_types:
+                        value = jnp.clip(value, *bounds[var])
+                        value = jnp.asarray(jnp.round(value), dtype=test_compiled.INT)
+                new_fls[var] = value
+            return new_fls
         self.test_policy = _jax_wrapped_rddl_predict_test
         
         # ***********************************************************************
