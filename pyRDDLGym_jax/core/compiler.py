@@ -371,7 +371,8 @@ class JaxRDDLCompiler:
                 errors = errors | err  
             for (state, next_state) in next_states.items():
                 new_fls[state] = new_fls[next_state]
-            new_fls = {var: new_fls[var] for var in cpfs}
+            new_fls = {var: new_fls[var] for var in cpfs
+                       if var in self.rddl.action_fluents}
             return new_fls, key, errors, params
         return _jax_wrapped_policy_cpfs
     
