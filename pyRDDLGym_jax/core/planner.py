@@ -2442,7 +2442,7 @@ class JaxBackpropPlanner:
         self._jax_compile_pgpe()
 
         # required by get_action()
-        self.init_nfs = self._batched_init_subs(self.test_compiled.init_values)[1][1]
+        _, (_, self.init_nfs) = self._batched_init_subs(self.test_compiled.init_values)
     
     def _jax_critic(self):
         critic_fn = self.critic_fn
