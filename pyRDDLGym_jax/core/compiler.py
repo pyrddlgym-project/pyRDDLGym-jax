@@ -363,16 +363,16 @@ class JaxRDDLCompiler:
     
     def _jax_policy(self):
         cpfs = self.policy_cpfs
+        next_states = {} if self.rddl.policy is None else self.rddl.policy.next_state
         def _jax_wrapped_policy_cpfs(key, errors, fls, nfls, params):
             new_fls = fls.copy()
-            actions = {}
             for (name, cpf) in cpfs.items():
-                sample, key, err, params = cpf(new_fls, nfls, params, key)
-                new_fls[name] = sample
-                if name in self.rddl.action_fluents:
-                    actions[name] = sample
+                new_fls[name], key, err, params = cpf(new_fls, nfls, params, key)
                 errors = errors | err  
-            return actions, key, errors, params
+            for (state, next_state) in next_states.items():
+                new_fls[state] = new_fls[next_state]
+            new_fls = {var: new_fls[var] for var in cpfs}
+            return new_fls, key, errors, params
         return _jax_wrapped_policy_cpfs
     
     def compile_transition(self, check_constraints: bool=False,
