@@ -2176,7 +2176,9 @@ class JaxBackpropPlanner:
                  dashboard: Optional[Any]=None,
                  dashboard_viz: Optional[Any]=None,
                  preprocessor: Optional[Preprocessor]=None,
-                 python_functions: Optional[Dict[str, Callable]]=None) -> None:
+                 python_functions: Optional[Dict[str, Callable]]=None,
+                 cache_full_train_rollouts: bool=False,
+                 cache_full_test_rollouts: bool=False) -> None:
         '''Creates a new gradient-based algorithm for optimizing action sequences
         (plan) in the given RDDL. Some operations will be converted to their
         differentiable counterparts; the specific operations can be customized
@@ -2218,6 +2220,8 @@ class JaxBackpropPlanner:
         to pass to the dashboard to visualize the policy
         :param preprocessor: optional preprocessor for state inputs to plan
         :param python_functions: dictionary of external Python functions to call from RDDL
+        :param cache_full_train_rollouts: whether to cache full training rollouts in log
+        :param cache_full_test_rollouts: whether to cache full testing rollouts to log
         '''
         self.rddl = rddl
         self.plan = plan
@@ -2281,6 +2285,23 @@ class JaxBackpropPlanner:
         self.dashboard = dashboard
         self.dashboard_viz = dashboard_viz
         
+        # caching flags
+        if (not cache_full_train_rollouts) \
+        and (self.preprocessor is not None or self.dashboard is not None):
+            cache_full_train_rollouts = True
+            print(termcolor.colored(
+                '[INFO] cache_full_train_rollouts will be set to True '
+                'because state processor or dashboard requested. ', 'dark_grey'
+            ))
+        if (not cache_full_test_rollouts) and self.dashboard is not None:
+            cache_full_test_rollouts = True
+            print(termcolor.colored(
+                '[INFO] cache_full_test_rollouts will be set to True '
+                'because dashboard requested. ', 'dark_grey'
+            ))
+        self.cache_full_train_rollouts = cache_full_train_rollouts
+        self.cache_full_test_rollouts = cache_full_test_rollouts
+
         self._jax_compile_graph()
     
     @staticmethod
@@ -2397,14 +2418,14 @@ class JaxBackpropPlanner:
             n_steps=self.horizon,
             n_batch=self.batch_size_train,
             history_dependent=self.plan.history_dependent,
-            cache_path_info=self.preprocessor is not None or self.dashboard is not None
+            cache_path_info=self.cache_full_train_rollouts
         )
         test_rollouts = self.test_compiled.compile_rollouts(
             policy=self.plan.test_policy,
             n_steps=self.horizon,
             n_batch=self.batch_size_test,
             history_dependent=self.plan.history_dependent,
-            cache_path_info=self.dashboard is not None
+            cache_path_info=self.cache_full_test_rollouts
         )
         self.test_rollouts = jax.jit(test_rollouts)
 
