@@ -1367,18 +1367,13 @@ class JaxRDDLPolicy(JaxPlan):
         if rddl.policy is None:
             raise ValueError('RDDL domain does not have a valid policy block.')
 
-        # TODO: cannot currently compile policies with internal state-fluents
-        for var in compiled.policy_cpfs:
-            if var in rddl.policy.prev_state:
-                raise RDDLNotImplementedError(
-                    f'Jax RDDL policies cannot currently be compiled with '
-                    f'internal state-fluents: found <{var}>.')
-
         # trainable parameters are the non-fluents in the policy
-        all_nf_deps = set(rddl.policy.non_fluents.keys())
+        param_fluent_vars = set(rddl.policy.param_fluents.keys())
+        if not param_fluent_vars:
+            raise ValueError('RDDL policy has no param-fluent(s) to optimize.')
         print(termcolor.colored(
             f'[INFO] JaxPlan will use the policy defined in the policy block: '
-            f'policy non-fluents {all_nf_deps} will be optimized.', 'dark_grey'
+            f'param-fluents {param_fluent_vars} will be optimized.', 'dark_grey'
         ))
 
         # functions that evaluate the policy come directly from the compiled policy block
@@ -1401,7 +1396,7 @@ class JaxRDDLPolicy(JaxPlan):
             return new_fls
         self.train_policy = _jax_wrapped_rddl_predict_train
 
-        def _jax_wrapped_rddl_cast_non_fluents(params, nfls):
+        def _jax_wrapped_rddl_cast_param_fluents(params, nfls):
             nfls = nfls.copy()
             for (var, value) in params.items():
                 prange = rddl.policy.variable_ranges[var]
@@ -1414,7 +1409,7 @@ class JaxRDDLPolicy(JaxPlan):
             return nfls
 
         def _jax_wrapped_rddl_predict_test(key, params, hyperparams, step, fls, fls_hist, nfls):
-            nfls = _jax_wrapped_rddl_cast_non_fluents(params, nfls)
+            nfls = _jax_wrapped_rddl_cast_param_fluents(params, nfls)
             policy_fls = test_policy_fn(key, 0, fls, nfls=nfls, params=hyperparams)[0]
             new_fls = {}
             for (var, value) in policy_fls.items():
@@ -1461,7 +1456,7 @@ class JaxRDDLPolicy(JaxPlan):
             hyperparams = compiled.model_aux['params']
             policy_params = {
                 name: jnp.asarray(compiled.init_policy_values[name], dtype=compiled.REAL) 
-                for name in all_nf_deps
+                for name in param_fluent_vars
             }
             return policy_params, hyperparams
         self.initializer = _jax_wrapped_rddl_init
@@ -2462,8 +2457,16 @@ class JaxBackpropPlanner:
         self._jax_compile_test_loss()
         self._jax_compile_pgpe()
 
-        # required by get_action()
-        _, (_, self.init_nfs) = self._batched_init_subs(self.test_compiled.init_values)
+        # compile all initial values that must be carried forward through the graph
+        self.init_test_policy_subs = {
+            var: value
+            for (var, value) in self.test_compiled.init_policy_values.items()
+            if var not in self.rddl.policy.param_fluents
+        }
+        self.init_test_subs = {
+            **self.test_compiled.init_values, **self.init_test_policy_subs
+        }
+        _, (_, self.init_nfs) = self._batched_init_subs(self.init_test_subs)
     
     def _jax_critic(self):
         critic_fn = self.critic_fn
@@ -2670,7 +2673,15 @@ class JaxBackpropPlanner:
             converged = jnp.where(pgpe_mask, pgpe_converged, converged)
             return policy_params, test_loss, test_loss_smooth, converged
         return jax.jit(_jax_wrapped_batched_pgpe_merge)
-
+    
+    def variable_range_from_rddl_or_policy(self, var, default=None):
+        rddl = self.rddl
+        return rddl.variable_ranges.get(
+            var, 
+            (default if rddl.policy is None 
+             else rddl.policy.variable_ranges.get(var, default))
+        )
+    
     def _batched_init_subs(self, init_values): 
         rddl = self.rddl
         n_train, n_test = self.batch_size_train, self.batch_size_test
@@ -2679,12 +2690,10 @@ class JaxBackpropPlanner:
         for (name, value) in init_values.items():
 
             # get the initial fluent values and check validity
-            init_value = self.test_compiled.init_values.get(name, None)
+            init_value = self.init_test_subs.get(name, None)
             if init_value is None:
                 raise RDDLUndefinedVariableError(
-                    f'Variable <{name}> in init_values argument is not a '
-                    f'valid p-variable, must be one of '
-                    f'{set(self.test_compiled.init_values.keys())}.'
+                    f'Variable <{name}> in init_values argument is not a valid p-variable.'
                 )         
             
             # for enum types need to convert the string values to integer indices
@@ -2692,11 +2701,13 @@ class JaxBackpropPlanner:
                 value = init_value
             value = np.reshape(value, np.shape(init_value))
             if value.dtype.type is np.str_:
-                value = rddl.object_string_to_index_array(rddl.variable_ranges[name], value)
+                prange = self.variable_range_from_rddl_or_policy(name)
+                value = rddl.object_string_to_index_array(prange, value)
             
             # train and test fluents have a batch dimension added, non-fluents do not
             # train fluents are also converted to float
-            if name not in rddl.non_fluents:
+            if name not in rddl.non_fluents \
+            and (rddl.policy is None or name not in rddl.policy.non_fluents):
                 train_value = np.repeat(value[np.newaxis, ...], repeats=n_train, axis=0)
                 init_train_fls[name] = np.asarray(train_value, dtype=self.compiled.REAL)
                 init_test_fls[name] = np.repeat(value[np.newaxis, ...], repeats=n_test, axis=0)
@@ -2711,11 +2722,26 @@ class JaxBackpropPlanner:
                 init_test = init_test_nfls if name in rddl.non_fluents else init_test_fls
                 if np.result_type(init_test[name]) != required_type:
                     init_test[name] = np.asarray(init_test[name], dtype=required_type)
-        
+            
+            # do the same for the policy p-variables
+            if rddl.policy is not None and name in rddl.policy.variable_ranges:
+                required_type = RDDLValueInitializer.NUMPY_TYPES.get(
+                    rddl.policy.variable_ranges[name], RDDLValueInitializer.INT)
+                init_test = init_test_nfls if name in rddl.policy.non_fluents else init_test_fls
+                if np.result_type(init_test[name]) != required_type:
+                    init_test[name] = np.asarray(init_test[name], dtype=required_type)
+                
         # make sure next-state fluents are also set
         for (state, next_state) in rddl.next_state.items():
             init_train_fls[next_state] = init_train_fls[state]
             init_test_fls[next_state] = init_test_fls[state]
+        
+        # do the same for the policy
+        if rddl.policy is not None:
+            for (state, next_state) in rddl.policy.next_state.items():
+                init_train_fls[next_state] = init_train_fls[state]
+                init_test_fls[next_state] = init_test_fls[state]
+
         return (init_train_fls, init_train_nfls), (init_test_fls, init_test_nfls)
     
     def _broadcast_pytree(self, pytree):
@@ -2764,7 +2790,7 @@ class JaxBackpropPlanner:
             key = random.PRNGKey(round(time.time() * 1000))
             
         # initialize the initial fluents, model parameters, policy hyper-params
-        (fls, nfls), _ = self._batched_init_subs(self.test_compiled.init_values)
+        (fls, nfls), _ = self._batched_init_subs(self.init_test_subs)
         model_params = self.compiled.model_aux['params']
 
         # initialize the policy parameters
@@ -2957,12 +2983,12 @@ class JaxBackpropPlanner:
         
         # compute a batched version of the initial values
         if subs is None:
-            subs = self.test_compiled.init_values
+            subs = self.init_test_subs
         else:
             # if some p-variables are not provided, add their default values
             subs = subs.copy()
             added_pvars_to_subs = []
-            for (var, value) in self.test_compiled.init_values.items():
+            for (var, value) in self.init_test_subs.items():
                 if var not in subs:
                     subs[var] = value
                     added_pvars_to_subs.append(var)
@@ -3346,7 +3372,8 @@ class JaxBackpropPlanner:
                    step: int,
                    state: Dict[str, Any],
                    policy_hyperparams: Optional[Dict[str, Any]]=None, 
-                   history: Optional[Dict[str, Any]]=None) -> Dict[str, Any]:
+                   history: Optional[Dict[str, Any]]=None,
+                   copy_state: bool=True) -> Dict[str, Any]:
         '''Returns an action dictionary from the policy or plan with the given parameters.
         
         :param key: the JAX PRNG key
@@ -3356,8 +3383,10 @@ class JaxBackpropPlanner:
         :param policy_hyperparams: hyper-parameters for the policy/plan, such as
         weights for sigmoid wrapping boolean actions (optional)
         :param history: history of past fluents for history-dependent policy (optional)
+        :param copy_state: whether to copy state before processing
         '''
-        state = state.copy()
+        if copy_state:
+            state = state.copy()
 
         if history is None: 
             if self.plan.history_dependent:
@@ -3383,7 +3412,7 @@ class JaxBackpropPlanner:
                     state[var] = self.test_compiled.init_values[var]
                 else:
                     if dtype.type is np.str_:
-                        prange = self.rddl.variable_ranges[var]
+                        prange = self.variable_range_from_rddl_or_policy(var)
                         state[var] = self.rddl.object_string_to_index_array(prange, state[var])     
                     else:               
                         raise ValueError(
@@ -3391,11 +3420,11 @@ class JaxBackpropPlanner:
                             f'non-numeric of type {dtype}.'
                         )
             
-        # cast device arrays to numpy
-        actions = self.test_policy(key, params, policy_hyperparams, step, state, 
-                                   history, self.init_nfs)
-        actions = jax.tree_util.tree_map(np.asarray, actions)
-        return actions      
+        # get test fluents and cast to numpy
+        policy_fls = self.test_policy(key, params, policy_hyperparams, step, state, 
+                                      history, self.init_nfs)
+        policy_fls = jax.tree_util.tree_map(np.asarray, policy_fls)
+        return policy_fls      
        
 
 # ***********************************************************************
@@ -3405,6 +3434,16 @@ class JaxBackpropPlanner:
 # - online controller is the replanning mode
 #
 # ***********************************************************************
+
+
+def _split_policy_actions(rddl, policy_fls):
+    actions, fls = {}, {}
+    for (var, value) in policy_fls.items():
+        if rddl.variable_types.get(var, '') == 'action-fluent':
+            actions[var] = value
+        elif rddl.policy is not None and var in rddl.policy.variable_types:
+            fls[var] = value
+    return actions, fls
 
 
 class JaxOfflineController(BaseAgent):
@@ -3469,14 +3508,17 @@ class JaxOfflineController(BaseAgent):
         self.params = params  
         
     def sample_action(self, state: Dict[str, Any]) -> Dict[str, Any]:
+        state = {**state, **self.policy_state}
         self.key, subkey = random.split(self.key)
-        actions = self.planner.get_action(
-            subkey, self.params, self.step, state, self.eval_hyperparams)
+        policy_fls = self.planner.get_action(
+            subkey, self.params, self.step, state, self.eval_hyperparams, copy_state=False)
+        actions, self.policy_state = _split_policy_actions(self.planner.rddl, policy_fls)
         self.step += 1
         return actions
         
     def reset(self) -> None:
         self.step = 0
+        self.policy_state = self.planner.init_test_policy_subs
 
         # train the policy if required to reset at the start of every episode
         if self.train_on_reset and not self.params_given:
@@ -3524,6 +3566,7 @@ class JaxOnlineController(BaseAgent):
         self.reset()
      
     def sample_action(self, state: Dict[str, Any]) -> Dict[str, Any]:
+        state = {**state, **self.policy_state}
 
         # we train the policy from the current state every time we step()
         planner = self.planner
@@ -3562,8 +3605,10 @@ class JaxOnlineController(BaseAgent):
 
         # get the action from the parameters for the current state
         self.key, subkey = random.split(self.key)
-        actions = planner.get_action(subkey, params, 0, state, self.eval_hyperparams)
-
+        policy_fls = planner.get_action(
+            subkey, params, 0, state, self.eval_hyperparams, copy_state=False)
+        actions, self.policy_state = _split_policy_actions(self.planner.rddl, policy_fls)
+        
         # apply warm start for the next epoch
         if self.warm_start:
             self.guess = planner.plan.guess_next_epoch(params)
@@ -3574,4 +3619,5 @@ class JaxOnlineController(BaseAgent):
         self.guess = None
         self.hyperparams = None
         self.callback = None
+        self.policy_state = self.planner.init_test_policy_subs
     
