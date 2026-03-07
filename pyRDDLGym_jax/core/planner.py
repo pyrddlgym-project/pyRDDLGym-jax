@@ -1368,10 +1368,12 @@ class JaxRDDLPolicy(JaxPlan):
             raise ValueError('RDDL domain does not have a valid policy block.')
 
         # trainable parameters are the non-fluents in the policy
-        all_nf_deps = set(rddl.policy.non_fluents.keys())
+        param_fluent_vars = set(rddl.policy.param_fluents.keys())
+        if not param_fluent_vars:
+            raise ValueError('RDDL policy has no param-fluent(s) to optimize.')
         print(termcolor.colored(
             f'[INFO] JaxPlan will use the policy defined in the policy block: '
-            f'policy non-fluents {all_nf_deps} will be optimized.', 'dark_grey'
+            f'param-fluents {param_fluent_vars} will be optimized.', 'dark_grey'
         ))
 
         # functions that evaluate the policy come directly from the compiled policy block
@@ -1394,7 +1396,7 @@ class JaxRDDLPolicy(JaxPlan):
             return new_fls
         self.train_policy = _jax_wrapped_rddl_predict_train
 
-        def _jax_wrapped_rddl_cast_non_fluents(params, nfls):
+        def _jax_wrapped_rddl_cast_param_fluents(params, nfls):
             nfls = nfls.copy()
             for (var, value) in params.items():
                 prange = rddl.policy.variable_ranges[var]
@@ -1407,7 +1409,7 @@ class JaxRDDLPolicy(JaxPlan):
             return nfls
 
         def _jax_wrapped_rddl_predict_test(key, params, hyperparams, step, fls, fls_hist, nfls):
-            nfls = _jax_wrapped_rddl_cast_non_fluents(params, nfls)
+            nfls = _jax_wrapped_rddl_cast_param_fluents(params, nfls)
             policy_fls = test_policy_fn(key, 0, fls, nfls=nfls, params=hyperparams)[0]
             new_fls = {}
             for (var, value) in policy_fls.items():
@@ -1454,7 +1456,7 @@ class JaxRDDLPolicy(JaxPlan):
             hyperparams = compiled.model_aux['params']
             policy_params = {
                 name: jnp.asarray(compiled.init_policy_values[name], dtype=compiled.REAL) 
-                for name in all_nf_deps
+                for name in param_fluent_vars
             }
             return policy_params, hyperparams
         self.initializer = _jax_wrapped_rddl_init
@@ -2459,7 +2461,7 @@ class JaxBackpropPlanner:
         self.init_test_policy_subs = {
             var: value
             for (var, value) in self.test_compiled.init_policy_values.items()
-            if var not in self.rddl.policy.non_fluents
+            if var not in self.rddl.policy.param_fluents
         }
         self.init_test_subs = {
             **self.test_compiled.init_values, **self.init_test_policy_subs
@@ -2704,7 +2706,8 @@ class JaxBackpropPlanner:
             
             # train and test fluents have a batch dimension added, non-fluents do not
             # train fluents are also converted to float
-            if name not in rddl.non_fluents:
+            if name not in rddl.non_fluents \
+            and (rddl.policy is None or name not in rddl.policy.non_fluents):
                 train_value = np.repeat(value[np.newaxis, ...], repeats=n_train, axis=0)
                 init_train_fls[name] = np.asarray(train_value, dtype=self.compiled.REAL)
                 init_test_fls[name] = np.repeat(value[np.newaxis, ...], repeats=n_test, axis=0)
@@ -2724,8 +2727,9 @@ class JaxBackpropPlanner:
             if rddl.policy is not None and name in rddl.policy.variable_ranges:
                 required_type = RDDLValueInitializer.NUMPY_TYPES.get(
                     rddl.policy.variable_ranges[name], RDDLValueInitializer.INT)
-                if np.result_type(init_test_fls[name]) != required_type:
-                    init_test_fls[name] = np.asarray(init_test_fls[name], dtype=required_type)
+                init_test = init_test_nfls if name in rddl.policy.non_fluents else init_test_fls
+                if np.result_type(init_test[name]) != required_type:
+                    init_test[name] = np.asarray(init_test[name], dtype=required_type)
                 
         # make sure next-state fluents are also set
         for (state, next_state) in rddl.next_state.items():
