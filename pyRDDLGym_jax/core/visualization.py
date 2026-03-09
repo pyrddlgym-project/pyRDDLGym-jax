@@ -44,7 +44,7 @@ from pyRDDLGym.core.debug.decompiler import RDDLDecompiler
 
 from pyRDDLGym_jax import __version__
 if TYPE_CHECKING:
-    from pyRDDLGym_jax.core.planner import JaxBackpropPlanner, walk_params
+    from pyRDDLGym_jax.core.planner import JaxBackpropPlanner
     
 POLICY_DIST_HEIGHT = 400
 POLICY_DIST_PLOTS_PER_ROW = 6
@@ -62,6 +62,17 @@ PLOT_AXES_FONT_SIZE = 11
 EXPERIMENT_ENTRY_FONT_SIZE = 14
 
     
+def walk_params(tree, prefix=''):
+    if isinstance(tree, dict):
+        for k, v in tree.items():
+            yield from walk_params(v, f"{prefix}/{k}" if prefix else k)
+    elif isinstance(tree, (list, tuple)):
+        for i, v in enumerate(tree):
+            yield from walk_params(v, f"{prefix}/{i}")
+    else:
+        yield prefix, tree
+
+
 class JaxPlannerDashboard:
     '''A dashboard app for monitoring the jax planner progress.'''
 

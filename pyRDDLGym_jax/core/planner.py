@@ -2009,16 +2009,6 @@ UTILITY_LOOKUP = {
 #
 # ***********************************************************************
 
-def walk_params(tree, prefix=''):
-    if isinstance(tree, dict):
-        for k, v in tree.items():
-            yield from walk_params(v, f"{prefix}/{k}" if prefix else k)
-    elif isinstance(tree, (list, tuple)):
-        for i, v in enumerate(tree):
-            yield from walk_params(v, f"{prefix}/{i}")
-    else:
-        yield prefix, tree
-
 
 class RollingMean:
     '''Maintains the rolling mean of a stream of real-valued observations.'''
