@@ -516,8 +516,8 @@ class JaxRDDLCompiler:
 
             # update history 
             if fls_hist:
-                fls_hist = jax.tree_util.tree_map(
-                    lambda h, f: h.at[step].set(f), fls_hist, fls)
+                fls_hist = {name: value.at[step].set(fls[name])
+                            for (name, value) in fls_hist.items()}
 
             # perform a batched single step from the model
             keys = random.split(key, num=1 + n_batch)
@@ -533,15 +533,19 @@ class JaxRDDLCompiler:
             return carry, log 
         return _jax_wrapped_batched_policy_step
         
-    def _compile_unrolled_policy_step(self, batched_policy_step_fn, n_steps, history_dependent):
+    def _compile_unrolled_policy_step(self, batched_policy_step_fn, n_steps, history_dependent):        
+        fls_hist_keys = set().union(self.rddl.observ_fluents.keys(), 
+                                    self.rddl.state_fluents.keys(), 
+                                    self.rddl.action_fluents.keys())
+        
         def _jax_wrapped_batched_policy_rollout(key, policy_params, hyperparams, fls, nfls, 
                                                 model_params):            
             # initialize history the policy sees
+            fls_hist = {}
             if history_dependent:
-                fls_hist = jax.tree_util.tree_map(
-                    lambda f: jnp.zeros((n_steps,) + jnp.shape(f), dtype=f.dtype), fls)
-            else:
-                fls_hist = {}
+                for name in fls_hist_keys:
+                    fls_hist[name] = jnp.zeros(
+                        (n_steps,) + jnp.shape(fls[name]), dtype=fls[name].dtype)
 
             # perform the trajectory unrolling in batched mode
             start = (key, policy_params, hyperparams, fls, nfls, model_params, fls_hist)
@@ -554,7 +558,7 @@ class JaxRDDLCompiler:
                 fls_end = end[3]
                 log['fluents'] = {name: jnp.expand_dims(fl, axis=1) 
                                   for (name, fl) in fls_end.items()}
-            model_params = end[-2]
+            model_params = end[5]
             return log, model_params        
         return _jax_wrapped_batched_policy_rollout
     
