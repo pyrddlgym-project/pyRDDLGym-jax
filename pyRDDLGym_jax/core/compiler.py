@@ -441,6 +441,11 @@ class JaxRDDLCompiler:
         else:
             ineq_fn = None
 
+        # keys for the fluents paths
+        fluents_keys = set().union(rddl.observ_fluents.keys(), 
+                                   rddl.state_fluents.keys(), rddl.prev_state.keys(),
+                                   rddl.action_fluents.keys())
+        
         # do a single step update from the RDDL model
         def _jax_wrapped_single_step(key, actions, fls, nfls, params):
             errors = NORMAL
@@ -465,12 +470,10 @@ class JaxRDDLCompiler:
             fls, key, errors, params = cpf_fn(key, errors, fls, nfls, params)
 
             # store fluent paths
-            fluents = {}
             if cache_path_info:
-                for (name, value) in fls.items():
-                    if name in rddl.observ_fluents or name in rddl.state_fluents \
-                    or name in rddl.prev_state or name in rddl.action_fluents:
-                        fluents[name] = value                        
+                fluents = {name: fls[name] for name in fluents_keys}
+            else:
+                fluents = {}
             
             # calculate the immediate reward
             reward, key, errors, params = reward_fn(key, errors, fls, nfls, params)
