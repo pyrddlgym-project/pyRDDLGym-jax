@@ -3487,7 +3487,10 @@ class JaxOfflineController(BaseAgent):
         # load the policy from file
         if not self.train_on_reset and params is not None and isinstance(params, str):
             with open(params, 'rb') as file:
-                params = pickle.load(file)
+                contents = pickle.load(file)
+                params = contents['params']
+                self.eval_hyperparams = contents['hyperparams']
+                self.hyperparams_given = True
 
         # train the policy once before starting to step() through the environment
         # and then execute this policy in open-loop fashion
@@ -3503,7 +3506,8 @@ class JaxOfflineController(BaseAgent):
             # save the policy
             if save_path is not None:
                 with open(save_path, 'wb') as file:
-                    pickle.dump(params, file)
+                    contents = {'params': params, 'hyperparams': self.eval_hyperparams}
+                    pickle.dump(contents, file)
 
         self.params = params  
         
