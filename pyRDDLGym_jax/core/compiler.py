@@ -421,6 +421,7 @@ class JaxRDDLCompiler:
         :param aux_constr: auxiliary info to pass when compiling constraint_func
         '''
         NORMAL = JaxRDDLCompiler.ERROR_CODES['NORMAL']      
+        rddl = self.rddl
         
         # compile all components of the RDDL
         cpf_fn = self._jax_cpfs()
@@ -461,14 +462,21 @@ class JaxRDDLCompiler:
                 inequalities, equalities = [], []
                 
             # calculate CPFs in topological order
-            fls, key, errors, params = cpf_fn(key, errors, fls, nfls, params)                
-            fluents = fls if cache_path_info else {}
+            fls, key, errors, params = cpf_fn(key, errors, fls, nfls, params)
+
+            # store fluent paths
+            fluents = {}
+            if cache_path_info:
+                for (name, value) in fls.items():
+                    if name in rddl.observ_fluents or name in rddl.state_fluents \
+                    or name in rddl.prev_state or name in rddl.action_fluents:
+                        fluents[name] = value                        
             
             # calculate the immediate reward
             reward, key, errors, params = reward_fn(key, errors, fls, nfls, params)
             
             # set the next state to the current state
-            for (state, next_state) in self.rddl.next_state.items():
+            for (state, next_state) in rddl.next_state.items():
                 fls[state] = fls[next_state]
             
             # check the state invariants and termination
