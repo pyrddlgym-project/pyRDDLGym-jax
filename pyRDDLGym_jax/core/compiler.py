@@ -442,9 +442,12 @@ class JaxRDDLCompiler:
             ineq_fn = None
 
         # keys for the fluents paths
-        fluents_keys = set().union(rddl.observ_fluents.keys(), 
-                                   rddl.state_fluents.keys(), rddl.prev_state.keys(),
-                                   rddl.action_fluents.keys())
+        if cache_path_info:
+            fluents_keys = set().union(rddl.observ_fluents.keys(), 
+                                       rddl.state_fluents.keys(), rddl.prev_state.keys(),
+                                       rddl.action_fluents.keys())
+        else:
+            fluents_keys = set()
         
         # do a single step update from the RDDL model
         def _jax_wrapped_single_step(key, actions, fls, nfls, params):
@@ -519,8 +522,14 @@ class JaxRDDLCompiler:
 
             # update history 
             if fls_hist:
-                fls_hist = {name: value.at[step].set(fls[name])
-                            for (name, value) in fls_hist.items()}
+                new_fls_hist = {}
+                for (name, value) in fls_hist.items():
+                    if name in self.rddl.action_fluents:
+                        write_index = jnp.maximum(step - 1, 0)
+                    else:
+                        write_index = step                    
+                    new_fls_hist[name] = value.at[write_index].set(fls[name])
+                fls_hist = new_fls_hist
 
             # perform a batched single step from the model
             keys = random.split(key, num=1 + n_batch)
@@ -536,10 +545,17 @@ class JaxRDDLCompiler:
             return carry, log 
         return _jax_wrapped_batched_policy_step
         
-    def _compile_unrolled_policy_step(self, batched_policy_step_fn, n_steps, history_dependent):        
-        fls_hist_keys = set().union(self.rddl.observ_fluents.keys(), 
-                                    self.rddl.state_fluents.keys(), 
-                                    self.rddl.action_fluents.keys())
+    def _compile_unrolled_policy_step(self, batched_policy_step_fn, n_steps, history_dependent): 
+
+        # store action-fluent history and either observ-fluent or state-fluent history
+        if history_dependent:
+            fls_hist_keys = set(self.rddl.action_fluents.keys())
+            if self.rddl.observ_fluents:
+                fls_hist_keys = fls_hist_keys.union(self.rddl.observ_fluents.keys())
+            else:
+                fls_hist_keys = fls_hist_keys.union(self.rddl.state_fluents.keys())
+        else:
+            fls_hist_keys = set()
         
         def _jax_wrapped_batched_policy_rollout(key, policy_params, hyperparams, fls, nfls, 
                                                 model_params):            
