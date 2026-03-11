@@ -3436,6 +3436,24 @@ def _split_policy_actions(rddl, policy_fls):
     return actions, fls
 
 
+def _init_fls_hist(planner):
+    fls_hist = {}
+    if planner.plan.history_dependent:
+        for name in planner.test_compiled.fls_hist_keys:
+            values = planner.test_compiled.init_values[name]
+            fls_hist[name] = np.zeros(
+                (planner.horizon,) + np.shape(values), dtype=values.dtype)
+    return fls_hist
+
+
+def _update_fls_hist(fls_hist, step, states, actions):
+    for (name, value) in fls_hist.items():
+        if name in states:
+            value[step] = states[name]
+        elif name in actions:
+            value[step] = actions[name]
+    
+
 class JaxOfflineController(BaseAgent):
     '''A container class for a Jax policy trained offline.'''
     
@@ -3486,6 +3504,7 @@ class JaxOfflineController(BaseAgent):
         # and then execute this policy in open-loop fashion
         self.step = 0
         self.callback = None
+        self.fls_hist = _init_fls_hist(self.planner)
         if not self.train_on_reset and not self.params_given:
             callback = self.planner.optimize(key=self.key, **self.train_kwargs)
             self.callback = callback
@@ -3502,16 +3521,21 @@ class JaxOfflineController(BaseAgent):
         self.params = params  
         
     def sample_action(self, state: Dict[str, Any]) -> Dict[str, Any]:
+        _update_fls_hist(self.fls_hist, self.step, state, {})
         state = {**state, **self.policy_state}
         self.key, subkey = random.split(self.key)
         policy_fls = self.planner.get_action(
-            subkey, self.params, self.step, state, self.eval_hyperparams, copy_state=False)
+            subkey, self.params, self.step, state, self.eval_hyperparams, self.fls_hist, 
+            copy_state=False
+        )
         actions, self.policy_state = _split_policy_actions(self.planner.rddl, policy_fls)
+        _update_fls_hist(self.fls_hist, self.step, {}, actions)
         self.step += 1
         return actions
         
     def reset(self) -> None:
         self.step = 0
+        self.fls_hist = _init_fls_hist(self.planner)
         self.policy_state = self.planner.init_test_policy_subs
 
         # train the policy if required to reset at the start of every episode
@@ -3560,6 +3584,7 @@ class JaxOnlineController(BaseAgent):
         self.reset()
      
     def sample_action(self, state: Dict[str, Any]) -> Dict[str, Any]:
+        _update_fls_hist(self.fls_hist, 0, state, {})
         state = {**state, **self.policy_state}
 
         # we train the policy from the current state every time we step()
@@ -3598,9 +3623,12 @@ class JaxOnlineController(BaseAgent):
             self.eval_hyperparams = callback['policy_hyperparams']
 
         # get the action from the parameters for the current state
+        # TODO: allow history carryover between real-time actions
         self.key, subkey = random.split(self.key)
         policy_fls = planner.get_action(
-            subkey, params, 0, state, self.eval_hyperparams, copy_state=False)
+            subkey, params, 0, state, self.eval_hyperparams, self.fls_hist, 
+            copy_state=False
+        )
         actions, self.policy_state = _split_policy_actions(self.planner.rddl, policy_fls)
         
         # apply warm start for the next epoch
@@ -3613,5 +3641,6 @@ class JaxOnlineController(BaseAgent):
         self.guess = None
         self.hyperparams = None
         self.callback = None
+        self.fls_hist = _init_fls_hist(self.planner)
         self.policy_state = self.planner.init_test_policy_subs
     
