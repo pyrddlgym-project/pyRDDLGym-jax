@@ -129,6 +129,14 @@ class JaxRDDLCompiler:
             python_functions=python_functions
         )  
         self.constraints = RDDLConstraints(simulator, vectorized=True)
+
+        # for fluents history
+        fls_hist_keys = set(self.rddl.action_fluents.keys())
+        if self.rddl.observ_fluents:
+            fls_hist_keys = fls_hist_keys.union(self.rddl.observ_fluents.keys())
+        else:
+            fls_hist_keys = fls_hist_keys.union(self.rddl.state_fluents.keys())
+        self.fls_hist_keys = fls_hist_keys
     
     def get_kwargs(self) -> Dict[str, Any]:
         '''Returns a dictionary of configurable parameter name: parameter value pairs.
@@ -546,16 +554,7 @@ class JaxRDDLCompiler:
         return _jax_wrapped_batched_policy_step
         
     def _compile_unrolled_policy_step(self, batched_policy_step_fn, n_steps, history_dependent): 
-
-        # store action-fluent history and either observ-fluent or state-fluent history
-        if history_dependent:
-            fls_hist_keys = set(self.rddl.action_fluents.keys())
-            if self.rddl.observ_fluents:
-                fls_hist_keys = fls_hist_keys.union(self.rddl.observ_fluents.keys())
-            else:
-                fls_hist_keys = fls_hist_keys.union(self.rddl.state_fluents.keys())
-        else:
-            fls_hist_keys = set()
+        fls_hist_keys = self.fls_hist_keys if history_dependent else set()
         
         def _jax_wrapped_batched_policy_rollout(key, policy_params, hyperparams, fls, nfls, 
                                                 model_params):            
