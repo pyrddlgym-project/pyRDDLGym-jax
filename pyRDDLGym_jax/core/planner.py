@@ -3449,9 +3449,9 @@ def _init_fls_hist(planner):
 def _update_fls_hist(fls_hist, step, states, actions):
     for (name, value) in fls_hist.items():
         if name in states:
-            value[step] = states[name]
+            value[step] = np.reshape(states[name], np.shape(value[step]))
         elif name in actions:
-            value[step] = actions[name]
+            value[step] = np.reshape(actions[name], np.shape(value[step]))
     
 
 class JaxOfflineController(BaseAgent):
