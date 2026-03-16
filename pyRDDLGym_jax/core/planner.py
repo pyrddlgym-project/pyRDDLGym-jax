@@ -2456,7 +2456,7 @@ class JaxBackpropPlanner:
         self.init_test_subs = {
             **self.test_compiled.init_values, **self.init_test_policy_subs
         }
-        _, (_, self.init_nfs) = self._batched_init_subs(self.init_test_subs)
+        _, (_, self.init_nfls) = self._batched_init_subs(self.init_test_subs)
     
     def _jax_critic(self):
         critic_fn = self.critic_fn
@@ -3412,7 +3412,7 @@ class JaxBackpropPlanner:
             
         # get test fluents and cast to numpy
         policy_fls = self.test_policy(key, params, policy_hyperparams, step, state, 
-                                      history, self.init_nfs)
+                                      history, self.init_nfls)
         policy_fls = jax.tree_util.tree_map(np.asarray, policy_fls)
         return policy_fls      
        
