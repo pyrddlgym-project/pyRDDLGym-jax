@@ -1360,7 +1360,7 @@ class JaxRDDLPolicy(JaxPlan):
         rddl = compiled.rddl
 
         # calculate the correct action box bounds
-        shapes, bounds, _, _ = get_action_info(compiled, _bounds, horizon)
+        shapes, bounds, _ = get_action_info(compiled, _bounds, horizon)
         shapes = {var: value[1:] for (var, value) in shapes.items()}
         self.bounds = bounds
 
@@ -1533,7 +1533,8 @@ class GaussianPGPE(PGPE):
                  ema_decay: Optional[float]=None,
                  start_entropy_coeff: float=1e-3,
                  end_entropy_coeff: float=1e-8,
-                 max_kl_update: Optional[float]=None) -> None:
+                 max_kl_update: Optional[float]=None,
+                 eps: float=1e-10) -> None:
         '''Creates a new Gaussian PGPE planner.
         
         :param batch_size: how many policy parameters to sample per optimization step
@@ -1559,6 +1560,7 @@ class GaussianPGPE(PGPE):
         :param start_entropy_coeff: starting entropy regularization coeffient for Gaussian
         :param end_entropy_coeff: ending entropy regularization coeffient for Gaussian
         :param max_kl_update: bound on kl-divergence between parameter updates
+        :param eps: small value to avoid division by zero
         '''
         super().__init__()
 
@@ -1595,6 +1597,7 @@ class GaussianPGPE(PGPE):
             param_labels={'mu': 'mu', 'sigma': 'sigma'}
         )
         self.max_kl = max_kl_update if inject_mu and inject_sigma else None
+        self.eps = eps
     
     def __str__(self) -> str:
         return (f'[INFO] PGPE hyper-parameters:\n'
@@ -1606,6 +1609,7 @@ class GaussianPGPE(PGPE):
                 f'    super_symmetric    ={self.super_symmetric}\n'
                 f'        accurate       ={self.super_symmetric_accurate}\n'
                 f'    project_samples    ={self.project_samples}\n'
+                f'    eps                ={self.eps}\n'
                 f'[INFO] PGPE optimizer hyper-parameters:\n'
                 f'    optimizer          ={self.optimizer_name}\n'
                 f'    optimizer_kwargs:\n'
@@ -1688,10 +1692,9 @@ class GaussianPGPE(PGPE):
             # more accurate formula
             if super_symmetric_accurate:
                 aa = jnp.abs(a)
-                atol = 1e-10
                 c1, c2, c3 = -0.06655, -0.9706, 0.124
-                term_neg_log = c1 * sj.div(aa * aa - 1.0, sj.log(aa + atol)) + c2
-                term_pos_log = 1.0 - c3 * jnp.log1p(-aa ** 3 + atol)
+                term_neg_log = c1 * sj.div(aa * aa - 1.0, sj.log(aa + self.eps)) + c2
+                term_pos_log = 1.0 - c3 * jnp.log1p(-aa ** 3 + self.eps)
                 epsilon_star = jnp.sign(epsilon) * phi * jnp.exp(
                     aa * jnp.where(a <= 0, term_neg_log, term_pos_log))
             
