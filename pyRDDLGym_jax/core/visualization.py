@@ -46,6 +46,7 @@ from pyRDDLGym_jax import __version__
 if TYPE_CHECKING:
     from pyRDDLGym_jax.core.planner import JaxBackpropPlanner
     
+    
 POLICY_DIST_HEIGHT = 400
 POLICY_DIST_PLOTS_PER_ROW = 6
 ACTION_HEATMAP_HEIGHT = 400

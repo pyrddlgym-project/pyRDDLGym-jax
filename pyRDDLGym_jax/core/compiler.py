@@ -24,6 +24,7 @@ import jax.numpy as jnp
 import jax.random as random
 import jax.scipy as scipy 
 import flax
+import softjax as sj
 
 from pyRDDLGym.core.compiler.initializer import RDDLValueInitializer
 from pyRDDLGym.core.compiler.levels import RDDLLevelAnalysis
@@ -1122,7 +1123,7 @@ class JaxRDDLCompiler:
     
     def _jax_divide(self, expr, aux):
         aux['exact'].add(expr.id)
-        return self._jax_binary_helper(expr, aux, jnp.divide, at_least_int=True)
+        return self._jax_binary_helper(expr, aux, sj.div, at_least_int=True)
     
     # ===========================================================================
     # relational
@@ -1394,11 +1395,11 @@ class JaxRDDLCompiler:
     
     def _jax_acos(self, expr, aux):
         aux['exact'].add(expr.id)
-        return self._jax_unary_helper(expr, aux, jnp.arccos, at_least_int=True)
+        return self._jax_unary_helper(expr, aux, sj.arccos, at_least_int=True)
     
     def _jax_asin(self, expr, aux):
         aux['exact'].add(expr.id)
-        return self._jax_unary_helper(expr, aux, jnp.arcsin, at_least_int=True)
+        return self._jax_unary_helper(expr, aux, sj.arcsin, at_least_int=True)
     
     def _jax_atan(self, expr, aux):
         aux['exact'].add(expr.id)
@@ -1422,11 +1423,11 @@ class JaxRDDLCompiler:
     
     def _jax_ln(self, expr, aux):
         aux['exact'].add(expr.id)
-        return self._jax_unary_helper(expr, aux, jnp.ln, at_least_int=True)
+        return self._jax_unary_helper(expr, aux, sj.log, at_least_int=True)
     
     def _jax_sqrt(self, expr, aux):
         aux['exact'].add(expr.id)
-        return self._jax_unary_helper(expr, aux, jnp.sqrt, at_least_int=True)
+        return self._jax_unary_helper(expr, aux, sj.sqrt, at_least_int=True)
     
     def _jax_lngamma(self, expr, aux):
         aux['exact'].add(expr.id)
@@ -1463,7 +1464,7 @@ class JaxRDDLCompiler:
     def _jax_log(self, expr, aux):
         aux['exact'].add(expr.id)
         def log_op(x, y):
-            return jnp.log(x) / jnp.log(y)
+            return sj.div(sj.log(x), sj.log(y))
         return self._jax_binary_helper(expr, aux, log_op, at_least_int=True)
     
     def _jax_hypot(self, expr, aux):
@@ -1749,7 +1750,7 @@ class JaxRDDLCompiler:
         def _jax_wrapped_distribution_normal(fls, nfls, params, key):
             mean, key, err1, params = jax_mean(fls, nfls, params, key)
             var, key, err2, params = jax_var(fls, nfls, params, key)
-            std = jnp.sqrt(var)
+            std = sj.sqrt(var)
             key, subkey = random.split(key)
             Z = random.normal(key=subkey, shape=jnp.shape(mean), dtype=self.REAL)
             sample = mean + std * Z
@@ -2060,7 +2061,7 @@ class JaxRDDLCompiler:
             scale, key, err2, params = jax_scale(fls, nfls, params, key)
             key, subkey = random.split(key)
             U = random.uniform(key=subkey, shape=jnp.shape(scale), dtype=self.REAL)
-            sample = jnp.log(1.0 - jnp.log1p(-U) / shape) / scale
+            sample = sj.div(sj.div(jnp.log(1.0 - jnp.log1p(-U)), shape), scale)
             out_of_bounds = jnp.logical_not(jnp.all(jnp.logical_and(shape > 0, scale > 0)))
             err = err1 | err2 | (out_of_bounds * ERR)
             return sample, key, err, params        
@@ -2100,7 +2101,7 @@ class JaxRDDLCompiler:
             b, key, err2, params = jax_b(fls, nfls, params, key)
             key, subkey = random.split(key)
             U = random.uniform(key=subkey, shape=jnp.shape(a), dtype=self.REAL)            
-            sample = jnp.power(1.0 - jnp.power(U, 1.0 / b), 1.0 / a)
+            sample = jnp.power(1.0 - jnp.power(U, sj.div(1.0, b)), sj.div(1.0, a))
             out_of_bounds = jnp.logical_not(jnp.all(jnp.logical_and(a > 0, b > 0)))
             err = err1 | err2 | (out_of_bounds * ERR)
             return sample, key, err, params        
@@ -2135,7 +2136,7 @@ class JaxRDDLCompiler:
             # normalize them if required
             if unnormalized:
                 normalizer = jnp.sum(prob, axis=-1, keepdims=True)
-                prob = prob / normalizer
+                prob = sj.div(prob, normalizer)
             return prob, key, error, params
         return _jax_wrapped_calc_discrete_prob
     
@@ -2159,7 +2160,7 @@ class JaxRDDLCompiler:
             prob, key, error, params = jax_probs(fls, nfls, params, key)
             if unnormalized:
                 normalizer = jnp.sum(prob, axis=-1, keepdims=True)
-                prob = prob / normalizer
+                prob = sj.div(prob, normalizer)
             return prob, key, error, params
         return _jax_wrapped_calc_discrete_prob
 
@@ -2280,7 +2281,8 @@ class JaxRDDLCompiler:
             error = error | (out_of_bounds * ERR)
             key, subkey = random.split(key)
             gamma = random.gamma(key=subkey, a=alpha, dtype=self.REAL)
-            sample = gamma / jnp.sum(gamma, axis=-1, keepdims=True)
+            normalizer = jnp.sum(gamma, axis=-1, keepdims=True)
+            sample = sj.div(gamma, normalizer)
             sample = jnp.moveaxis(sample, source=-1, destination=index)
             return sample, key, error, params        
         return _jax_wrapped_distribution_dirichlet
