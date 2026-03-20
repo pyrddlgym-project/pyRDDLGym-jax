@@ -29,8 +29,9 @@
 #
 # ***********************************************************************
 
+from functools import partial
 import termcolor
-from typing import Any, Dict, Optional, Set, Tuple, Union
+from typing import Any, Dict, Optional, Set, Tuple
 
 import numpy as np
 import jax
@@ -123,6 +124,10 @@ class JaxRDDLCompilerWithGrad(JaxRDDLCompiler):
         kwargs['print_warnings'] = self.print_warnings
         return kwargs
 
+    def init_fls_and_nfls(self, init_values: Dict[str, Any], batch_size: int) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+        fls, nfls = super().init_fls_and_nfls(init_values, batch_size)
+        return jax.tree_util.tree_map(partial(np.asarray, dtype=self.REAL), (fls, nfls))
+    
     def _jax_stop_grad(self, jax_expr):        
         def _jax_wrapped_stop_grad(fls, nfls, params, key):
             sample, key, error, params = jax_expr(fls, nfls, params, key)

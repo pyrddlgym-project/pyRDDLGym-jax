@@ -116,7 +116,7 @@ class JaxRDDLSimulator(RDDLSimulator):
         
         # initialize all fluent and non-fluent values    
         self.subs = self.init_values.copy() 
-        self.fls, self.nfls = compiled.split_fluent_nonfluent(self.subs)
+        self.fls, self.nfls = compiled.split_fls_and_nfls(self.subs)
         self.state = None 
         self.noop_actions = {var: values 
                              for (var, values) in self.init_values.items() 
