@@ -2139,7 +2139,7 @@ def build_optax_optimizer(optimizer, optimizer_kwargs, clip_grad, noise_kwargs,
 
 
 @jax.jit
-def pytree_at(tree: Pytree, i: int) -> Pytree:
+def _unbatched_pytree(tree: Pytree, i: int) -> Pytree:
     return jax.tree_util.tree_map(lambda x: x[i], tree)
 
 
@@ -2721,7 +2721,7 @@ class JaxBackpropPlanner:
             critic_params=critic_params, policy_hparams=policy_hyperparams)
         planner_state = self.initialize(sim_state, planner_state)
         planner_state = planner_state.replace(
-            policy_params=pytree_at(planner_state.policy_params, 0))
+            policy_params=_unbatched_pytree(planner_state.policy_params, 0))
         
         # get the params mapping to a 1D vector
         guess_1d, unravel_fn = jax.flatten_util.ravel_pytree(planner_state.policy_params)  
@@ -2935,7 +2935,7 @@ class JaxBackpropPlanner:
         # ======================================================================
         
         # initialize running statistics
-        best_params = pytree_at(planner_state.policy_params, 0)
+        best_params = _unbatched_pytree(planner_state.policy_params, 0)
         best_loss, pbest_loss, best_grad = np.inf, np.inf, None
         best_index = 0
         last_iter_improve = 0
@@ -3044,8 +3044,8 @@ class JaxBackpropPlanner:
             # evaluate test losses and record best parameters so far
             best_index = np.argmin(test_loss_smooth)
             if test_loss_smooth[best_index] < best_loss:
-                best_params = pytree_at(planner_state.policy_params, best_index)
-                best_grad = pytree_at(train_log['grad'], best_index)
+                best_params = _unbatched_pytree(planner_state.policy_params, best_index)
+                best_grad = _unbatched_pytree(train_log['grad'], best_index)
                 best_loss = test_loss_smooth[best_index]
                 last_iter_improve = it
             pbest_loss = np.minimum(pbest_loss, test_loss_smooth)
@@ -3186,7 +3186,8 @@ class JaxBackpropPlanner:
             # calculate best policy return
             planner_state = planner_state.replace(policy_params=self._batched_pytree(best_params))
             _, (final_log, _) = self.test_loss(test_sim_state, planner_state)
-            best_returns = np.ravel(np.sum(final_log['reward'], axis=2))
+            final_returns = np.sum(final_log['reward'], axis=2)
+            best_returns = np.ravel(final_returns[best_index])
             mean, rlo, rhi = self.ci_bootstrap(best_returns)            
 
             # diagnosis
