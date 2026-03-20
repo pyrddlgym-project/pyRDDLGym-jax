@@ -309,7 +309,7 @@ class StaticNormalizer(Preprocessor):
 
         # static bounds
         def _jax_wrapped_normalizer_update(fls, stats):
-            return bounded_vars
+            return stats
         self._update = jax.jit(_jax_wrapped_normalizer_update)
 
         # apply min max scaling
@@ -955,9 +955,9 @@ class GumbelSoftmaxTopK(nn.Module):
             def body_fun(i, carry):
                 khot, logits_i = carry
                 idx = jnp.argmax(logits_i)
-                khot = khot.at[idx].set(1.0)
-                logits_i = logits_i.at[idx].set(-jnp.inf)
-                return (khot, logits_i)
+                logits_new = logits_i.at[idx].set(-jnp.inf)
+                khot_new = khot.at[idx].set(1.0)
+                return (khot_new, logits_new)
             khot0 = jnp.zeros_like(logits)
             khot_final, _ = jax.lax.fori_loop(
                 lower=0, upper=self.allowed_actions, 
