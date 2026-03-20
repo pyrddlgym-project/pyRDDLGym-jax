@@ -1949,8 +1949,7 @@ class GaussianPGPE(PGPE):
 
 @jax.jit
 def entropic_utility(returns: jnp.ndarray, beta: float) -> float:
-    return -sj.div(1.0, beta) * jax.scipy.special.logsumexp(
-        -beta * returns, b=1.0 / returns.size)
+    return -sj.div(1., jax.scipy.special.logsumexp(-beta * returns, b=1. / returns.size), beta)
 
 
 @jax.jit
@@ -1978,20 +1977,19 @@ def mean_semivariance_utility(returns: jnp.ndarray, beta: float) -> float:
 
 
 @jax.jit
-def sharpe_utility(returns: jnp.ndarray, risk_free: float) -> float:
-    return sj.div(jnp.mean(returns) - risk_free, jnp.std(returns) + 1e-10)
+def sharpe_utility(returns: jnp.ndarray, risk_free: float=0.0, eps: float=1e-12) -> float:
+    return sj.div(jnp.mean(returns) - risk_free, jnp.std(returns) + eps)
 
 
 @jax.jit
-def var_utility(returns: jnp.ndarray, alpha: float) -> float:
-    return jnp.percentile(returns, q=100 * alpha)
+def var_utility(returns: jnp.ndarray, alpha: float, *args, **kwargs) -> float:
+    return sj.percentile(returns, 100 * alpha, *args, **kwargs)
 
 
 @jax.jit
-def cvar_utility(returns: jnp.ndarray, alpha: float) -> float:
-    var = jnp.percentile(returns, q=100 * alpha)
-    mask = returns <= var
-    return sj.div(jnp.sum(returns * mask), jnp.maximum(1, jnp.count_nonzero(mask)))
+def cvar_utility(returns: jnp.ndarray, alpha: float, *args, **kwargs) -> float:
+    var = sj.percentile(returns, 100 * alpha, *args, **kwargs)
+    return var - sj.div(jnp.mean(jax.nn.relu(var - returns)), alpha)
 
 
 # set of all currently valid built-in utility functions
