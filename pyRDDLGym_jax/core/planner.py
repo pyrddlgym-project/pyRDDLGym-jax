@@ -51,6 +51,7 @@ import jax.numpy as jnp
 import jax.random as random
 import flax
 import flax.linen as nn
+import softjax as sj
 import numpy as np
 import optax
 import termcolor
@@ -70,9 +71,7 @@ from pyRDDLGym.core.policy import BaseAgent
 from pyRDDLGym_jax import __version__
 from pyRDDLGym_jax.core.compiler import JaxRDDLCompiler, JaxRDDLSimState
 from pyRDDLGym_jax.core import logic
-from pyRDDLGym_jax.core.logic import (
-    JaxRDDLCompilerWithGrad, DefaultJaxRDDLCompilerWithGrad, stable_sigmoid
-)
+from pyRDDLGym_jax.core.logic import JaxRDDLCompilerWithGrad, DefaultJaxRDDLCompilerWithGrad
 
 # try to load the dash board
 try:
@@ -614,7 +613,7 @@ class JaxSogbofaActionProjection(JaxActionProjection):
 def jax_bound_action(branches, lower, upper, param):
     lower = jnp.where(jnp.isfinite(lower), lower, 0.0)
     upper = jnp.where(jnp.isfinite(upper), upper, 0.0)
-    f_both = lower + (upper - lower) * stable_sigmoid(param)
+    f_both = lower + (upper - lower) * jax.nn.sigmoid(param)
     f_lowe = lower + jax.nn.softplus(param)
     f_uppe = upper - jax.nn.softplus(-param)
     f_none = param
@@ -712,13 +711,13 @@ class JaxStraightLinePlan(JaxPlan):
         
         def _jax_bool_param_to_action(var, param, hyperparams):
             if self._wrap_sigmoid:
-                return stable_sigmoid(hyperparams[var] * param)
+                return jax.nn.sigmoid(hyperparams[var] * param)
             else:
                 return param 
         
         def _jax_bool_action_to_param(var, action, hyperparams):
             if self._wrap_sigmoid:
-                return jax.scipy.special.logit(action) / hyperparams[var]
+                return sj.div(jax.scipy.special.logit(action), hyperparams[var])
             else:
                 return action
         
@@ -939,7 +938,7 @@ class GumbelSoftmaxTopK(nn.Module):
             def body_fun(i, carry):
                 khot, logits_i = carry
                 khot_mask = jnp.maximum(1.0 - khot, 1e-12)
-                logits_new = logits_i + jnp.log(khot_mask)
+                logits_new = logits_i + sj.log(khot_mask)
                 khot_new = khot + jax.nn.softmax(w * logits_new)
                 return (khot_new, logits_new)
             khot0 = jnp.zeros_like(logits)
@@ -1237,7 +1236,7 @@ class JaxDeepReactivePolicy(JaxPlan):
                     # project action output to valid box constraints following Bueno et. al.
                     if ranges[var] == 'bool':
                         if not use_constraint_satisfaction:
-                            actions[var] = stable_sigmoid(output)
+                            actions[var] = jax.nn.sigmoid(output)
                     else:
                         if wrap_non_bool:
                             lower, upper = bounds[var]
@@ -1684,14 +1683,14 @@ class GaussianPGPE(PGPE):
         # the paper presents a more accurate formula which is used by default
         def _jax_wrapped_epsilon_star(sigma, epsilon):
             phi = 0.67449 * sigma
-            a = (sigma - jnp.abs(epsilon)) / sigma
+            a = sj.div(sigma - jnp.abs(epsilon), sigma)
 
             # more accurate formula
             if super_symmetric_accurate:
                 aa = jnp.abs(a)
                 atol = 1e-10
                 c1, c2, c3 = -0.06655, -0.9706, 0.124
-                term_neg_log = c1 * (aa * aa - 1.0) / jnp.log(aa + atol) + c2
+                term_neg_log = c1 * sj.div(aa * aa - 1.0, sj.log(aa + atol)) + c2
                 term_pos_log = 1.0 - c3 * jnp.log1p(-aa ** 3 + atol)
                 epsilon_star = jnp.sign(epsilon) * phi * jnp.exp(
                     aa * jnp.where(a <= 0, term_neg_log, term_pos_log))
@@ -1767,7 +1766,7 @@ class GaussianPGPE(PGPE):
             if super_symmetric:
                 mask = r1 + r2 >= r3 + r4
                 epsilon_tau = mask * epsilon + (1 - mask) * epsilon_star
-                s = jnp.square(epsilon_tau) / sigma - sigma
+                s = sj.div(jnp.square(epsilon_tau), sigma) - sigma
                 if scale_reward:
                     scale = jnp.maximum(min_reward_scale, m - (r1 + r2 + r3 + r4) / 4)
                 else:
@@ -1776,14 +1775,14 @@ class GaussianPGPE(PGPE):
             
             # for basic pgpe
             else:
-                s = jnp.square(epsilon) / sigma - sigma
+                s = sj.div(jnp.square(epsilon), sigma) - sigma
                 if scale_reward:
                     scale = jnp.maximum(min_reward_scale, jnp.abs(m))
                 else:
                     scale = 1.0
                 r_sigma = (r1 + r2) / (2 * scale)
 
-            return -(r_sigma * s + ent / sigma)
+            return -(r_sigma * s + sj.div(ent, sigma))
             
         # calculate the policy gradients
         def _jax_wrapped_pgpe_grad(sim_state, planner_state, pgpe_state, ent):
@@ -1853,9 +1852,9 @@ class GaussianPGPE(PGPE):
 
         # estimate KL divergence between two updates
         def _jax_wrapped_pgpe_kl_term(old_mu, old_sigma, mu, sigma):
-            return 0.5 * jnp.sum(2 * jnp.log(sigma / old_sigma) + 
-                                 jnp.square(old_sigma / sigma) + 
-                                 jnp.square((mu - old_mu) / sigma) - 1)
+            return 0.5 * jnp.sum(2 * sj.log(sj.div(sigma, old_sigma)) + 
+                                 jnp.square(sj.div(old_sigma, sigma)) + 
+                                 jnp.square(sj.div(mu - old_mu, sigma)) - 1)
         
         # update mean and std. deviation with a gradient step
         def _jax_wrapped_pgpe_update_helper(stats, grad, opt_state):
@@ -1892,7 +1891,7 @@ class GaussianPGPE(PGPE):
                         stats['mu'], stats['sigma'], new_stats['mu'], new_stats['sigma']
                     )
                     sum_kl = jax.tree_util.tree_reduce(jnp.add, kl)
-                    scale = jnp.minimum(1.0, jnp.sqrt(max_kl / (sum_kl + 1e-12)))
+                    scale = jnp.minimum(1.0, sj.sqrt(sj.div(max_kl, sum_kl + 1e-12)))
                     grad = jax.tree_util.tree_map(lambda g: g * scale, grad)
                     new_stats, new_opt_state = _jax_wrapped_pgpe_update_helper(
                         stats, grad, pgpe_opt_state)
@@ -1950,7 +1949,7 @@ class GaussianPGPE(PGPE):
 
 @jax.jit
 def entropic_utility(returns: jnp.ndarray, beta: float) -> float:
-    return (-1.0 / beta) * jax.scipy.special.logsumexp(
+    return -sj.div(1.0, beta) * jax.scipy.special.logsumexp(
         -beta * returns, b=1.0 / returns.size)
 
 
@@ -1967,7 +1966,7 @@ def mean_deviation_utility(returns: jnp.ndarray, beta: float) -> float:
 @jax.jit
 def mean_semideviation_utility(returns: jnp.ndarray, beta: float) -> float:
     mu = jnp.mean(returns)
-    msd = jnp.sqrt(jnp.mean(jnp.square(jnp.minimum(0.0, returns - mu))))
+    msd = sj.sqrt(jnp.mean(jnp.square(jnp.minimum(0.0, returns - mu))))
     return mu - 0.5 * beta * msd
 
 
@@ -1980,7 +1979,7 @@ def mean_semivariance_utility(returns: jnp.ndarray, beta: float) -> float:
 
 @jax.jit
 def sharpe_utility(returns: jnp.ndarray, risk_free: float) -> float:
-    return (jnp.mean(returns) - risk_free) / (jnp.std(returns) + 1e-10)
+    return sj.div(jnp.mean(returns) - risk_free, jnp.std(returns) + 1e-10)
 
 
 @jax.jit
@@ -1992,7 +1991,7 @@ def var_utility(returns: jnp.ndarray, alpha: float) -> float:
 def cvar_utility(returns: jnp.ndarray, alpha: float) -> float:
     var = jnp.percentile(returns, q=100 * alpha)
     mask = returns <= var
-    return jnp.sum(returns * mask) / jnp.maximum(1, jnp.count_nonzero(mask))
+    return sj.div(jnp.sum(returns * mask), jnp.maximum(1, jnp.count_nonzero(mask)))
 
 
 # set of all currently valid built-in utility functions
@@ -3210,8 +3209,8 @@ class JaxBackpropPlanner:
         means = np.zeros((n_boot,))
         for i in range(n_boot):
             means[i] = np.mean(np.random.choice(returns, size=len(returns), replace=True))
-        lower = np.percentile(means, 100 * (1 - confidence) / 2)
-        upper = np.percentile(means, 100 * (1 + confidence) / 2)
+        lower = np.percentile(means, 100 * 0.5 * (1 - confidence))
+        upper = np.percentile(means, 100 * 0.5 * (1 + confidence))
         mean = np.mean(returns)
         return mean, lower, upper
 
