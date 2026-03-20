@@ -299,6 +299,8 @@ class StaticNormalizer(Preprocessor):
                 user_bounds = self.fluent_bounds.get(var, None)
                 if user_bounds is not None:
                     bounded_vars[var] = tuple(user_bounds)
+        bounded_vars = jax.tree_util.tree_map(
+            partial(np.asarray, dtype=compiled.REAL), bounded_vars)
         
         # initialize to ranges computed by the constraint parser
         def _jax_wrapped_normalizer_init():
@@ -307,8 +309,7 @@ class StaticNormalizer(Preprocessor):
 
         # static bounds
         def _jax_wrapped_normalizer_update(fls, stats):
-            return jax.tree_util.tree_map(
-                partial(jnp.asarray, dtype=compiled.REAL), bounded_vars)
+            return bounded_vars
         self._update = jax.jit(_jax_wrapped_normalizer_update)
 
         # apply min max scaling
@@ -2668,7 +2669,11 @@ class JaxBackpropPlanner:
             return policy_params, test_loss, test_loss_smooth, converged
         return jax.jit(_jax_wrapped_batched_pgpe_merge)
     
-    def _broadcast_pytree(self, pytree):
+    # ===========================================================================
+    # OPTIMIZE API
+    # ===========================================================================
+
+    def _batched_pytree(self, pytree):
         def make_batched(x):
             x = np.asarray(x)
             x = np.repeat(x[np.newaxis, ...], self.parallel_updates, axis=0)
@@ -2749,10 +2754,6 @@ class JaxBackpropPlanner:
         
         return _loss_function, _grad_function, guess_1d, jax.jit(unravel_fn)
                 
-    # ===========================================================================
-    # OPTIMIZE API
-    # ===========================================================================
-
     def optimize(self, *args, **kwargs) -> Dict[str, Any]:
         '''Compute an optimal policy or plan. Return the callback from training.
         
@@ -2900,8 +2901,8 @@ class JaxBackpropPlanner:
         # initialize model parameters
         if model_params is None:
             model_params = self.compiled.model_aux['params']
-        model_params_train = self._broadcast_pytree(model_params)
-        model_params_test = self._broadcast_pytree(self.test_compiled.model_aux['params'])
+        model_params_train = self._batched_pytree(model_params)
+        model_params_test = self._batched_pytree(self.test_compiled.model_aux['params'])
 
         # initialize simulator states for training and testing
         train_sim_state = JaxRDDLSimState(
@@ -2918,7 +2919,7 @@ class JaxBackpropPlanner:
         if guess is not None:
             if policy_hyperparams is None:
                 raise ValueError('guess was provided without policy_hyperparams.')
-            planner_state = planner_state.replace(policy_params=self._broadcast_pytree(guess))
+            planner_state = planner_state.replace(policy_params=self._batched_pytree(guess))
         planner_state = self.initialize(train_sim_state, planner_state, guess is None)
 
         # initialize pgpe parameters
@@ -3183,8 +3184,7 @@ class JaxBackpropPlanner:
             max_grad_norm = max(grad_norms) if grad_norms else np.nan
 
             # calculate best policy return
-            planner_state = planner_state.replace(
-                policy_params=self._broadcast_pytree(best_params))
+            planner_state = planner_state.replace(policy_params=self._batched_pytree(best_params))
             _, (final_log, _) = self.test_loss(test_sim_state, planner_state)
             best_returns = np.ravel(np.sum(final_log['reward'], axis=2))
             mean, rlo, rhi = self.ci_bootstrap(best_returns)            
