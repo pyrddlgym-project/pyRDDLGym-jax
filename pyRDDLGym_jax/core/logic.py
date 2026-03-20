@@ -870,7 +870,7 @@ class LinearIfElse(JaxRDDLCompilerWithGrad):
             if self.use_if_else_ste:
                 hard_pred = jnp.asarray(sample_pred > 0.5, dtype=sample_pred.dtype)
                 sample_pred = sample_pred + jax.lax.stop_gradient(hard_pred - sample_pred)
-            sample = sample_pred * sample_true + (1 - sample_pred) * sample_false
+            sample = sj.where(sample_pred, sample_true, sample_false)
             err = err1 | err2 | err3
             return sample, key, err, params
         return _jax_wrapped_if_then_else_linear
@@ -916,20 +916,10 @@ class TriangleKernelSwitch(JaxRDDLCompilerWithGrad):
             (jax_default if _case is None else self._jax(_case, aux))
             for _case in cases
         ]
+        jax_pred_and_cases = self._jax_pred_and_cases(jax_pred, jax_cases)
                     
         def _jax_wrapped_switch_softmax(fls, nfls, params, key):
-            
-            # sample predicate
-            sample_pred, key, err, params = jax_pred(fls, nfls, params, key) 
-            
-            # sample cases
-            sample_cases = []
-            for jax_case in jax_cases:
-                sample, key, err_case, params = jax_case(fls, nfls, params, key)
-                sample_cases.append(sample)
-                err = err | err_case      
-            sample_cases = jnp.asarray(sample_cases)          
-            sample_cases = jnp.asarray(sample_cases, dtype=self._fix_dtype(sample_cases))
+            sample_pred, sample_cases, key, err, params = jax_pred_and_cases(fls, nfls, params, key)
             
             # replace integer indexing with weighted triangular kernel
             sample_pred_soft = jnp.broadcast_to(
