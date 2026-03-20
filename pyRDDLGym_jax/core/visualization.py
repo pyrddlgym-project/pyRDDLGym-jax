@@ -785,7 +785,7 @@ class JaxPlannerDashboard:
                     )
                     for (ic, (tick, dist)) in enumerate(zip(ticks, return_dists)):
                         fig.add_trace(go.Violin(
-                            y=dist, line_color=colors[ic], name=f'{tick}'
+                            y=dist, line_color=colors[min(ic, len(colors) - 1)], name=f'{tick}'
                         ))
                     fig.update_traces(
                         orientation='v', side='positive', width=3, points=False)
