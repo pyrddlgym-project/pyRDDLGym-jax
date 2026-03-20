@@ -1587,6 +1587,19 @@ class JaxRDDLCompiler:
             return sample, key, err, params
         return _jax_wrapped_if_then_else
     
+    def _jax_pred_and_cases(self, jax_pred, jax_cases):
+        def _jax_wrapped_switch_pred_and_cases(fls, nfls, params, key):
+            sample_pred, key, err, params = jax_pred(fls, nfls, params, key) 
+            sample_cases = []
+            for jax_case in jax_cases:
+                sample, key, err_case, params = jax_case(fls, nfls, params, key)
+                sample_cases.append(sample)
+                err = err | err_case      
+            sample_cases = jnp.asarray(sample_cases)          
+            sample_cases = jnp.asarray(sample_cases, dtype=self._fix_dtype(sample_cases))
+            return sample_pred, sample_cases, key, err, params
+        return _jax_wrapped_switch_pred_and_cases
+
     def _jax_switch(self, expr, aux):
         aux['exact'].add(expr.id)
 
@@ -1601,20 +1614,10 @@ class JaxRDDLCompiler:
             (jax_default if _case is None else self._jax(_case, aux))
             for _case in cases
         ]
+        jax_pred_and_cases = self._jax_pred_and_cases(jax_pred, jax_cases)
                     
         def _jax_wrapped_switch(fls, nfls, params, key):
-            
-            # sample predicate
-            sample_pred, key, err, params = jax_pred(fls, nfls, params, key) 
-            
-            # sample cases
-            sample_cases = []
-            for jax_case in jax_cases:
-                sample, key, err_case, params = jax_case(fls, nfls, params, key)
-                sample_cases.append(sample)
-                err = err | err_case      
-            sample_cases = jnp.asarray(sample_cases)          
-            sample_cases = jnp.asarray(sample_cases, dtype=self._fix_dtype(sample_cases))
+            sample_pred, sample_cases, key, err, params = jax_pred_and_cases(fls, nfls, params, key)
             
             # predicate (enum) is an integer - use it to extract from case array
             sample_pred = jnp.asarray(sample_pred[jnp.newaxis, ...], dtype=self.INT)
@@ -2061,7 +2064,7 @@ class JaxRDDLCompiler:
             scale, key, err2, params = jax_scale(fls, nfls, params, key)
             key, subkey = random.split(key)
             U = random.uniform(key=subkey, shape=jnp.shape(scale), dtype=self.REAL)
-            sample = sj.div(sj.div(jnp.log(1.0 - jnp.log1p(-U)), shape), scale)
+            sample = sj.div(sj.div(sj.log(1.0 - jnp.log1p(-U)), shape), scale)
             out_of_bounds = jnp.logical_not(jnp.all(jnp.logical_and(shape > 0, scale > 0)))
             err = err1 | err2 | (out_of_bounds * ERR)
             return sample, key, err, params        
@@ -2149,7 +2152,7 @@ class JaxRDDLCompiler:
         def _jax_wrapped_distribution_discrete(fls, nfls, params, key):
             prob, key, error, params = prob_fn(fls, nfls, params, key)
             key, subkey = random.split(key)
-            sample = random.categorical(key=subkey, logits=jnp.log(prob), axis=-1)
+            sample = random.categorical(key=subkey, logits=sj.log(prob), axis=-1)
             error = JaxRDDLCompiler._jax_update_discrete_oob_error(error, prob)
             return sample, key, error, params        
         return _jax_wrapped_distribution_discrete
@@ -2175,7 +2178,7 @@ class JaxRDDLCompiler:
         def _jax_wrapped_distribution_discrete_pvar(fls, nfls, params, key):
             prob, key, error, params = prob_fn(fls, nfls, params, key)
             key, subkey = random.split(key)
-            sample = random.categorical(key=subkey, logits=jnp.log(prob), axis=-1)
+            sample = random.categorical(key=subkey, logits=sj.log(prob), axis=-1)
             error = JaxRDDLCompiler._jax_update_discrete_oob_error(error, prob)
             return sample, key, error, params        
         return _jax_wrapped_distribution_discrete_pvar
