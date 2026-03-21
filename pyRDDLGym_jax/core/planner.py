@@ -625,7 +625,7 @@ def jax_bound_action(branches, lower, upper, param):
 class JaxStraightLinePlan(JaxPlan):
     '''A straight line plan implementation in JAX'''
 
-    history_dependent = True
+    history_dependent = False
     
     def __init__(self, initializer: initializers.Initializer=initializers.normal(),
                  wrap_sigmoid: bool=True,
@@ -884,7 +884,8 @@ class JaxStraightLinePlan(JaxPlan):
         init_fn = self._initializer
         stack_bool_params = allowed_actions < bool_action_count and self._wrap_softmax
 
-        def _jax_wrapped_slp_init(key, fls):
+        def _jax_wrapped_slp_init(sim_state, planner_state):
+            key = sim_state.key
             hyperparams = {var: self._sigmoid_weight for var in rddl.action_fluents}
             params = {}
             for (var, shape) in shapes.items():
@@ -899,7 +900,9 @@ class JaxStraightLinePlan(JaxPlan):
                 shape = (horizon, bool_action_count)
                 params[BOOL_KEY] = init_fn(key=subkey, shape=shape, dtype=compiled.REAL)
             params, _ = _jax_wrapped_slp_project_to_box(params, hyperparams)
-            return params, hyperparams
+            planner_state = planner_state.replace(
+                policy_params=params, policy_hparams=hyperparams)
+            return planner_state
         self.initializer = _jax_wrapped_slp_init
     
     @staticmethod
@@ -1327,15 +1330,17 @@ class JaxDeepReactivePolicy(JaxPlan):
         # ***********************************************************************
         
         # initialize policy parameters according to user-desired weight initializer
-        def _jax_wrapped_drp_init(key, fls):
+        def _jax_wrapped_drp_init(sim_state, planner_state):
             hyperparams = {SOFTMAX_KEY: self._softmax_output_weight}
             if preprocessor is not None:
                 hyperparams[Preprocessor.HYPERPARAMS_KEY] = preprocessor.initialize()
             obs_vars = {var: value[0, ...] 
-                        for (var, value) in fls.items()
+                        for (var, value) in sim_state.fls.items()
                         if var in observed_vars}
-            params = predict_fn.init(key, obs_vars, hyperparams, 0, train=1)
-            return params, hyperparams
+            params = predict_fn.init(sim_state.key, obs_vars, hyperparams, 0, train=1)
+            planner_state = planner_state.replace(
+                policy_params=params, policy_hparams=hyperparams)
+            return planner_state
         self.initializer = _jax_wrapped_drp_init
         
     def guess_next_epoch(self, params: Pytree) -> Pytree:
@@ -1460,13 +1465,15 @@ class JaxRDDLPolicy(JaxPlan):
         # ***********************************************************************
         
         # params <- default non-fluent values, hyperparams <- model-params
-        def _jax_wrapped_rddl_init(key, fls):
+        def _jax_wrapped_rddl_init(sim_state, planner_state):
             hyperparams = compiled.model_aux['params']
             policy_params = {
                 name: jnp.asarray(compiled.init_policy_values[name], dtype=compiled.REAL) 
                 for name in param_fluent_vars
             }
-            return policy_params, hyperparams
+            planner_state = planner_state.replace(
+                policy_params=policy_params, policy_hparams=hyperparams)
+            return planner_state
         self.initializer = _jax_wrapped_rddl_init
 
     def guess_next_epoch(self, params: Pytree) -> Pytree:
@@ -1657,20 +1664,26 @@ class GaussianPGPE(PGPE):
         
         # use the default initializer for the (mean, sigma) parameters
         # these parameters define the sampling distribution over policy parameters
-        def _jax_wrapped_pgpe_init(key, policy_params):
-            mu = policy_params
+        def _jax_wrapped_pgpe_init(sim_state, planner_state):
+            mu = planner_state.policy_params
             sigma = jax.tree_util.tree_map(
                 partial(jnp.full_like, fill_value=sigma0, dtype=real_dtype), mu)
             stats = {'mu': mu, 'sigma': sigma}
             pgpe_opt_state = optimizer.init(stats)
             pgpe_params = {'stats': stats, 'r_max': -jnp.inf}
-            return pgpe_params, pgpe_opt_state
+            pgpe_state = JaxPGPEState(
+                pgpe_params=pgpe_params, pgpe_opt_state=pgpe_opt_state)
+            return pgpe_state
         
         # for parallel policy update, initialize multiple indepdendent (mean, sigma)
         # gaussians that will be optimized in parallel
-        def _jax_wrapped_batched_pgpe_init(key, policy_params):
-            keys = random.split(key, num=parallel_updates)
-            return jax.vmap(_jax_wrapped_pgpe_init, in_axes=0)(keys, policy_params)
+        def _jax_wrapped_batched_pgpe_init(sim_state, planner_state):
+            keys = random.split(sim_state.key, num=parallel_updates)
+            sim_state = sim_state.replace(key=keys)
+            vmap_axes = (JaxRDDLSimState(key=0), JaxPlannerState(policy_params=0))
+            pgpe_state = jax.vmap(
+                _jax_wrapped_pgpe_init, in_axes=vmap_axes)(sim_state, planner_state)
+            return pgpe_state
 
         self._initializer = jax.jit(_jax_wrapped_batched_pgpe_init)
 
@@ -1895,7 +1908,7 @@ class GaussianPGPE(PGPE):
                         stats['mu'], stats['sigma'], new_stats['mu'], new_stats['sigma']
                     )
                     sum_kl = jax.tree_util.tree_reduce(jnp.add, kl)
-                    scale = jnp.minimum(1.0, sj.sqrt(sj.div(max_kl, sum_kl + 1e-12)))
+                    scale = jnp.minimum(1.0, sj.sqrt(sj.div(max_kl, sum_kl + self.eps)))
                     grad = jax.tree_util.tree_map(lambda g: g * scale, grad)
                     new_stats, new_opt_state = _jax_wrapped_pgpe_update_helper(
                         stats, grad, pgpe_opt_state)
@@ -2552,21 +2565,22 @@ class JaxBackpropPlanner:
         num_parallel = self.parallel_updates
         
         # initialize both the policy and its optimizer
-        def _jax_wrapped_init_policy_and_opt(key, fls):
-            policy_params, policy_hparams = plan_init_fn(key, fls)
-            opt_state = optimizer.init(policy_params)
-            return policy_params, policy_hparams, opt_state   
+        def _jax_wrapped_init_policy(sim_state, planner_state):
+            planner_state = plan_init_fn(sim_state, planner_state)
+            opt_state = optimizer.init(planner_state.policy_params)
+            planner_state = planner_state.replace(opt_state=opt_state)
+            return planner_state
         
         # initialize multiple policies to be optimized in parallel
         def _jax_wrapped_batched_init_policy(sim_state, planner_state, init_policy=True):
-            keys = random.split(sim_state.key, num=num_parallel)
             if init_policy:
-                policy_params, policy_hparams, opt_state = jax.vmap(
-                    _jax_wrapped_init_policy_and_opt, in_axes=(0, None))(keys, sim_state.fls)  
-                policy_hparams = jax.tree_util.tree_map(lambda x: x[0], policy_hparams)
-                planner_state = planner_state.replace(
-                    policy_params=policy_params, policy_hparams=policy_hparams, 
-                    opt_state=opt_state, opt_aux={})
+                keys = random.split(sim_state.key, num=num_parallel)
+                sim_state = sim_state.replace(key=keys)
+                vmap_axes = (JaxRDDLSimState(key=0), None)
+                planner_state = jax.vmap(
+                    _jax_wrapped_init_policy, in_axes=vmap_axes)(sim_state, planner_state)  
+                policy_hparams = _unbatched_pytree(planner_state.policy_hparams, 0)
+                planner_state = planner_state.replace(policy_hparams=policy_hparams)
             else:
                 opt_state = jax.vmap(optimizer.init, in_axes=0)(planner_state.policy_params)
                 planner_state = planner_state.replace(opt_state=opt_state, opt_aux={})
@@ -2924,8 +2938,7 @@ class JaxBackpropPlanner:
 
         # initialize pgpe parameters
         if self.use_pgpe:
-            _params, _opt_state = self.pgpe.initialize(key, planner_state.policy_params)
-            pgpe_state = JaxPGPEState(pgpe_params=_params, pgpe_opt_state=_opt_state)
+            pgpe_state = self.pgpe.initialize(test_sim_state, planner_state)
             rolling_pgpe_loss = RollingMean(test_rolling_window)
         else:
             pgpe_state = rolling_pgpe_loss = None
