@@ -3353,7 +3353,6 @@ def _init_fls_hist(planner):
 
 def _update_fls_hist(fls_hist, step, states, actions):
     for (name, value) in fls_hist.items():
-        assert (name in states or name in actions)
         if name in states:
             value[step] = np.reshape(states[name], np.shape(value[step]))
         elif name in actions:
