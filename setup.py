@@ -41,7 +41,7 @@ setup(
           'extra': ['bayesian-optimization>=2.0.0', 'rddlrepository>=2.0'],
           'dashboard': ['dash>=2.18.0', 'dash-bootstrap-components>=1.6.0']
       },
-      python_requires=">=3.11",
+      python_requires=">=3.12",
       package_data={'': ['*.cfg', '*.ico']},
       include_package_data=True,
       entry_points={ 
@@ -54,7 +54,6 @@ setup(
         "Natural Language :: English",
         "Operating System :: OS Independent",
         "Programming Language :: Python :: 3",
-        "Programming Language :: Python :: 3.11",
         "Programming Language :: Python :: 3.12",
         "Programming Language :: Python :: 3.13",
         "Topic :: Scientific/Engineering :: Artificial Intelligence",
