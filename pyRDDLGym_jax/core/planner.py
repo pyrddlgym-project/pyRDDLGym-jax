@@ -2683,7 +2683,8 @@ class JaxBackpropPlanner:
         return jax.tree_util.tree_map(make_batched, pytree)
     
     def as_optimization_problem(self, key: Optional[random.PRNGKey]=None,
-                                critic_params: Optional[Pytree]=None) -> Tuple[Callable, Callable, np.ndarray, Callable]:
+                                critic_params: Optional[Pytree]=None,
+                                print_values: bool=False) -> Tuple[Callable, Callable, np.ndarray, Callable]:
         '''Returns a function that computes the loss and a function that 
         computes gradient of the return as a 1D vector given a 1D representation 
         of policy parameters. These functions are designed to be compatible with 
@@ -2699,6 +2700,7 @@ class JaxBackpropPlanner:
         
         :param key: JAX PRNG key (derived from clock if not provided)
         :param critic_params: optional critic network parameters
+        :param print_values: whether to print objective values during function calls
         '''
 
         # make sure parallel updates are disabled
@@ -2740,6 +2742,8 @@ class JaxBackpropPlanner:
         def _loss_function(params_1d):
             nonlocal sim_state
             loss_val, sim_state = _loss_with_key(params_1d, sim_state)
+            if print_values:
+                print(f'Loss: {loss_val:.6f}')
             return float(loss_val)
         
         def _grad_function(params_1d):
@@ -3156,9 +3160,7 @@ class JaxBackpropPlanner:
         if print_summary:
 
             # calculate gradient norm
-            grad_norm = jax.tree_util.tree_map(lambda x: np.linalg.norm(x).item(), best_grad)
-            grad_norms = jax.tree_util.tree_leaves(grad_norm)
-            max_grad_norm = max(grad_norms) if grad_norms else np.nan
+            grad_norm = optax.tree.norm(best_grad) if best_grad is not None else np.nan
 
             # calculate best policy return
             final_planner_state = planner_state.replace(
@@ -3171,7 +3173,7 @@ class JaxBackpropPlanner:
             # diagnosis
             diagnosis = self._perform_diagnosis(
                 last_iter_improve, -np.min(train_loss), -np.min(test_loss_smooth), 
-                -best_loss, max_grad_norm
+                -best_loss, grad_norm
             )
             print(
                 f'[INFO] Summary of optimization:\n'
@@ -3179,7 +3181,7 @@ class JaxBackpropPlanner:
                 f'    time:             {elapsed:.2f} seconds\n'
                 f'    iterations:       {it}\n'
                 f'    best objective:   {-best_loss:.5f}\n'
-                f'    best grad norm:   {max_grad_norm:.5f}\n'
+                f'    best grad norm:   {grad_norm:.5f}\n'
                 f'    best cuml reward: Mean = {mean:.5f}, 95% CI [{rlo:.5f}, {rhi:.5f}]\n'
                 f'    diagnosis:        {diagnosis}\n'
             )
@@ -3195,8 +3197,7 @@ class JaxBackpropPlanner:
         return mean, lower, upper
 
     def _perform_diagnosis(self, last_iter_improve, train_return, test_return, best_return, 
-                           max_grad_norm, train_test_valid_bound=0.2,
-                           grad_relative_return_bound=1.0):
+                           grad_norm, train_test_valid_bound=0.2, grad_rel_return_bound=1.0):
         
         # divergence if the solution is not finite
         if not np.isfinite(train_return):
@@ -3205,16 +3206,16 @@ class JaxBackpropPlanner:
         # hit a plateau is likely IF:
         # 1. planner does not improve at all
         # 2. the gradient norm at the best solution is zero
-        grad_is_zero = np.allclose(max_grad_norm, 0)
+        grad_is_zero = np.allclose(grad_norm, 0)
         if last_iter_improve <= 1:
             if grad_is_zero:
                 return termcolor.colored(
-                    f'[FAIL] No progress and ||g||={max_grad_norm:.4f}, '
+                    f'[FAIL] No progress and ||g||={grad_norm:.4f}, '
                     f'solver initialized in a plateau.', 'red'
                 )
             else:
                 return termcolor.colored(
-                    f'[FAIL] No progress and ||g||={max_grad_norm:.4f}, '
+                    f'[FAIL] No progress and ||g||={grad_norm:.4f}, '
                     f'adjust learning rate or other parameters.', 'red'
                 )
         
@@ -3231,9 +3232,9 @@ class JaxBackpropPlanner:
         # model likely did not converge IF:
         # 1. the max grad relative to the return is high
         if not grad_is_zero:
-            if not (abs(best_return) > grad_relative_return_bound * max_grad_norm):
+            if not (abs(best_return) > grad_rel_return_bound * grad_norm):
                 return termcolor.colored(
-                    f'[WARN] Progress but large ||g||={max_grad_norm:.4f}, '
+                    f'[WARN] Progress but large ||g||={grad_norm:.4f}, '
                     f'adjust learning rate or budget.', 'yellow'
                 )
         
