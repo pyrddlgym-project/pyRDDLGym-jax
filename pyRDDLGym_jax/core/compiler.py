@@ -650,13 +650,14 @@ class JaxRDDLCompiler:
         jax_fn = self._compile_unrolled_policy_step(jax_fn, n_steps, history_dependent)
         return jax_fn
     
-    def init_fls_and_nfls(self, init_values: Dict[str, Any], batch_size: int) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    def init_fls_and_nfls(self, init_values: Dict[str, Any], 
+                          fls_batch_size: int) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         '''Converts a dictionary of initial value tensors into fls and nfls arguments
         for the compiled Jax functions. It automatically adds batch dimensions to fls and 
         converts enum string values to integer indices.
 
         :param init_values: a dictionary of variable name to initial value tensor pairs
-        :param batch_size: the batch size to add as a dimension to fluent tensors
+        :param fls_batch_size: the batch size to add as a dimension to fluent tensors
         '''
         rddl = self.rddl
         fls, nfls = {}, {}
@@ -681,7 +682,7 @@ class JaxRDDLCompiler:
             # add batch dimension if needed and split into fluents and non-fluents
             if name not in rddl.non_fluents \
             and (rddl.policy is None or name not in rddl.policy.non_fluents):
-                fls[name] = np.repeat(value[np.newaxis, ...], repeats=batch_size, axis=0)
+                fls[name] = np.repeat(value[np.newaxis, ...], repeats=fls_batch_size, axis=0)
             else:
                 nfls[name] = value
             
@@ -710,6 +711,50 @@ class JaxRDDLCompiler:
 
         return fls, nfls      
                 
+    def init_sim_state(self, key: jax.random.PRNGKey, 
+                       init_values: Optional[Dict[str, Any]], 
+                       fls_batch_size: int, 
+                       print_warnings: bool=True) -> JaxRDDLSimState:
+        '''Creates a JaxRDDLSimState containing the initial state of the environment 
+        for the given batch size and RNG key.
+
+        :param key: the RNG key to initialize the sim state with
+        :param init_values: a dictionary of variable name to initial value tensor pairs
+        :param fls_batch_size: the batch size to add as a dimension to fluent tensors
+        :param print_warnings: whether to print warnings about missing p-variables
+        '''
+        # values to draw from in case of missing subs
+        init_policy_values = {
+            var: value
+            for (var, value) in self.init_policy_values.items()
+            if var not in self.rddl.policy.param_fluents
+        }
+        default_init_values = {**self.init_values, **init_policy_values}
+
+        # fix missing entries in init_values
+        if init_values is None:
+            init_values = default_init_values
+        else:
+            # if some p-variables are not provided, add their default values
+            init_values = init_values.copy()
+            added_pvars_to_init_values = set()
+            for (var, value) in default_init_values.items():
+                if var not in init_values:
+                    init_values[var] = value
+                    added_pvars_to_init_values.add(var)
+            if print_warnings and added_pvars_to_init_values:
+                print(termcolor.colored(
+                    f'[INFO] p-variable(s) {added_pvars_to_init_values} are not in '
+                    f'provided init_values: using their RDDL values.', 'dark_grey'
+                ))
+
+        # convert init_values to fls and nfls dictionaries for the sim state
+        fls, nfls = self.init_fls_and_nfls(init_values, fls_batch_size)
+
+        # create the sim state with the initialized values
+        return JaxRDDLSimState(
+            key=key, step=0, fls=fls, nfls=nfls, model_params=self.model_aux['params'])
+        
     # ===========================================================================
     # error checks and prints
     # ===========================================================================

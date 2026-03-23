@@ -257,14 +257,17 @@ class Preprocessor(metaclass=ABCMeta):
         self._update = None
         self._transform = None
 
+    # signature is initialize() -> Pytree
     @property
     def initialize(self) -> Callable:
         return self._initializer
 
+    # signature is update(fls: Pytree, stats: Pytree) -> Pytree
     @property
     def update(self) -> Callable:
         return self._update
     
+    # signature is transform(fls: Pytree, stats: Pytree) -> Pytree
     @property
     def transform(self) -> Callable:
         return self._transform
@@ -370,6 +373,7 @@ class JaxPlan(metaclass=ABCMeta):
     def guess_next_epoch(self, params: Pytree) -> Pytree:
         pass
     
+    # signature is initializer(sim_state) -> (params: Pytree, hyperparams: Pytree)
     @property
     def initializer(self) -> Callable:
         return self._initializer
@@ -378,6 +382,7 @@ class JaxPlan(metaclass=ABCMeta):
     def initializer(self, value: Callable) -> None:
         self._initializer = value
     
+    # signature is train_policy(sim_state, planner_state) -> (actions: Dict)
     @property
     def train_policy(self) -> Callable:
         return self._train_policy
@@ -385,7 +390,8 @@ class JaxPlan(metaclass=ABCMeta):
     @train_policy.setter
     def train_policy(self, value: Callable) -> None:
         self._train_policy = value
-        
+    
+    # signature is test_policy(sim_state, planner_state) -> (actions: Dict)
     @property
     def test_policy(self) -> Callable:
         return self._test_policy
@@ -393,7 +399,8 @@ class JaxPlan(metaclass=ABCMeta):
     @test_policy.setter
     def test_policy(self, value: Callable) -> None:
         self._test_policy = value
-         
+        
+    # signature is projection(planner_state) -> (params: Pytree, converged: bool)
     @property
     def projection(self) -> Callable:
         return self._projection
@@ -1499,14 +1506,18 @@ class PGPE(metaclass=ABCMeta):
         self._update = None
         self._policy_params = None
 
+    # signature is initialize(sim_state, planner_state, pgpe_state) -> pgpe_state
     @property
     def initialize(self) -> Callable:
         return self._initializer
 
+    # signature is update(sim_state, planner_state, pgpe_state, progress: float) 
+    #     -> (sim_state, pgpe_state, converged: bool)
     @property
     def update(self) -> Callable:
         return self._update
 
+    # signature is policy_params(pgpe_state) -> policy_params: Pytree
     @property
     def policy_params(self) -> Callable:
         return self._policy_params
@@ -2400,6 +2411,8 @@ class JaxBackpropPlanner:
         )
         self.test_compiled.compile(log_jax_expr=True, heading='EXACT MODEL',
                                    compile_constraints=False)
+        
+        self.init_test_nfls = self.test_compiled.init_sim_state(None, None, 1, False).nfls
 
     def _jax_compile_policy(self):
         if self.preprocessor is not None:
@@ -2452,17 +2465,6 @@ class JaxBackpropPlanner:
         else:
             self.merge_pgpe = None
     
-    def _compile_test_values(self):
-        self.init_test_policy_values = {
-            var: value
-            for (var, value) in self.test_compiled.init_policy_values.items()
-            if var not in self.rddl.policy.param_fluents
-        }
-        self.init_test_values = {
-            **self.test_compiled.init_values, **self.init_test_policy_values
-        }
-        _, self.init_test_nfls = self.test_compiled.init_fls_and_nfls(self.init_test_values, 1)
-
     def _jax_compile_graph(self):
         self._jax_compile_rddl()
         self._jax_compile_policy()
@@ -2470,7 +2472,6 @@ class JaxBackpropPlanner:
         self._jax_compile_train_update()
         self._jax_compile_test_loss()
         self._jax_compile_pgpe()
-        self._compile_test_values()        
     
     def _jax_critic(self):
         critic_fn = self.critic_fn
@@ -2710,11 +2711,7 @@ class JaxBackpropPlanner:
             key = random.PRNGKey(round(time.time() * 1000))
             
         # initialize the simulation state
-        fls, nfls = self.compiled.init_fls_and_nfls(
-            self.init_test_values, self.batch_size_train)
-        model_params = self.compiled.model_aux['params']
-        sim_state = JaxRDDLSimState(
-            key=key, step=0, fls=fls, nfls=nfls, model_params=model_params)
+        sim_state = self.compiled.init_sim_state(key, None, self.batch_size_train)
         
         # initialize the planner state
         planner_state = JaxPlannerState(critic_params=critic_params)
@@ -2876,37 +2873,20 @@ class JaxBackpropPlanner:
         # ======================================================================
         # INITIALIZATION OF SIMULATOR STATE
         # ======================================================================
-
-        # compute a batched version of the initial values
-        if subs is None:
-            subs = self.init_test_values
-        else:
-            # if some p-variables are not provided, add their default values
-            subs = subs.copy()
-            added_pvars_to_subs = set()
-            for (var, value) in self.init_test_values.items():
-                if var not in subs:
-                    subs[var] = value
-                    added_pvars_to_subs.add(var)
-            if self.print_warnings and added_pvars_to_subs:
-                print(termcolor.colored(
-                    f'[INFO] p-variable(s) {added_pvars_to_subs} are not in '
-                    f'provided subs: using their initial values.', 'dark_grey'
-                ))
-        train_fls, train_nfls = self.compiled.init_fls_and_nfls(subs, self.batch_size_train)
-        test_fls, test_nfls = self.test_compiled.init_fls_and_nfls(subs, self.batch_size_test)
         
-        # initialize model parameters
-        if model_params is None:
-            model_params = self.compiled.model_aux['params']
-        model_params_train = self._batched_pytree(model_params)
-        model_params_test = self._batched_pytree(self.test_compiled.model_aux['params'])
+        # initialize simulation state
+        train_sim_state = self.compiled.init_sim_state(
+            key, subs, self.batch_size_train, print_warnings=self.print_warnings)
+        test_sim_state = self.test_compiled.init_sim_state(
+            key, subs, self.batch_size_test, print_warnings=self.print_warnings)
 
-        # initialize simulator states for training and testing
-        train_sim_state = JaxRDDLSimState(key=key, step=0, fls=train_fls, nfls=train_nfls, 
-                                          model_params=model_params_train)
-        test_sim_state = JaxRDDLSimState(key=key, step=0, fls=test_fls, nfls=test_nfls, 
-                                         model_params=model_params_test)
+        # update model params from user
+        if model_params is None:
+            model_params = train_sim_state.model_params
+        train_sim_state = train_sim_state.replace(
+            model_params=self._batched_pytree(model_params))
+        test_sim_state = test_sim_state.replace(
+            model_params=self._batched_pytree(test_sim_state.model_params))
                         
         # ======================================================================
         # INITIALIZATION OF PLANNER STATE
@@ -3357,7 +3337,7 @@ def _update_fls_hist(fls_hist, step, states, actions):
             value[step] = np.reshape(states[name], np.shape(value[step]))
         elif name in actions:
             value[step] = np.reshape(actions[name], np.shape(value[step]))
-    
+
 
 class JaxOfflineController(BaseAgent):
     '''A container class for a Jax policy trained offline.'''
@@ -3441,7 +3421,11 @@ class JaxOfflineController(BaseAgent):
     def reset(self) -> None:
         self.step = 0
         self.fls_hist = _init_fls_hist(self.planner)
-        self.policy_state = self.planner.init_test_policy_values
+        self.policy_state = {
+            var: value
+            for (var, value) in self.planner.test_compiled.init_policy_values.items()
+            if var not in self.planner.test_compiled.rddl.policy.param_fluents
+        }
 
         # train the policy if required to reset at the start of every episode
         if self.train_on_reset and not self.params_given:
@@ -3550,5 +3534,9 @@ class JaxOnlineController(BaseAgent):
         self.hyperparams = None
         self.callback = None
         self.fls_hist = _init_fls_hist(self.planner)
-        self.policy_state = self.planner.init_test_policy_values
+        self.policy_state = {
+            var: value
+            for (var, value) in self.planner.test_compiled.init_policy_values.items()
+            if var not in self.planner.test_compiled.rddl.policy.param_fluents
+        }
     
