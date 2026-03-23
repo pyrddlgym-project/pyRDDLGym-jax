@@ -2613,7 +2613,9 @@ class JaxBackpropPlanner:
                 if use_ls:
                     updates, opt_state = optimizer.update(
                         grad, opt_state, params=params, value=loss_val, grad=grad, 
-                        value_fn=_jax_wrapped_plan_params_loss, _sim_state=_sim_state)
+                        value_fn=lambda p, s: _jax_wrapped_plan_params_loss(p, s)[0], 
+                        s=_sim_state
+                    )
                 else:
                     updates, opt_state = optimizer.update(grad, opt_state, params=params) 
 
