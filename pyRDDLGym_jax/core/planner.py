@@ -2884,7 +2884,7 @@ class JaxBackpropPlanner:
         train_sim_state = self.compiled.init_sim_state(
             key, subs, self.batch_size_train, print_warnings=self.print_warnings)
         test_sim_state = self.test_compiled.init_sim_state(
-            key, subs, self.batch_size_test, print_warnings=self.print_warnings)
+            key, subs, self.batch_size_test, print_warnings=False)
 
         # update model params from user
         if model_params is None:
