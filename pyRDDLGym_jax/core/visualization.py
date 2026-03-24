@@ -46,6 +46,7 @@ from pyRDDLGym_jax import __version__
 if TYPE_CHECKING:
     from pyRDDLGym_jax.core.planner import JaxBackpropPlanner
     
+    
 POLICY_DIST_HEIGHT = 400
 POLICY_DIST_PLOTS_PER_ROW = 6
 ACTION_HEATMAP_HEIGHT = 400
@@ -784,7 +785,7 @@ class JaxPlannerDashboard:
                     )
                     for (ic, (tick, dist)) in enumerate(zip(ticks, return_dists)):
                         fig.add_trace(go.Violin(
-                            y=dist, line_color=colors[ic], name=f'{tick}'
+                            y=dist, line_color=colors[min(ic, len(colors) - 1)], name=f'{tick}'
                         ))
                     fig.update_traces(
                         orientation='v', side='positive', width=3, points=False)
@@ -1060,11 +1061,13 @@ class JaxPlannerDashboard:
             for (row, checked) in self.checked.copy().items():
                 if checked:
                     items = []
-                    for (expr_id, expr) in self.relaxed_exprs[row].items():
+                    for expr_path in self.relaxed_exprs_values[row]:
+                        expr_id = int(expr_path.split('/')[0])
+                        expr = self.relaxed_exprs[row][expr_id]
                         items.append(dbc.DropdownMenuItem([
-                            B(f'{expr_id}: '),
+                            B(f'{expr_path}    '),
                             expr.replace('\n', ' ')[:120]
-                        ], id={'type': 'expr-dropdown-item', 'index': expr_id}))
+                        ], id={'type': 'expr-dropdown-item', 'index': expr_path}))
                     break
             return items
         
@@ -1087,21 +1090,21 @@ class JaxPlannerDashboard:
              Input('tabs-main', 'active_tab')],
             [State('model-params-dropdown-expr', 'data')]
         )
-        def update_model_params_graph(n, active_tab, expr_id):
+        def update_model_params_graph(n, active_tab, expr_path):
             if active_tab != 'tab-model': return dash.no_update
             fig = go.Figure()
             fig.update_layout(template='plotly_white')
-            if expr_id == '': return fig            
+            if expr_path == '': return fig            
             for (row, checked) in self.checked.copy().items():
                 if checked:
                     fig.add_trace(go.Scatter(
                         x=self.xticks[row],
-                        y=self.relaxed_exprs_values[row][expr_id],
+                        y=self.relaxed_exprs_values[row][expr_path],
                         mode='lines+markers',
                         marker=dict(size=3), line=dict(width=2)
                     ))
                     fig.update_layout(
-                        title=dict(text=f"Model Parameters for Expression {expr_id}"),
+                        title=dict(text=f"Values of model parameter {expr_path}"),
                         xaxis=dict(title=dict(text="Training Iteration")),
                         yaxis=dict(title=dict(text="Parameter Value")),
                         font=dict(size=PLOT_AXES_FONT_SIZE),
@@ -1165,7 +1168,7 @@ class JaxPlannerDashboard:
             for (row, checked) in self.checked.copy().items():
                 if checked:
                     items = []
-                    for name in self.train_state_fluents[row]:
+                    for name in self.train_state_fluents.get(row, []):
                         items.append(dbc.DropdownMenuItem(
                             [name],
                             id={'type': 'state-fluent-dropdown-item', 'index': name}
@@ -1443,7 +1446,6 @@ class JaxPlannerDashboard:
             expr = planner_info['trace_info'].lookup(info['id'])
             compiled_expr = decompiler.decompile_expr(expr)
             self.relaxed_exprs[experiment_id][info['id']] = compiled_expr
-            self.relaxed_exprs_values[experiment_id][info['id']] = []
         
         return experiment_id
     
@@ -1481,8 +1483,9 @@ class JaxPlannerDashboard:
             self.train_return[experiment_id].append(np.min(callback['train_return']))  
             self.test_return[experiment_id].append(np.min(callback['best_return']))
             self.pgpe_return[experiment_id].append(np.min(callback['pgpe_return']))
-            for (key, values) in callback['model_params'].items():
-                self.relaxed_exprs_values[experiment_id][key].append(values[0])
+            for (key, values) in walk_params(callback['model_params']):
+                value = np.mean(values, axis=0)
+                self.relaxed_exprs_values[experiment_id].setdefault(key, []).append(value)
             self.basic_time_curve_last_progress[experiment_id] = progress
         
         # data for return distributions

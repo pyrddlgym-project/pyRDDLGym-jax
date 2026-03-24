@@ -350,8 +350,7 @@ class JaxParameterTuning:
         # config string substitution and parsing
         config_params = JaxParameterTuning.search_to_config_params(hyperparams_dict, params)
         if verbose:
-            config_param_str = ', '.join(
-                f'{k}={v}' for (k, v) in config_params.items())
+            config_param_str = ', '.join(f'{k}={v}' for (k, v) in config_params.items())
             print(f'[{index}] key={key[0]}, {config_param_str}', flush=True)
         config_string = JaxParameterTuning.config_from_template(config_template, config_params)
         planner_args, _, train_args = load_config_from_string(config_string)
