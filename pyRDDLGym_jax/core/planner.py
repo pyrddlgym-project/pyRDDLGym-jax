@@ -336,6 +336,7 @@ class StaticNormalizer(Preprocessor):
 #
 # ***********************************************************************
 
+
 @flax.struct.dataclass
 class JaxPlannerState:
     '''The JAX planner state representation.'''
@@ -618,7 +619,7 @@ class JaxSogbofaActionProjection(JaxActionProjection):
         return _jax_wrapped_sogbofa_project
 
 
-def jax_bound_action(branches, lower, upper, param):
+def _jax_bound_action(branches, lower, upper, param):
     lower = jnp.where(jnp.isfinite(lower), lower, 0.0)
     upper = jnp.where(jnp.isfinite(upper), upper, 0.0)
     f_both = lower + (upper - lower) * jax.nn.sigmoid(param)
@@ -737,7 +738,7 @@ class JaxStraightLinePlan(JaxPlan):
                 lower, upper = bounds[var]
                 branches = [jnp.asarray(mask, dtype=compiled.REAL) 
                             for mask in cond_lists[var]]       
-                return jax_bound_action(branches, lower, upper, param)
+                return _jax_bound_action(branches, lower, upper, param)
             else:
                 return param
                 
@@ -1252,7 +1253,7 @@ class JaxDeepReactivePolicy(JaxPlan):
                             lower, upper = bounds[var]
                             branches = [jnp.asarray(mask, dtype=compiled.REAL) 
                                         for mask in cond_lists[var]]       
-                            actions[var] = jax_bound_action(branches, lower, upper, output)
+                            actions[var] = _jax_bound_action(branches, lower, upper, output)
                         else:
                             actions[var] = output
                 
@@ -1357,6 +1358,7 @@ class JaxDeepReactivePolicy(JaxPlan):
 # JAX RDDL policy
 #
 # ***********************************************************************
+
 
 class JaxRDDLPolicy(JaxPlan):
     '''A structured policy whose structure is defined in RDDL policy block.'''
@@ -1491,6 +1493,7 @@ class JaxRDDLPolicy(JaxPlan):
 #
 # ***********************************************************************
 
+
 @flax.struct.dataclass
 class JaxPGPEState:
     '''The JAX PGPE planner state representation.'''
@@ -1603,9 +1606,9 @@ class GaussianPGPE(PGPE):
             optimizer_kwargs_sigma = {'learning_rate': 0.1}
         self.optimizer_kwargs_sigma = optimizer_kwargs_sigma
         self.optimizer_name = optimizer
-        mu_optimizer, inject_mu = build_optax_optimizer(
+        mu_optimizer, inject_mu = _build_optax_optimizer(
             optimizer, optimizer_kwargs_mu, clip_grad_mu, None, None, ema_decay)
-        sigma_optimizer, inject_sigma = build_optax_optimizer(
+        sigma_optimizer, inject_sigma = _build_optax_optimizer(
             optimizer, optimizer_kwargs_sigma, clip_grad_sigma, None, None, ema_decay)
         self.optimizer = optax.multi_transform(
             {'mu': mu_optimizer, 'sigma': sigma_optimizer}, 
@@ -2130,8 +2133,9 @@ class NoImprovementStoppingRule(JaxPlannerStoppingRule):
 # 
 # ***********************************************************************
 
-def build_optax_optimizer(optimizer, optimizer_kwargs, clip_grad, noise_kwargs, 
-                          line_search_kwargs, ema_decay):
+
+def _build_optax_optimizer(optimizer, optimizer_kwargs, clip_grad, noise_kwargs, 
+                           line_search_kwargs, ema_decay):
 
     # set optimizer
     try:
@@ -2270,7 +2274,7 @@ class JaxBackpropPlanner:
         self.python_functions = python_functions
 
         # set optimizer
-        self.optimizer, _ = build_optax_optimizer(
+        self.optimizer, _ = _build_optax_optimizer(
             optimizer, optimizer_kwargs, clip_grad, noise_kwargs, line_search_kwargs, 
             ema_decay
         )
@@ -3177,7 +3181,7 @@ class JaxBackpropPlanner:
             _, (final_log, _) = self.test_loss(test_sim_state, final_planner_state)
             final_returns = np.sum(final_log['reward'], axis=2)
             best_returns = np.ravel(final_returns[best_index])
-            mean, rlo, rhi = self.ci_bootstrap(best_returns)            
+            mean, rlo, rhi = self._ci_bootstrap(best_returns)            
 
             # diagnosis
             diagnosis = self._perform_diagnosis(
@@ -3196,7 +3200,7 @@ class JaxBackpropPlanner:
             )
     
     @staticmethod
-    def ci_bootstrap(returns, confidence=0.95, n_boot=10000):
+    def _ci_bootstrap(returns, confidence=0.95, n_boot=10000):
         means = np.zeros((n_boot,))
         for i in range(n_boot):
             means[i] = np.mean(np.random.choice(returns, size=len(returns), replace=True))
