@@ -1168,7 +1168,7 @@ class JaxPlannerDashboard:
             for (row, checked) in self.checked.copy().items():
                 if checked:
                     items = []
-                    for name in self.train_state_fluents[row]:
+                    for name in self.train_state_fluents.get(row, []):
                         items.append(dbc.DropdownMenuItem(
                             [name],
                             id={'type': 'state-fluent-dropdown-item', 'index': name}
