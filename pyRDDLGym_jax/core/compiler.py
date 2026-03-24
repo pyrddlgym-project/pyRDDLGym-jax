@@ -14,14 +14,17 @@
 
 
 from functools import partial
+import numpy as np
 import termcolor
 import traceback
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import jax
 import jax.numpy as jnp
 import jax.random as random
 import jax.scipy as scipy 
+import flax
+import softjax as sj
 
 from pyRDDLGym.core.compiler.initializer import RDDLValueInitializer
 from pyRDDLGym.core.compiler.levels import RDDLLevelAnalysis
@@ -46,6 +49,17 @@ except Exception:
                   'compilation of some probability distributions will fail.', 'red')
     traceback.print_exc()
     tfp = None
+
+
+@flax.struct.dataclass
+class JaxRDDLSimState:
+    '''The state of a Jax RDDL simulator.'''
+    key: jax.random.PRNGKey=None
+    step: int=None
+    fls: Dict=None
+    fls_hist: Dict=None
+    nfls: Dict=None
+    model_params: Any=None
 
 
 class JaxRDDLCompiler:
@@ -147,7 +161,7 @@ class JaxRDDLCompiler:
             'python_functions': self.python_functions
         }
 
-    def split_fluent_nonfluent(self, values):
+    def split_fls_and_nfls(self, values):
         '''Splits given values dictionary into fluent and non-fluent dictionaries.
         '''
         nonfluents = self.rddl.non_fluents
@@ -384,6 +398,10 @@ class JaxRDDLCompiler:
             return result, key, errors, params
         return _jax_wrapped_policy_cpfs
     
+    # ===========================================================================
+    # rollout compilation subroutines
+    # ===========================================================================
+     
     def compile_transition(self, check_constraints: bool=False,
                            constraint_func: bool=False, 
                            cache_path_info: bool=False,
@@ -392,14 +410,11 @@ class JaxRDDLCompiler:
         samples the next state.
         
         The arguments of the returned function is:
-            - key is the PRNG key
+            - sim_state is a JaxRDDLSimState containing current epoch simulation info
             - actions is the dict of action tensors
-            - fls is the dict of current fluent pvar tensors
-            - nfls is the dict of nonfluent pvar tensors
-            - params is a dict of parameters for the relaxed model.
         
         The returned value of the function is:
-            - fls is the returned next epoch fluent values
+            - sim_state is the updated JaxRDDLSimState after the transition
             - log includes all the auxiliary information about constraints 
               satisfied, errors, etc.
             
@@ -458,12 +473,14 @@ class JaxRDDLCompiler:
             fluents_keys = set()
         
         # do a single step update from the RDDL model
-        def _jax_wrapped_single_step(key, actions, fls, nfls, params):
+        def _jax_wrapped_single_step(sim_state, actions):
             errors = NORMAL
             
-            fls = fls.copy()
-            fls.update(actions)
-            
+            key = sim_state.key
+            fls = {**sim_state.fls, **actions}
+            nfls = sim_state.nfls
+            params = sim_state.model_params
+
             # check action preconditions
             if check_constraints:
                 precond, key, errors, params = precond_fn(key, errors, fls, nfls, params)
@@ -512,72 +529,78 @@ class JaxRDDLCompiler:
                 'inequalities': inequalities,
                 'equalities': equalities
             }                
-            return fls, log, params
+            sim_state = sim_state.replace(key=key, fls=fls, model_params=params)
+            return sim_state, log
         
         return _jax_wrapped_single_step        
     
     def _compile_policy_step(self, policy, transition_fn):
-        def _jax_wrapped_policy_step(key, policy_params, hyperparams, step, fls, nfls, 
-                                     model_params, fls_hist):
-            key, subkey = random.split(key)
-            actions = policy(key, policy_params, hyperparams, step, fls, fls_hist, nfls)
-            return transition_fn(subkey, actions, fls, nfls, model_params)
+        def _jax_wrapped_policy_step(sim_state, planner_state):
+            key, subkey = random.split(sim_state.key)
+            actions = policy(sim_state.replace(key=key), planner_state)
+            sim_state, log = transition_fn(sim_state.replace(key=subkey), actions)
+            return sim_state.fls, sim_state.model_params, log
         return _jax_wrapped_policy_step
 
     def _compile_batched_policy_step(self, policy_step_fn, n_batch, model_params_reduction):
         def _jax_wrapped_batched_policy_step(carry, step):
-            key, policy_params, hyperparams, fls, nfls, model_params, fls_hist = carry  
+            sim_state, planner_state = carry
 
-            # update history 
-            if fls_hist:
-                new_fls_hist = {}
+            # update history with state the policy sees at the current step
+            if sim_state.fls_hist:
+                fls_hist = sim_state.fls_hist.copy()
                 for (name, value) in fls_hist.items():
-                    if name in self.rddl.action_fluents:
-                        write_index = jnp.maximum(step - 1, 0)
-                    else:
-                        write_index = step                    
-                    new_fls_hist[name] = value.at[write_index].set(fls[name])
-                fls_hist = new_fls_hist
+                    if name not in self.rddl.action_fluents:
+                        fls_hist[name] = value.at[step].set(sim_state.fls[name])
+                sim_state = sim_state.replace(fls_hist=fls_hist)
 
             # perform a batched single step from the model
-            keys = random.split(key, num=1 + n_batch)
-            key, subkeys = keys[0], keys[1:]
-            fls, log, model_params = jax.vmap(
-                policy_step_fn, in_axes=(0, None, None, None, 0, None, None, 1)
-            )(subkeys, policy_params, hyperparams, step, fls, nfls, model_params, fls_hist)
+            keys = random.split(sim_state.key, num=1 + n_batch)
+            sim_state = sim_state.replace(key=keys[1:], step=step)
+            vmap_axes = (JaxRDDLSimState(key=0, fls=0, fls_hist=1), None)
+            fls, params, log = jax.vmap(
+                policy_step_fn, in_axes=vmap_axes)(sim_state, planner_state)
+            params = jax.tree_util.tree_map(model_params_reduction, params)
 
-            # must aggregate model params across branches into a single pytree
-            model_params = jax.tree_util.tree_map(model_params_reduction, model_params)
+            # update the sim state with the new fluents and model parameters
+            sim_state = sim_state.replace(key=keys[0], fls=fls, model_params=params)
 
-            carry = (key, policy_params, hyperparams, fls, nfls, model_params, fls_hist)
+            # update history with action the policy took at the current step
+            if sim_state.fls_hist:
+                fls_hist = sim_state.fls_hist.copy()
+                for (name, value) in fls_hist.items():
+                    if name in self.rddl.action_fluents:
+                        fls_hist[name] = value.at[step].set(sim_state.fls[name])
+                sim_state = sim_state.replace(fls_hist=fls_hist)
+
+            carry = (sim_state, planner_state)
             return carry, log 
         return _jax_wrapped_batched_policy_step
         
     def _compile_unrolled_policy_step(self, batched_policy_step_fn, n_steps, history_dependent): 
-        fls_hist_keys = self.fls_hist_keys if history_dependent else set()
-        
-        def _jax_wrapped_batched_policy_rollout(key, policy_params, hyperparams, fls, nfls, 
-                                                model_params):            
+        def _jax_wrapped_batched_policy_rollout(sim_state, planner_state):    
+
             # initialize history the policy sees
             fls_hist = {}
             if history_dependent:
-                for name in fls_hist_keys:
-                    fls_hist[name] = jnp.zeros(
-                        (n_steps,) + jnp.shape(fls[name]), dtype=fls[name].dtype)
+                for name in self.fls_hist_keys:
+                    fl = sim_state.fls[name]
+                    fls_hist[name] = jnp.zeros((n_steps,) + jnp.shape(fl), dtype=fl.dtype)
+            sim_state = sim_state.replace(step=0, fls_hist=fls_hist)
 
             # perform the trajectory unrolling in batched mode
-            start = (key, policy_params, hyperparams, fls, nfls, model_params, fls_hist)
-            steps = jnp.arange(n_steps)
-            end, log = jax.lax.scan(batched_policy_step_fn, start, steps)
+            (sim_state, _), log = jax.lax.scan(
+                f=batched_policy_step_fn, 
+                init=(sim_state, planner_state), 
+                xs=jnp.arange(n_steps)
+            )
 
             # swap the batch and time axis so the batch axis is first
             log = jax.tree_util.tree_map(partial(jnp.swapaxes, axis1=0, axis2=1), log)
             if not log['fluents']:
-                fls_end = end[3]
-                log['fluents'] = {name: jnp.expand_dims(fl, axis=1) 
-                                  for (name, fl) in fls_end.items()}
-            model_params = end[5]
-            return log, model_params        
+                log['fluents'] = jax.tree_util.tree_map(
+                    partial(jnp.expand_dims, axis=1), sim_state.fls)
+            return log, sim_state.model_params        
         return _jax_wrapped_batched_policy_rollout
     
     def compile_rollouts(self, policy: Callable,
@@ -593,12 +616,8 @@ class JaxRDDLCompiler:
         samples trajectories with a fixed horizon from a policy.
         
         The arguments of the returned function is:
-            - key is the PRNG key (used by a stochastic policy)
-            - policy_params is a pytree of trainable policy weights
-            - hyperparams is a pytree of (optional) fixed policy hyper-parameters
-            - fls is the dictionary of current fluent tensor values
-            - nfls is the dictionary of non-fluent tensor value
-            - model_params is a dict of model hyperparameters.
+            - sim_state is a JaxRDDLSimState containing current epoch simulation info
+            - planner_state is a pytree containing planner and policy specific info
         
         The returned value of the returned function is:
             - log is the dictionary of all trajectory information, including
@@ -606,13 +625,8 @@ class JaxRDDLCompiler:
             - model_params is the final set of model parameters.
             
         The arguments of the policy function is:
-            - key is the PRNG key (used by a stochastic policy)
-            - params is a pytree of trainable policy weights
-            - hyperparams is a pytree of (optional) fixed policy hyper-parameters
-            - step is the time index of the decision in the current rollout
-            - fls is a dict of fluent tensors for the current epoch
-            - fls_hist is a dict of fluent tensors up to the current epoch
-            - nfls is a dict of non-fluent tensors
+            - sim_state is a JaxRDDLSimState containing current epoch simulation info
+            - planner_state is a pytree containing planner and policy specific info
         
         :param policy: a Jax compiled function for the policy as described above
         decision epoch, state dict, and an RNG key and returns an action dict
@@ -636,6 +650,111 @@ class JaxRDDLCompiler:
         jax_fn = self._compile_unrolled_policy_step(jax_fn, n_steps, history_dependent)
         return jax_fn
     
+    def init_fls_and_nfls(self, init_values: Dict[str, Any], 
+                          fls_batch_size: int) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+        '''Converts a dictionary of initial value tensors into fls and nfls arguments
+        for the compiled Jax functions. It automatically adds batch dimensions to fls and 
+        converts enum string values to integer indices.
+
+        :param init_values: a dictionary of variable name to initial value tensor pairs
+        :param fls_batch_size: the batch size to add as a dimension to fluent tensors
+        '''
+        rddl = self.rddl
+        fls, nfls = {}, {}
+        for (name, value) in init_values.items():
+
+            # get the initial fluent values and check validity
+            init_value = self.init_values.get(name, self.init_policy_values.get(name, None))
+            if init_value is None:
+                raise RDDLUndefinedVariableError(
+                    f'Variable <{name}> in init_values argument is not a valid p-variable.')
+            
+            # make sure the shape matches
+            if np.size(value) != np.size(init_value):
+                value = init_value      
+            value = np.reshape(value, np.shape(init_value))   
+            
+            # for enum types need to convert the string values to integer indices
+            if value.dtype.type is np.str_:
+                prange = self._variable_range_from_rddl_or_policy(name)
+                value = rddl.object_string_to_index_array(prange, value)
+            
+            # add batch dimension if needed and split into fluents and non-fluents
+            if name not in rddl.non_fluents \
+            and (rddl.policy is None or name not in rddl.policy.non_fluents):
+                fls[name] = np.repeat(value[np.newaxis, ...], repeats=fls_batch_size, axis=0)
+            else:
+                nfls[name] = value
+            
+            # safely cast test variable to required type in case the type is wrong
+            if name in rddl.variable_ranges:
+                required_type = RDDLValueInitializer.NUMPY_TYPES.get(
+                    rddl.variable_ranges[name], RDDLValueInitializer.INT)
+                dict_ = nfls if name in rddl.non_fluents else fls
+                if np.result_type(dict_[name]) != required_type:
+                    dict_[name] = np.asarray(dict_[name], dtype=required_type)
+            
+            # do the same for the policy p-variables
+            if rddl.policy is not None and name in rddl.policy.variable_ranges:
+                required_type = RDDLValueInitializer.NUMPY_TYPES.get(
+                    rddl.policy.variable_ranges[name], RDDLValueInitializer.INT)
+                dict_ = nfls if name in rddl.policy.non_fluents else fls
+                if np.result_type(dict_[name]) != required_type:
+                    dict_[name] = np.asarray(dict_[name], dtype=required_type)
+               
+        # make sure next-state fluents are also set
+        for (state, next_state) in rddl.next_state.items():
+            fls[next_state] = fls[state]
+        if rddl.policy is not None:
+            for (state, next_state) in rddl.policy.next_state.items():
+                fls[next_state] = fls[state]     
+
+        return fls, nfls      
+                
+    def init_sim_state(self, key: jax.random.PRNGKey, 
+                       init_values: Optional[Dict[str, Any]], 
+                       fls_batch_size: int, 
+                       print_warnings: bool=True) -> JaxRDDLSimState:
+        '''Creates a JaxRDDLSimState containing the initial state of the environment 
+        for the given batch size and RNG key.
+
+        :param key: the RNG key to initialize the sim state with
+        :param init_values: a dictionary of variable name to initial value tensor pairs
+        :param fls_batch_size: the batch size to add as a dimension to fluent tensors
+        :param print_warnings: whether to print warnings about missing p-variables
+        '''
+        # values to draw from in case of missing subs
+        init_policy_values = {
+            var: value
+            for (var, value) in self.init_policy_values.items()
+            if var not in self.rddl.policy.param_fluents
+        }
+        default_init_values = {**self.init_values, **init_policy_values}
+
+        # fix missing entries in init_values
+        if init_values is None:
+            init_values = default_init_values
+        else:
+            # if some p-variables are not provided, add their default values
+            init_values = init_values.copy()
+            added_pvars_to_init_values = set()
+            for (var, value) in default_init_values.items():
+                if var not in init_values:
+                    init_values[var] = value
+                    added_pvars_to_init_values.add(var)
+            if print_warnings and added_pvars_to_init_values:
+                print(termcolor.colored(
+                    f'[INFO] p-variable(s) {added_pvars_to_init_values} are not in '
+                    f'provided init_values: using their RDDL values.', 'dark_grey'
+                ))
+
+        # convert init_values to fls and nfls dictionaries for the sim state
+        fls, nfls = self.init_fls_and_nfls(init_values, fls_batch_size)
+
+        # create the sim state with the initialized values
+        return JaxRDDLSimState(
+            key=key, step=0, fls=fls, nfls=nfls, model_params=self.model_aux['params'])
+        
     # ===========================================================================
     # error checks and prints
     # ===========================================================================
@@ -644,7 +763,7 @@ class JaxRDDLCompiler:
         '''Returns a dictionary containing the string representations of all 
         Jax compiled expressions from the RDDL file.
         '''
-        fls, nfls = self.split_fluent_nonfluent(self.init_values)
+        fls, nfls = self.split_fls_and_nfls(self.init_values)
         params = self.model_aux['params']
         key = jax.random.PRNGKey(42)
         printed = {
@@ -1049,7 +1168,7 @@ class JaxRDDLCompiler:
     
     def _jax_divide(self, expr, aux):
         aux['exact'].add(expr.id)
-        return self._jax_binary_helper(expr, aux, jnp.divide, at_least_int=True)
+        return self._jax_binary_helper(expr, aux, sj.div, at_least_int=True)
     
     # ===========================================================================
     # relational
@@ -1321,11 +1440,11 @@ class JaxRDDLCompiler:
     
     def _jax_acos(self, expr, aux):
         aux['exact'].add(expr.id)
-        return self._jax_unary_helper(expr, aux, jnp.arccos, at_least_int=True)
+        return self._jax_unary_helper(expr, aux, sj.arccos, at_least_int=True)
     
     def _jax_asin(self, expr, aux):
         aux['exact'].add(expr.id)
-        return self._jax_unary_helper(expr, aux, jnp.arcsin, at_least_int=True)
+        return self._jax_unary_helper(expr, aux, sj.arcsin, at_least_int=True)
     
     def _jax_atan(self, expr, aux):
         aux['exact'].add(expr.id)
@@ -1349,11 +1468,11 @@ class JaxRDDLCompiler:
     
     def _jax_ln(self, expr, aux):
         aux['exact'].add(expr.id)
-        return self._jax_unary_helper(expr, aux, jnp.ln, at_least_int=True)
+        return self._jax_unary_helper(expr, aux, sj.log, at_least_int=True)
     
     def _jax_sqrt(self, expr, aux):
         aux['exact'].add(expr.id)
-        return self._jax_unary_helper(expr, aux, jnp.sqrt, at_least_int=True)
+        return self._jax_unary_helper(expr, aux, sj.sqrt, at_least_int=True)
     
     def _jax_lngamma(self, expr, aux):
         aux['exact'].add(expr.id)
@@ -1390,7 +1509,7 @@ class JaxRDDLCompiler:
     def _jax_log(self, expr, aux):
         aux['exact'].add(expr.id)
         def log_op(x, y):
-            return jnp.log(x) / jnp.log(y)
+            return sj.div(sj.log(x), sj.log(y))
         return self._jax_binary_helper(expr, aux, log_op, at_least_int=True)
     
     def _jax_hypot(self, expr, aux):
@@ -1513,6 +1632,19 @@ class JaxRDDLCompiler:
             return sample, key, err, params
         return _jax_wrapped_if_then_else
     
+    def _jax_pred_and_cases(self, jax_pred, jax_cases):
+        def _jax_wrapped_switch_pred_and_cases(fls, nfls, params, key):
+            sample_pred, key, err, params = jax_pred(fls, nfls, params, key) 
+            sample_cases = []
+            for jax_case in jax_cases:
+                sample, key, err_case, params = jax_case(fls, nfls, params, key)
+                sample_cases.append(sample)
+                err = err | err_case      
+            sample_cases = jnp.asarray(sample_cases)          
+            sample_cases = jnp.asarray(sample_cases, dtype=self._fix_dtype(sample_cases))
+            return sample_pred, sample_cases, key, err, params
+        return _jax_wrapped_switch_pred_and_cases
+
     def _jax_switch(self, expr, aux):
         aux['exact'].add(expr.id)
 
@@ -1527,20 +1659,10 @@ class JaxRDDLCompiler:
             (jax_default if _case is None else self._jax(_case, aux))
             for _case in cases
         ]
+        jax_pred_and_cases = self._jax_pred_and_cases(jax_pred, jax_cases)
                     
         def _jax_wrapped_switch(fls, nfls, params, key):
-            
-            # sample predicate
-            sample_pred, key, err, params = jax_pred(fls, nfls, params, key) 
-            
-            # sample cases
-            sample_cases = []
-            for jax_case in jax_cases:
-                sample, key, err_case, params = jax_case(fls, nfls, params, key)
-                sample_cases.append(sample)
-                err = err | err_case      
-            sample_cases = jnp.asarray(sample_cases)          
-            sample_cases = jnp.asarray(sample_cases, dtype=self._fix_dtype(sample_cases))
+            sample_pred, sample_cases, key, err, params = jax_pred_and_cases(fls, nfls, params, key)
             
             # predicate (enum) is an integer - use it to extract from case array
             sample_pred = jnp.asarray(sample_pred[jnp.newaxis, ...], dtype=self.INT)
@@ -1676,7 +1798,7 @@ class JaxRDDLCompiler:
         def _jax_wrapped_distribution_normal(fls, nfls, params, key):
             mean, key, err1, params = jax_mean(fls, nfls, params, key)
             var, key, err2, params = jax_var(fls, nfls, params, key)
-            std = jnp.sqrt(var)
+            std = sj.sqrt(var)
             key, subkey = random.split(key)
             Z = random.normal(key=subkey, shape=jnp.shape(mean), dtype=self.REAL)
             sample = mean + std * Z
@@ -1987,7 +2109,7 @@ class JaxRDDLCompiler:
             scale, key, err2, params = jax_scale(fls, nfls, params, key)
             key, subkey = random.split(key)
             U = random.uniform(key=subkey, shape=jnp.shape(scale), dtype=self.REAL)
-            sample = jnp.log(1.0 - jnp.log1p(-U) / shape) / scale
+            sample = sj.div(sj.div(sj.log(1.0 - jnp.log1p(-U)), shape), scale)
             out_of_bounds = jnp.logical_not(jnp.all(jnp.logical_and(shape > 0, scale > 0)))
             err = err1 | err2 | (out_of_bounds * ERR)
             return sample, key, err, params        
@@ -2027,7 +2149,7 @@ class JaxRDDLCompiler:
             b, key, err2, params = jax_b(fls, nfls, params, key)
             key, subkey = random.split(key)
             U = random.uniform(key=subkey, shape=jnp.shape(a), dtype=self.REAL)            
-            sample = jnp.power(1.0 - jnp.power(U, 1.0 / b), 1.0 / a)
+            sample = jnp.power(1.0 - jnp.power(U, sj.div(1.0, b)), sj.div(1.0, a))
             out_of_bounds = jnp.logical_not(jnp.all(jnp.logical_and(a > 0, b > 0)))
             err = err1 | err2 | (out_of_bounds * ERR)
             return sample, key, err, params        
@@ -2062,7 +2184,7 @@ class JaxRDDLCompiler:
             # normalize them if required
             if unnormalized:
                 normalizer = jnp.sum(prob, axis=-1, keepdims=True)
-                prob = prob / normalizer
+                prob = sj.div(prob, normalizer)
             return prob, key, error, params
         return _jax_wrapped_calc_discrete_prob
     
@@ -2075,7 +2197,7 @@ class JaxRDDLCompiler:
         def _jax_wrapped_distribution_discrete(fls, nfls, params, key):
             prob, key, error, params = prob_fn(fls, nfls, params, key)
             key, subkey = random.split(key)
-            sample = random.categorical(key=subkey, logits=jnp.log(prob), axis=-1)
+            sample = random.categorical(key=subkey, logits=sj.log(prob), axis=-1)
             error = JaxRDDLCompiler._jax_update_discrete_oob_error(error, prob)
             return sample, key, error, params        
         return _jax_wrapped_distribution_discrete
@@ -2086,7 +2208,7 @@ class JaxRDDLCompiler:
             prob, key, error, params = jax_probs(fls, nfls, params, key)
             if unnormalized:
                 normalizer = jnp.sum(prob, axis=-1, keepdims=True)
-                prob = prob / normalizer
+                prob = sj.div(prob, normalizer)
             return prob, key, error, params
         return _jax_wrapped_calc_discrete_prob
 
@@ -2101,7 +2223,7 @@ class JaxRDDLCompiler:
         def _jax_wrapped_distribution_discrete_pvar(fls, nfls, params, key):
             prob, key, error, params = prob_fn(fls, nfls, params, key)
             key, subkey = random.split(key)
-            sample = random.categorical(key=subkey, logits=jnp.log(prob), axis=-1)
+            sample = random.categorical(key=subkey, logits=sj.log(prob), axis=-1)
             error = JaxRDDLCompiler._jax_update_discrete_oob_error(error, prob)
             return sample, key, error, params        
         return _jax_wrapped_distribution_discrete_pvar
@@ -2207,7 +2329,8 @@ class JaxRDDLCompiler:
             error = error | (out_of_bounds * ERR)
             key, subkey = random.split(key)
             gamma = random.gamma(key=subkey, a=alpha, dtype=self.REAL)
-            sample = gamma / jnp.sum(gamma, axis=-1, keepdims=True)
+            normalizer = jnp.sum(gamma, axis=-1, keepdims=True)
+            sample = sj.div(gamma, normalizer)
             sample = jnp.moveaxis(sample, source=-1, destination=index)
             return sample, key, error, params        
         return _jax_wrapped_distribution_dirichlet

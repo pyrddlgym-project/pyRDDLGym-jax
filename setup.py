@@ -29,18 +29,19 @@ setup(
       url="https://github.com/pyrddlgym-project/pyRDDLGym-jax",
       packages=find_packages(),
       install_requires=[
-          'pyRDDLGym>=2.5',
+          'pyRDDLGym>=2.6',
           'tqdm>=4.66',
-          'jax>=0.4.12',
-          'optax>=0.1.9',
-          'flax',
-          'tensorflow-probability>=0.21.0'
+          'jax>=0.9.0',
+          'softjax>=0.1.1',
+          'optax>=0.2.7',
+          'flax>=0.12.3',
+          'tensorflow-probability>=0.25.0'
       ],
       extras_require={
           'extra': ['bayesian-optimization>=2.0.0', 'rddlrepository>=2.0'],
           'dashboard': ['dash>=2.18.0', 'dash-bootstrap-components>=1.6.0']
       },
-      python_requires=">=3.9",
+      python_requires=">=3.12",
       package_data={'': ['*.cfg', '*.ico']},
       include_package_data=True,
       entry_points={ 
@@ -53,10 +54,8 @@ setup(
         "Natural Language :: English",
         "Operating System :: OS Independent",
         "Programming Language :: Python :: 3",
-        "Programming Language :: Python :: 3.9",
-        "Programming Language :: Python :: 3.10",
-        "Programming Language :: Python :: 3.11",
         "Programming Language :: Python :: 3.12",
+        "Programming Language :: Python :: 3.13",
         "Topic :: Scientific/Engineering :: Artificial Intelligence",
     ],
 )
