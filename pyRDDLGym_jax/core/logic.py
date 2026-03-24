@@ -240,10 +240,10 @@ class SigmoidRelational(JaxRDDLCompilerWithGrad):
         if not self.traced.cached_is_fluent(expr):
             return JaxRDDLCompilerWithGrad._jax_greater(self, expr, aux)
         id_ = expr.id
-        aux['params'][id_] = self.sigmoid_weight
+        aux['params'][id_] = {'sigmoid_weight': self.sigmoid_weight}
         aux['overriden'][id_] = __class__.__name__
         def greater_op(x, y, params):
-            sample = jax.nn.sigmoid(params[id_] * (x - y))
+            sample = jax.nn.sigmoid(params[id_]['sigmoid_weight'] * (x - y))
             if self.use_sigmoid_ste:
                 sample = sample + jax.lax.stop_gradient(jnp.greater(x, y) - sample)
             return sample, params
@@ -253,10 +253,10 @@ class SigmoidRelational(JaxRDDLCompilerWithGrad):
         if not self.traced.cached_is_fluent(expr):
             return JaxRDDLCompilerWithGrad._jax_greater_equal(self, expr, aux)
         id_ = expr.id
-        aux['params'][id_] = self.sigmoid_weight
+        aux['params'][id_] = {'sigmoid_weight': self.sigmoid_weight}
         aux['overriden'][id_] = __class__.__name__
         def greater_equal_op(x, y, params):
-            sample = jax.nn.sigmoid(params[id_] * (x - y))
+            sample = jax.nn.sigmoid(params[id_]['sigmoid_weight'] * (x - y))
             if self.use_sigmoid_ste:
                 sample = sample + jax.lax.stop_gradient(jnp.greater_equal(x, y) - sample)
             return sample, params
@@ -266,10 +266,10 @@ class SigmoidRelational(JaxRDDLCompilerWithGrad):
         if not self.traced.cached_is_fluent(expr):
             return JaxRDDLCompilerWithGrad._jax_less(self, expr, aux)
         id_ = expr.id
-        aux['params'][id_] = self.sigmoid_weight
+        aux['params'][id_] = {'sigmoid_weight': self.sigmoid_weight}
         aux['overriden'][id_] = __class__.__name__
         def less_op(x, y, params):
-            sample = jax.nn.sigmoid(params[id_] * (y - x))
+            sample = jax.nn.sigmoid(params[id_]['sigmoid_weight'] * (y - x))
             if self.use_sigmoid_ste:
                 sample = sample + jax.lax.stop_gradient(jnp.less(x, y) - sample)
             return sample, params
@@ -279,10 +279,10 @@ class SigmoidRelational(JaxRDDLCompilerWithGrad):
         if not self.traced.cached_is_fluent(expr):
             return JaxRDDLCompilerWithGrad._jax_less_equal(self, expr, aux)
         id_ = expr.id
-        aux['params'][id_] = self.sigmoid_weight
+        aux['params'][id_] = {'sigmoid_weight': self.sigmoid_weight}
         aux['overriden'][id_] = __class__.__name__
         def less_equal_op(x, y, params):
-            sample = jax.nn.sigmoid(params[id_] * (y - x))
+            sample = jax.nn.sigmoid(params[id_]['sigmoid_weight'] * (y - x))
             if self.use_sigmoid_ste:
                 sample = sample + jax.lax.stop_gradient(jnp.less_equal(x, y) - sample)
             return sample, params
@@ -292,10 +292,10 @@ class SigmoidRelational(JaxRDDLCompilerWithGrad):
         if not self.traced.cached_is_fluent(expr):
             return JaxRDDLCompilerWithGrad._jax_equal(self, expr, aux)
         id_ = expr.id
-        aux['params'][id_] = self.sigmoid_weight
+        aux['params'][id_] = {'sigmoid_weight': self.sigmoid_weight}
         aux['overriden'][id_] = __class__.__name__
         def equal_op(x, y, params):
-            sample = 1. - jnp.square(stable_tanh(params[id_] * (y - x)))
+            sample = 1. - jnp.square(stable_tanh(params[id_]['sigmoid_weight'] * (y - x)))
             if self.use_tanh_ste:
                 sample = sample + jax.lax.stop_gradient(jnp.equal(x, y) - sample)
             return sample, params
@@ -305,10 +305,10 @@ class SigmoidRelational(JaxRDDLCompilerWithGrad):
         if not self.traced.cached_is_fluent(expr):
             return JaxRDDLCompilerWithGrad._jax_not_equal(self, expr, aux)
         id_ = expr.id
-        aux['params'][id_] = self.sigmoid_weight
+        aux['params'][id_] = {'sigmoid_weight': self.sigmoid_weight}
         aux['overriden'][id_] = __class__.__name__
         def not_equal_op(x, y, params):
-            sample = jnp.square(stable_tanh(params[id_] * (y - x)))
+            sample = jnp.square(stable_tanh(params[id_]['sigmoid_weight'] * (y - x)))
             if self.use_tanh_ste:
                 sample = sample + jax.lax.stop_gradient(jnp.not_equal(x, y) - sample)
             return sample, params
@@ -318,10 +318,10 @@ class SigmoidRelational(JaxRDDLCompilerWithGrad):
         if not self.traced.cached_is_fluent(expr):
             return JaxRDDLCompilerWithGrad._jax_sgn(self, expr, aux)
         id_ = expr.id
-        aux['params'][id_] = self.sigmoid_weight
+        aux['params'][id_] = {'sigmoid_weight': self.sigmoid_weight}
         aux['overriden'][id_] = __class__.__name__
         def sgn_op(x, params):
-            sample = stable_tanh(params[id_] * x)
+            sample = stable_tanh(params[id_]['sigmoid_weight'] * x)
             if self.use_tanh_ste:
                 sample = sample + jax.lax.stop_gradient(jnp.sign(x) - sample)
             return sample, params
@@ -352,13 +352,14 @@ class SoftmaxArgmax(JaxRDDLCompilerWithGrad):
         if not self.traced.cached_is_fluent(expr):
             return JaxRDDLCompilerWithGrad._jax_argmax(self, expr, aux)
         id_ = expr.id
-        aux['params'][id_] = self.argmax_weight
+        aux['params'][id_] = {'argmax_weight': self.argmax_weight}
         aux['overriden'][id_] = __class__.__name__
         arg = expr.args[-1]
         _, axis = self.traced.cached_sim_info(expr)   
         jax_expr = self._jax(arg, aux) 
         def argmax_op(x, params):
-            sample = self.soft_argmax(x, w=params[id_], axis=axis, dtype=self.INT)
+            sample = self.soft_argmax(
+                x, w=params[id_]['argmax_weight'], axis=axis, dtype=self.INT)
             if self.use_argmax_ste:
                 hard_sample = jnp.argmax(x, axis=axis)
                 sample = sample + jax.lax.stop_gradient(hard_sample - sample)
@@ -369,13 +370,14 @@ class SoftmaxArgmax(JaxRDDLCompilerWithGrad):
         if not self.traced.cached_is_fluent(expr):
             return JaxRDDLCompilerWithGrad._jax_argmin(self, expr, aux)
         id_ = expr.id
-        aux['params'][id_] = self.argmax_weight
+        aux['params'][id_] = {'argmax_weight': self.argmax_weight}
         aux['overriden'][id_] = __class__.__name__
         arg = expr.args[-1]
         _, axis = self.traced.cached_sim_info(expr)   
         jax_expr = self._jax(arg, aux) 
         def argmin_op(x, params):
-            sample = self.soft_argmax(-x, w=params[id_], axis=axis, dtype=self.INT)
+            sample = self.soft_argmax(
+                -x, w=params[id_]['argmax_weight'], axis=axis, dtype=self.INT)
             if self.use_argmax_ste:
                 hard_sample = jnp.argmax(-x, axis=axis)
                 sample = sample + jax.lax.stop_gradient(hard_sample - sample)
@@ -749,10 +751,10 @@ class SoftFloor(JaxRDDLCompilerWithGrad):
         if not self.traced.cached_is_fluent(expr):
             return JaxRDDLCompilerWithGrad._jax_floor(self, expr, aux)
         id_ = expr.id
-        aux['params'][id_] = self.floor_weight
+        aux['params'][id_] = {'floor_weight': self.floor_weight}
         aux['overriden'][id_] = __class__.__name__
         def floor_op(x, params):
-            sample = self.soft_floor(x, params[id_])
+            sample = self.soft_floor(x, params[id_]['floor_weight'])
             if self.use_floor_ste:
                 sample = sample + jax.lax.stop_gradient(jnp.floor(x) - sample)
             return sample, params
@@ -762,10 +764,10 @@ class SoftFloor(JaxRDDLCompilerWithGrad):
         if not self.traced.cached_is_fluent(expr):
             return JaxRDDLCompilerWithGrad._jax_ceil(self, expr, aux)
         id_ = expr.id
-        aux['params'][id_] = self.floor_weight
+        aux['params'][id_] = {'floor_weight': self.floor_weight}
         aux['overriden'][id_] = __class__.__name__
         def ceil_op(x, params):
-            sample = -self.soft_floor(-x, params[id_])
+            sample = -self.soft_floor(-x, params[id_]['floor_weight'])
             if self.use_floor_ste:
                 sample = sample + jax.lax.stop_gradient(jnp.ceil(x) - sample)
             return sample, params
@@ -775,10 +777,10 @@ class SoftFloor(JaxRDDLCompilerWithGrad):
         if not self.traced.cached_is_fluent(expr):
             return JaxRDDLCompilerWithGrad._jax_div(self, expr, aux)
         id_ = expr.id
-        aux['params'][id_] = self.floor_weight
+        aux['params'][id_] = {'floor_weight': self.floor_weight}
         aux['overriden'][id_] = __class__.__name__
         def div_op(x, y, params):
-            sample = self.soft_floor(sj.div(x, y), params[id_])
+            sample = self.soft_floor(sj.div(x, y), params[id_]['floor_weight'])
             if self.use_floor_ste:
                 sample = sample + jax.lax.stop_gradient(jnp.floor_divide(x, y) - sample)
             return sample, params
@@ -788,10 +790,10 @@ class SoftFloor(JaxRDDLCompilerWithGrad):
         if not self.traced.cached_is_fluent(expr):
             return JaxRDDLCompilerWithGrad._jax_mod(self, expr, aux)
         id_ = expr.id
-        aux['params'][id_] = self.floor_weight
+        aux['params'][id_] = {'floor_weight': self.floor_weight}
         aux['overriden'][id_] = __class__.__name__
         def mod_op(x, y, params):
-            div = self.soft_floor(sj.div(x, y), params[id_])
+            div = self.soft_floor(sj.div(x, y), params[id_]['floor_weight'])
             if self.use_floor_ste:
                 div = div + jax.lax.stop_gradient(jnp.floor_divide(x, y) - div)
             sample = x - y * div
@@ -823,10 +825,10 @@ class SoftRound(JaxRDDLCompilerWithGrad):
         if not self.traced.cached_is_fluent(expr):
             return JaxRDDLCompilerWithGrad._jax_round(self, expr, aux)
         id_ = expr.id
-        aux['params'][id_] = self.round_weight
+        aux['params'][id_] = {'round_weight': self.round_weight}
         aux['overriden'][id_] = __class__.__name__
         def round_op(x, params):
-            sample = self.soft_round(x, params[id_])
+            sample = self.soft_round(x, params[id_]['round_weight'])
             if self.use_round_ste:
                 sample = sample + jax.lax.stop_gradient(jnp.round(x) - sample)
             return sample, params
@@ -903,7 +905,8 @@ class TriangleKernelSwitch(JaxRDDLCompilerWithGrad):
             return JaxRDDLCompilerWithGrad._jax_switch(self, expr, aux)  
         
         id_ = expr.id
-        aux['params'][id_] = (self.switch_weight, self.switch_eps)
+        aux['params'][id_] = {'switch_weight': self.switch_weight, 
+                              'switch_eps': self.switch_eps}
         aux['overriden'][id_] = __class__.__name__
         
         # recursively compile predicate
@@ -925,7 +928,7 @@ class TriangleKernelSwitch(JaxRDDLCompilerWithGrad):
             sample_pred_soft = jnp.broadcast_to(
                 sample_pred[jnp.newaxis, ...], shape=jnp.shape(sample_cases))
             literals = enumerate_literals(jnp.shape(sample_cases), axis=0, dtype=self.INT)
-            strength, eps = params[id_]
+            strength, eps = params[id_]['switch_weight'], params[id_]['switch_eps']
             weight = jax.nn.relu(1. - strength * jnp.abs(sample_pred_soft - literals))
             normalizer = jnp.sum(weight, axis=0) + eps
             weight = sj.div(weight, normalizer)
@@ -971,13 +974,14 @@ class ReparameterizedGeometric(JaxRDDLCompilerWithGrad):
             return JaxRDDLCompilerWithGrad._jax_geometric(self, expr, aux)  
           
         id_ = expr.id
-        aux['params'][id_] = (self.geometric_floor_weight, self.geometric_eps)
+        aux['params'][id_] = {'geometric_floor_weight': self.geometric_floor_weight, 
+                              'geometric_eps': self.geometric_eps}
         aux['overriden'][id_] = __class__.__name__
 
         jax_prob = self._jax(arg_prob, aux)
         
         def _jax_wrapped_distribution_geometric_reparam(fls, nfls, params, key):
-            w, eps = params[id_]
+            w, eps = params[id_]['geometric_floor_weight'], params[id_]['geometric_eps']
             prob, key, err, params = jax_prob(fls, nfls, params, key)
             key, subkey = random.split(key)
             U = random.uniform(key=subkey, shape=jnp.shape(prob), dtype=self.REAL)
@@ -1048,7 +1052,7 @@ class ReparameterizedSigmoidBernoulli(JaxRDDLCompilerWithGrad):
             return JaxRDDLCompilerWithGrad._jax_bernoulli(self, expr, aux)  
         
         id_ = expr.id
-        aux['params'][id_] = self.bernoulli_sigmoid_weight
+        aux['params'][id_] = {'bernoulli_sigmoid_weight': self.bernoulli_sigmoid_weight}
         aux['overriden'][id_] = __class__.__name__
 
         jax_prob = self._jax(arg_prob, aux)
@@ -1057,7 +1061,7 @@ class ReparameterizedSigmoidBernoulli(JaxRDDLCompilerWithGrad):
             prob, key, err, params = jax_prob(fls, nfls, params, key)
             key, subkey = random.split(key)
             U = random.uniform(key=subkey, shape=jnp.shape(prob), dtype=self.REAL)
-            sample = jax.nn.sigmoid(params[id_] * (prob - U))
+            sample = jax.nn.sigmoid(params[id_]['bernoulli_sigmoid_weight'] * (prob - U))
             if self.use_ste_bernoulli:
                 hard_sample = jnp.asarray(prob > U, dtype=sample.dtype)
                 sample = sample + jax.lax.stop_gradient(hard_sample - sample)
@@ -1092,13 +1096,13 @@ class GumbelSigmoidBernoulli(JaxRDDLCompilerWithGrad):
             return JaxRDDLCompilerWithGrad._jax_bernoulli(self, expr, aux)  
         
         id_ = expr.id
-        aux['params'][id_] = self.bernoulli_sigmoid_weight
+        aux['params'][id_] = {'bernoulli_sigmoid_weight': self.bernoulli_sigmoid_weight}
         aux['overriden'][id_] = __class__.__name__
 
         jax_prob = self._jax(arg_prob, aux)
         
         def _jax_wrapped_distribution_bernoulli_gumbel_sigmoid(fls, nfls, params, key):
-            w = params[id_]
+            w = params[id_]['bernoulli_sigmoid_weight']
             prob, key, err, params = jax_prob(fls, nfls, params, key)
             key, subkey = random.split(key)
             noise = random.logistic(key=subkey, shape=jnp.shape(prob), dtype=self.REAL)
@@ -1171,14 +1175,15 @@ class GumbelSoftmaxDiscrete(JaxRDDLCompilerWithGrad):
             return JaxRDDLCompilerWithGrad._jax_discrete(self, expr, aux, unnorm) 
         
         id_ = expr.id
-        aux['params'][id_] = (self.discrete_softmax_weight, self.discrete_eps)
+        aux['params'][id_] = {'discrete_softmax_weight': self.discrete_softmax_weight, 
+                              'discrete_eps': self.discrete_eps}
         aux['overriden'][id_] = __class__.__name__
 
         jax_probs = [self._jax(arg, aux) for arg in ordered_args]
         prob_fn = self._jax_discrete_prob(jax_probs, unnorm)
         
         def _jax_wrapped_distribution_discrete_gumbel_softmax(fls, nfls, params, key):
-            w, eps = params[id_]
+            w, eps = params[id_]['discrete_softmax_weight'], params[id_]['discrete_eps']
             prob, key, err, params = prob_fn(fls, nfls, params, key)
             key, subkey = random.split(key)
             g = random.gumbel(key=subkey, shape=jnp.shape(prob), dtype=self.REAL)
@@ -1198,14 +1203,15 @@ class GumbelSoftmaxDiscrete(JaxRDDLCompilerWithGrad):
             return JaxRDDLCompilerWithGrad._jax_discrete_pvar(self, expr, aux, unnorm) 
         
         id_ = expr.id
-        aux['params'][id_] = (self.discrete_softmax_weight, self.discrete_eps)
+        aux['params'][id_] = {'discrete_softmax_weight': self.discrete_softmax_weight, 
+                              'discrete_eps': self.discrete_eps}
         aux['overriden'][id_] = __class__.__name__
         
         jax_probs = self._jax(arg, aux)
         prob_fn = self._jax_discrete_pvar_prob(jax_probs, unnorm)
 
         def _jax_wrapped_distribution_discrete_pvar_gumbel_softmax(fls, nfls, params, key):
-            w, eps = params[id_]
+            w, eps = params[id_]['discrete_softmax_weight'], params[id_]['discrete_eps']
             prob, key, err, params = prob_fn(fls, nfls, params, key)
             key, subkey = random.split(key)
             g = random.gumbel(key=subkey, shape=jnp.shape(prob), dtype=self.REAL)
@@ -1327,7 +1333,8 @@ class GumbelSoftmaxBinomial(JaxRDDLCompilerWithGrad):
             return JaxRDDLCompilerWithGrad._jax_binomial(self, expr, aux)
         
         id_ = expr.id
-        aux['params'][id_] = (self.binomial_softmax_weight, self.binomial_eps)
+        aux['params'][id_] = {'binomial_softmax_weight': self.binomial_softmax_weight, 
+                              'binomial_eps': self.binomial_eps}
         aux['overriden'][id_] = __class__.__name__
         
         # recursively compile arguments
@@ -1343,9 +1350,10 @@ class GumbelSoftmaxBinomial(JaxRDDLCompilerWithGrad):
 
             # use the gumbel-softmax trick for small population size
             # use the normal approximation for large population size
+            w, eps = params[id_]['binomial_softmax_weight'], params[id_]['binomial_eps']
             sample = jnp.where(
                 jax.lax.stop_gradient(trials < self.binomial_nbins), 
-                self.gumbel_softmax_approx_to_binomial(subkey, trials, prob, *params[id_]), 
+                self.gumbel_softmax_approx_to_binomial(subkey, trials, prob, w, eps), 
                 self.normal_approx_to_binomial(subkey, trials, prob)
             )
 
@@ -1443,7 +1451,8 @@ class ExponentialPoisson(JaxRDDLCompilerWithGrad):
             return JaxRDDLCompilerWithGrad._jax_poisson(self, expr, aux)
         
         id_ = expr.id
-        aux['params'][id_] = (self.poisson_comparison_weight, self.poisson_min_cdf)
+        aux['params'][id_] = {'poisson_comparison_weight': self.poisson_comparison_weight, 
+                              'poisson_min_cdf': self.poisson_min_cdf}
         aux['overriden'][id_] = __class__.__name__
         
         jax_rate = self._jax(arg_rate, aux)
@@ -1453,7 +1462,9 @@ class ExponentialPoisson(JaxRDDLCompilerWithGrad):
         def _jax_wrapped_distribution_poisson_exponential(fls, nfls, params, key):
             rate, key, err, params = jax_rate(fls, nfls, params, key)
             key, subkey = random.split(key)
-            sample = self.branched_approx_to_poisson(subkey, rate, *params[id_])            
+            w = params[id_]['poisson_comparison_weight']
+            min_cdf = params[id_]['poisson_min_cdf']
+            sample = self.branched_approx_to_poisson(subkey, rate, w, min_cdf)            
             out_of_bounds = jnp.logical_not(jnp.all(rate >= 0))
             err = err | (out_of_bounds * ERR)
             return sample, key, err, params
@@ -1470,7 +1481,8 @@ class ExponentialPoisson(JaxRDDLCompilerWithGrad):
             return JaxRDDLCompilerWithGrad._jax_negative_binomial(self, expr, aux)
         
         id_ = expr.id
-        aux['params'][id_] = (self.poisson_comparison_weight, self.poisson_min_cdf)
+        aux['params'][id_] = {'poisson_comparison_weight': self.poisson_comparison_weight, 
+                              'poisson_min_cdf': self.poisson_min_cdf}
         aux['overriden'][id_] = __class__.__name__
 
         jax_trials = self._jax(arg_trials, aux)
@@ -1485,7 +1497,9 @@ class ExponentialPoisson(JaxRDDLCompilerWithGrad):
             prob = jnp.asarray(prob, dtype=self.REAL)
             gamma = random.gamma(key=subkey, a=trials, dtype=self.REAL)
             rate = (sj.div(1., prob) - 1.) * gamma
-            sample = self.branched_approx_to_poisson(subkey, rate, *params[id_])   
+            w = params[id_]['poisson_comparison_weight']
+            min_cdf = params[id_]['poisson_min_cdf']
+            sample = self.branched_approx_to_poisson(subkey, rate, w, min_cdf)   
             out_of_bounds = jnp.logical_not(jnp.all(
                 jnp.logical_and(jnp.logical_and(prob >= 0, prob <= 1), trials > 0)))
             err = err1 | err2 | (out_of_bounds * ERR)
@@ -1544,7 +1558,9 @@ class GumbelSoftmaxPoisson(JaxRDDLCompilerWithGrad):
             return JaxRDDLCompilerWithGrad._jax_poisson(self, expr, aux)
         
         id_ = expr.id
-        aux['params'][id_] = (self.poisson_softmax_weight, self.poisson_min_cdf, self.poisson_eps)
+        aux['params'][id_] = {'poisson_softmax_weight': self.poisson_softmax_weight, 
+                              'poisson_min_cdf': self.poisson_min_cdf, 
+                              'poisson_eps': self.poisson_eps}
         aux['overriden'][id_] = __class__.__name__
 
         jax_rate = self._jax(arg_rate, aux)
@@ -1554,7 +1570,10 @@ class GumbelSoftmaxPoisson(JaxRDDLCompilerWithGrad):
         def _jax_wrapped_distribution_poisson_gumbel_softmax(fls, nfls, params, key):
             rate, key, err, params = jax_rate(fls, nfls, params, key)
             key, subkey = random.split(key)
-            sample = self.branched_approx_to_poisson(subkey, rate, *params[id_])
+            w = params[id_]['poisson_softmax_weight']
+            min_cdf = params[id_]['poisson_min_cdf']
+            eps = params[id_]['poisson_eps']
+            sample = self.branched_approx_to_poisson(subkey, rate, w, min_cdf, eps)
             out_of_bounds = jnp.logical_not(jnp.all(rate >= 0))
             err = err | (out_of_bounds * ERR)
             return sample, key, err, params
@@ -1571,7 +1590,9 @@ class GumbelSoftmaxPoisson(JaxRDDLCompilerWithGrad):
             return JaxRDDLCompilerWithGrad._jax_negative_binomial(self, expr, aux)
         
         id_ = expr.id
-        aux['params'][id_] = (self.poisson_softmax_weight, self.poisson_min_cdf, self.poisson_eps)
+        aux['params'][id_] = {'poisson_softmax_weight': self.poisson_softmax_weight, 
+                              'poisson_min_cdf': self.poisson_min_cdf, 
+                              'poisson_eps': self.poisson_eps}
         aux['overriden'][id_] = __class__.__name__
         
         jax_trials = self._jax(arg_trials, aux)
@@ -1586,7 +1607,10 @@ class GumbelSoftmaxPoisson(JaxRDDLCompilerWithGrad):
             prob = jnp.asarray(prob, dtype=self.REAL)
             gamma = random.gamma(key=subkey, a=trials, dtype=self.REAL)
             rate = (sj.div(1., prob) - 1.) * gamma
-            sample = self.branched_approx_to_poisson(subkey, rate, *params[id_])   
+            w = params[id_]['poisson_softmax_weight']
+            min_cdf = params[id_]['poisson_min_cdf']
+            eps = params[id_]['poisson_eps']
+            sample = self.branched_approx_to_poisson(subkey, rate, w, min_cdf, eps)   
             out_of_bounds = jnp.logical_not(jnp.all(
                 jnp.logical_and(jnp.logical_and(prob >= 0, prob <= 1), trials > 0)))
             err = err1 | err2 | (out_of_bounds * ERR)
