@@ -3341,16 +3341,22 @@ def _init_fls_hist(planner):
         for name in planner.test_compiled.fls_hist_keys:
             values = np.asarray(planner.test_compiled.init_values[name])
             fls_hist[name] = np.zeros(
-                (planner.horizon,) + np.shape(values), dtype=values.dtype)
+                (planner.rddl.horizon,) + np.shape(values), dtype=values.dtype)
     return fls_hist
 
 
 def _update_fls_hist(fls_hist, step, states, actions):
     for (name, value) in fls_hist.items():
         if name in states:
-            value[step] = np.reshape(states[name], np.shape(value[step]))
+            source = states[name]
         elif name in actions:
-            value[step] = np.reshape(actions[name], np.shape(value[step]))
+            source = actions[name]
+        else:            
+            continue
+        if step >= np.shape(value)[0]:
+            value[:-1] = value[1:]
+        index = min(step, np.shape(value)[0] - 1)
+        value[index] = np.reshape(source, np.shape(value[index]))
 
 
 class JaxOfflineController(BaseAgent):
