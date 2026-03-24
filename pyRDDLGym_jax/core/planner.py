@@ -1967,7 +1967,7 @@ class GaussianPGPE(PGPE):
 
 @jax.jit
 def entropic_utility(returns: jnp.ndarray, beta: float) -> float:
-    return -sj.div(1., jax.scipy.special.logsumexp(-beta * returns, b=1. / returns.size), beta)
+    return -sj.div(jax.scipy.special.logsumexp(-beta * returns, b=1. / returns.size), beta)
 
 
 @jax.jit
@@ -2010,6 +2010,12 @@ def cvar_utility(returns: jnp.ndarray, alpha: float, *args, **kwargs) -> float:
     return var - sj.div(jnp.mean(jax.nn.relu(var - returns)), alpha)
 
 
+@jax.jit
+def cvar_ste_utility(returns: jnp.ndarray, alpha: float, eps: float=1e-12) -> float:
+    mask = returns <= jnp.percentile(returns, 100 * alpha)
+    return sj.div(jnp.sum(mask * returns), jnp.count_nonzero(mask) + eps)
+
+
 # set of all currently valid built-in utility functions
 UTILITY_LOOKUP = {
     'mean': jnp.mean,
@@ -2021,7 +2027,8 @@ UTILITY_LOOKUP = {
     'entropic': entropic_utility,
     'exponential': entropic_utility,
     'var': var_utility,
-    'cvar': cvar_utility
+    'cvar': cvar_utility,
+    'cvar_ste': cvar_ste_utility
 }
 
 
