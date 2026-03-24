@@ -19,7 +19,7 @@ long_description = (Path(__file__).parent / "README.md").read_text()
 
 setup(
       name='pyRDDLGym-jax',
-      version='3.1',
+      version='3.2',
       author="Michael Gimelfarb, Ayal Taitler, Scott Sanner",
       author_email="mike.gimelfarb@mail.utoronto.ca, ataitler@gmail.com, ssanner@mie.utoronto.ca",
       description="pyRDDLGym-jax: automatic differentiation for solving sequential planning problems in JAX.",
@@ -29,7 +29,7 @@ setup(
       url="https://github.com/pyrddlgym-project/pyRDDLGym-jax",
       packages=find_packages(),
       install_requires=[
-          'pyRDDLGym>=2.6',
+          'pyRDDLGym>=2.7',
           'tqdm>=4.66',
           'jax>=0.9.0',
           'softjax>=0.1.1',
