@@ -62,6 +62,19 @@ class JaxRDDLSimState:
     model_params: Any=None
 
 
+@partial(jax.custom_jvp, nondiff_argnums=(1,))
+def safe_log(x, eps):
+    return jnp.where(x > 0, jnp.log(jnp.where(x > 0, x, 1.0)), -jnp.inf)
+
+
+@safe_log.defjvp
+def safe_log_jvp(eps, primals, tangents):
+    (x,), (x_dot,) = primals, tangents
+    val = safe_log(x, eps)
+    grad = x_dot / (x + eps)
+    return val, grad
+
+
 class JaxRDDLCompiler:
     '''Compiles a RDDL AST representation into an equivalent JAX representation.
     All operations are identical to their numpy equivalents.
@@ -2108,8 +2121,8 @@ class JaxRDDLCompiler:
             shape, key, err1, params = jax_shape(fls, nfls, params, key)
             scale, key, err2, params = jax_scale(fls, nfls, params, key)
             key, subkey = random.split(key)
-            U = random.uniform(key=subkey, shape=jnp.shape(scale), dtype=self.REAL)
-            sample = sj.div(sj.div(sj.log(1.0 - jnp.log1p(-U)), shape), scale)
+            exp1 = random.exponential(key=subkey, shape=jnp.shape(scale), dtype=self.REAL)
+            sample = sj.div(sj.div(jnp.log(1. + exp1), shape), scale)
             out_of_bounds = jnp.logical_not(jnp.all(jnp.logical_and(shape > 0, scale > 0)))
             err = err1 | err2 | (out_of_bounds * ERR)
             return sample, key, err, params        
@@ -2197,7 +2210,7 @@ class JaxRDDLCompiler:
         def _jax_wrapped_distribution_discrete(fls, nfls, params, key):
             prob, key, error, params = prob_fn(fls, nfls, params, key)
             key, subkey = random.split(key)
-            sample = random.categorical(key=subkey, logits=sj.log(prob), axis=-1)
+            sample = random.categorical(key=subkey, logits=safe_log(prob), axis=-1)
             error = JaxRDDLCompiler._jax_update_discrete_oob_error(error, prob)
             return sample, key, error, params        
         return _jax_wrapped_distribution_discrete
@@ -2223,7 +2236,7 @@ class JaxRDDLCompiler:
         def _jax_wrapped_distribution_discrete_pvar(fls, nfls, params, key):
             prob, key, error, params = prob_fn(fls, nfls, params, key)
             key, subkey = random.split(key)
-            sample = random.categorical(key=subkey, logits=sj.log(prob), axis=-1)
+            sample = random.categorical(key=subkey, logits=safe_log(prob), axis=-1)
             error = JaxRDDLCompiler._jax_update_discrete_oob_error(error, prob)
             return sample, key, error, params        
         return _jax_wrapped_distribution_discrete_pvar
