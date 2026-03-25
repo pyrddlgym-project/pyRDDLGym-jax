@@ -38,8 +38,8 @@ setup(
           'tensorflow-probability>=0.25.0'
       ],
       extras_require={
-          'extra': ['bayesian-optimization>=2.0.0', 'rddlrepository>=2.0'],
-          'dashboard': ['dash>=2.18.0', 'dash-bootstrap-components>=1.6.0']
+          'extra': ['bayesian-optimization>=3.2.0', 'rddlrepository>=2.0'],
+          'dashboard': ['dash>=4.0.0', 'dash-bootstrap-components>=2.0.4']
       },
       python_requires=">=3.12",
       package_data={'': ['*.cfg', '*.ico']},
@@ -56,6 +56,7 @@ setup(
         "Programming Language :: Python :: 3",
         "Programming Language :: Python :: 3.12",
         "Programming Language :: Python :: 3.13",
+        "Programming Language :: Python :: 3.14",
         "Topic :: Scientific/Engineering :: Artificial Intelligence",
     ],
 )
