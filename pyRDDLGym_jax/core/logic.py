@@ -40,7 +40,7 @@ import jax.random as random
 import jax.scipy as scipy 
 import softjax as sj
 
-from pyRDDLGym_jax.core.compiler import JaxRDDLCompiler
+from pyRDDLGym_jax.core.compiler import JaxRDDLCompiler, safe_log
 
 
 def enumerate_literals(shape: Tuple[int, ...], axis: int, dtype: type=jnp.int32) -> jnp.ndarray:
@@ -930,7 +930,7 @@ class TriangleKernelSwitch(JaxRDDLCompilerWithGrad):
             literals = enumerate_literals(jnp.shape(sample_cases), axis=0, dtype=self.INT)
             strength, eps = params[id_]['switch_weight'], params[id_]['switch_eps']
             weight = jax.nn.relu(1. - strength * jnp.abs(sample_pred_soft - literals))
-            normalizer = jnp.sum(weight, axis=0) + eps
+            normalizer = jnp.sum(weight, axis=0)
             weight = sj.div(weight, normalizer)
             sample = jnp.sum(weight * sample_cases, axis=0)
 
@@ -984,9 +984,8 @@ class ReparameterizedGeometric(JaxRDDLCompilerWithGrad):
             w, eps = params[id_]['geometric_floor_weight'], params[id_]['geometric_eps']
             prob, key, err, params = jax_prob(fls, nfls, params, key)
             key, subkey = random.split(key)
-            U = random.uniform(key=subkey, shape=jnp.shape(prob), dtype=self.REAL)
-            sample = 1. + SoftFloor.soft_floor(
-                sj.div(jnp.log1p(-U), jnp.log1p(-prob + eps)), w=w)
+            exp1 = random.exponential(key=subkey, shape=jnp.shape(prob), dtype=self.REAL)
+            sample = 1. + SoftFloor.soft_floor(sj.div(-exp1, safe_log(1. - prob, eps)), w=w)
             out_of_bounds = jnp.logical_not(jnp.all(jnp.logical_and(prob >= 0, prob <= 1)))
             err = err | (out_of_bounds * ERR)
             return sample, key, err, params
@@ -1187,7 +1186,7 @@ class GumbelSoftmaxDiscrete(JaxRDDLCompilerWithGrad):
             prob, key, err, params = prob_fn(fls, nfls, params, key)
             key, subkey = random.split(key)
             g = random.gumbel(key=subkey, shape=jnp.shape(prob), dtype=self.REAL)
-            logits = g + sj.log(prob + eps)
+            logits = g + safe_log(prob, eps)
             sample = SoftmaxArgmax.soft_argmax(logits, w=w, axis=-1, dtype=self.INT)
             err = JaxRDDLCompilerWithGrad._jax_update_discrete_oob_error(err, prob)
             return sample, key, err, params
@@ -1215,7 +1214,7 @@ class GumbelSoftmaxDiscrete(JaxRDDLCompilerWithGrad):
             prob, key, err, params = prob_fn(fls, nfls, params, key)
             key, subkey = random.split(key)
             g = random.gumbel(key=subkey, shape=jnp.shape(prob), dtype=self.REAL)
-            logits = g + sj.log(prob + eps)
+            logits = g + safe_log(prob, eps)
             sample = SoftmaxArgmax.soft_argmax(logits, w=w, axis=-1, dtype=self.INT)
             err = JaxRDDLCompilerWithGrad._jax_update_discrete_oob_error(err, prob)
             return sample, key, err, params
@@ -1315,9 +1314,9 @@ class GumbelSoftmaxBinomial(JaxRDDLCompilerWithGrad):
         log_prob = ((scipy.special.gammaln(trials + 1) - 
                      scipy.special.gammaln(ks + 1) - 
                      scipy.special.gammaln(trials - ks + 1)) +
-                    ks * sj.log(prob + eps) + 
-                    (trials - ks) * jnp.log1p(-prob + eps))
-        log_prob = jnp.where(in_support, log_prob, sj.log(eps))
+                    ks * safe_log(prob, eps) + 
+                    (trials - ks) * safe_log(1. - prob, eps))
+        log_prob = jnp.where(in_support, log_prob, -jnp.inf)
         g = random.gumbel(key=key, shape=jnp.shape(log_prob), dtype=prob.dtype)
         logits = g + log_prob
         return SoftmaxArgmax.soft_argmax(logits, w=w, axis=-1, dtype=self.INT)
@@ -1532,7 +1531,7 @@ class GumbelSoftmaxPoisson(JaxRDDLCompilerWithGrad):
                                rate: jnp.ndarray, w: float, eps: float) -> jnp.ndarray:
         ks = jnp.arange(self.poisson_nbins)[(jnp.newaxis,) * jnp.ndim(rate) + (...,)]
         rate = rate[..., jnp.newaxis]
-        log_prob = ks * sj.log(rate + eps) - rate - scipy.special.gammaln(ks + 1)
+        log_prob = ks * safe_log(rate, eps) - rate - scipy.special.gammaln(ks + 1)
         g = random.gumbel(key=key, shape=jnp.shape(log_prob), dtype=rate.dtype)
         logits = g + log_prob
         return SoftmaxArgmax.soft_argmax(logits, w=w, axis=-1, dtype=self.INT)
