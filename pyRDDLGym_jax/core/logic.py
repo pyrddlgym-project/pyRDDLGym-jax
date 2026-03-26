@@ -57,7 +57,7 @@ def stable_tanh(x: jnp.ndarray) -> jnp.ndarray:
     ax = jnp.abs(x)
     small = jnp.where(
         ax < 20.,
-        sj.div(jnp.expm1(2. * ax), jnp.expm1(2. * ax) + 2.),
+        jnp.divide(jnp.expm1(2. * ax), jnp.expm1(2. * ax) + 2.),
         1. - 2. * jnp.exp(-2. * ax)
     )
     return jnp.sign(x) * small
@@ -745,7 +745,7 @@ class SoftFloor(JaxRDDLCompilerWithGrad):
     def soft_floor(x: jnp.ndarray, w: float) -> jnp.ndarray:
         s = x - jnp.floor(x)
         return jnp.floor(x) + 0.5 * (
-            1. + sj.div(stable_tanh(w * (s - 1.) / 2.), stable_tanh(w / 4.)))
+            1. + jnp.divide(stable_tanh(w * (s - 1.) / 2.), stable_tanh(w / 4.)))
 
     def _jax_floor(self, expr, aux):
         if not self.traced.cached_is_fluent(expr):
@@ -819,7 +819,7 @@ class SoftRound(JaxRDDLCompilerWithGrad):
     @staticmethod
     def soft_round(x: jnp.ndarray, w: float) -> jnp.ndarray:
         m = jnp.floor(x) + 0.5
-        return m + 0.5 * sj.div(stable_tanh(w * (x - m)), stable_tanh(w / 2.))
+        return m + 0.5 * jnp.divide(stable_tanh(w * (x - m)), stable_tanh(w / 2.))
 
     def _jax_round(self, expr, aux):
         if not self.traced.cached_is_fluent(expr):
