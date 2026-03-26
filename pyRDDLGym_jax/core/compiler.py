@@ -62,14 +62,14 @@ class JaxRDDLSimState:
     model_params: Any=None
 
 
-@partial(jax.custom_jvp, nondiff_argnums=(1,))
+@jax.custom_jvp
 def safe_log(x, eps=1e-12):
     return jnp.where(x > 0, jnp.log(jnp.where(x > 0, x, 1.0)), -jnp.inf)
 
 
 @safe_log.defjvp
-def safe_log_jvp(eps, primals, tangents):
-    (x,), (x_dot,) = primals, tangents
+def safe_log_jvp(primals, tangents):
+    (x, eps), (x_dot, _) = primals, tangents
     val = safe_log(x, eps)
     grad = jnp.divide(x_dot, x + eps)
     return val, grad

@@ -1311,11 +1311,11 @@ class GumbelSoftmaxBinomial(JaxRDDLCompilerWithGrad):
         prob = prob[..., jnp.newaxis]
         in_support = ks <= trials
         ks = jnp.minimum(ks, trials)
+        term_k  = jnp.where(ks == 0, 0., ks * safe_log(prob, eps))
+        term_nk = jnp.where(ks == trials, 0., (trials - ks) * safe_log(1. - prob, eps))
         log_prob = ((scipy.special.gammaln(trials + 1) - 
                      scipy.special.gammaln(ks + 1) - 
-                     scipy.special.gammaln(trials - ks + 1)) +
-                    ks * safe_log(prob, eps) + 
-                    (trials - ks) * safe_log(1. - prob, eps))
+                     scipy.special.gammaln(trials - ks + 1)) + term_k + term_nk)
         log_prob = jnp.where(in_support, log_prob, -jnp.inf)
         g = random.gumbel(key=key, shape=jnp.shape(log_prob), dtype=prob.dtype)
         logits = g + log_prob
@@ -1531,7 +1531,8 @@ class GumbelSoftmaxPoisson(JaxRDDLCompilerWithGrad):
                                rate: jnp.ndarray, w: float, eps: float) -> jnp.ndarray:
         ks = jnp.arange(self.poisson_nbins)[(jnp.newaxis,) * jnp.ndim(rate) + (...,)]
         rate = rate[..., jnp.newaxis]
-        log_prob = ks * safe_log(rate, eps) - rate - scipy.special.gammaln(ks + 1)
+        term_k = jnp.where(ks == 0, 0., ks * safe_log(rate, eps))
+        log_prob = term_k - rate - scipy.special.gammaln(ks + 1)
         g = random.gumbel(key=key, shape=jnp.shape(log_prob), dtype=rate.dtype)
         logits = g + log_prob
         return SoftmaxArgmax.soft_argmax(logits, w=w, axis=-1, dtype=self.INT)
