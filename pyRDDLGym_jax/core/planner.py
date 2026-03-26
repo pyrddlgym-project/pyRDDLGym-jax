@@ -1715,7 +1715,11 @@ class GaussianPGPE(PGPE):
                 ))
                 safe_base = jnp.maximum(1. - aa ** 3, jnp.finfo(aa.dtype).tiny)
                 term_pos = jnp.divide(jnp.exp(aa), jnp.power(safe_base, c3 * aa))
-                epsilon_star = jnp.sign(epsilon) * phi * jnp.where(a < 0, term_neg, term_pos)
+                epsilon_star = jnp.where(
+                    epsilon == 0., 
+                    0., 
+                    jnp.sign(epsilon) * phi * jnp.where(a < 0, term_neg, term_pos)
+                )
                 
             # less accurate and simple formula
             else:
@@ -1791,7 +1795,8 @@ class GaussianPGPE(PGPE):
             # for super symmetric sampling
             if super_symmetric:
                 epsilon_tau = jnp.where(r1 + r2 >= r3 + r4, epsilon, epsilon_star)
-                s = jnp.divide(jnp.square(epsilon_tau), sigma) - sigma
+                s = (jnp.divide(jnp.square(epsilon_tau), jnp.power(sigma, 3)) - 
+                     jnp.divide(1., sigma))
                 if scale_reward:
                     scale = jnp.maximum(min_reward_scale, m - (r1 + r2 + r3 + r4) / 4)
                 else:
@@ -1800,7 +1805,8 @@ class GaussianPGPE(PGPE):
             
             # for basic pgpe
             else:
-                s = jnp.divide(jnp.square(epsilon), sigma) - sigma
+                s = (jnp.divide(jnp.square(epsilon), jnp.power(sigma, 3)) - 
+                     jnp.divide(1., sigma))
                 if scale_reward:
                     scale = jnp.maximum(min_reward_scale, jnp.abs(m))
                 else:
