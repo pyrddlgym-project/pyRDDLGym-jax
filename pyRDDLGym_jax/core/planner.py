@@ -69,7 +69,7 @@ from pyRDDLGym.core.debug.exception import (
 from pyRDDLGym.core.policy import BaseAgent
 
 from pyRDDLGym_jax import __version__
-from pyRDDLGym_jax.core.compiler import JaxRDDLCompiler, JaxRDDLSimState
+from pyRDDLGym_jax.core.compiler import JaxRDDLCompiler, JaxRDDLSimState, safe_log
 from pyRDDLGym_jax.core import logic
 from pyRDDLGym_jax.core.logic import JaxRDDLCompilerWithGrad, DefaultJaxRDDLCompilerWithGrad
 
@@ -324,7 +324,7 @@ class StaticNormalizer(Preprocessor):
                     new_dims = jnp.ndim(values) - jnp.ndim(lower)
                     lower = lower[(jnp.newaxis,) * new_dims + (...,)]
                     upper = upper[(jnp.newaxis,) * new_dims + (...,)]
-                    new_fls[var] = (values - lower) / (upper - lower)
+                    new_fls[var] = jnp.divide(values - lower, upper - lower)
                 else:
                     new_fls[var] = values
             return new_fls
@@ -552,7 +552,7 @@ class JaxSogbofaActionProjection(JaxActionProjection):
         # bool action values by surplus clipping at maximum
         def _jax_wrapped_sogbofa_subtract_surplus(values):
             it, actions, surplus, k = values
-            amount = surplus / k
+            amount = jnp.divide(surplus, k)
             new_actions = {}
             for (var, action) in actions.items():
                 if ranges[var] == 'bool':
@@ -726,7 +726,7 @@ class JaxStraightLinePlan(JaxPlan):
         
         def _jax_bool_action_to_param(var, action, hyperparams):
             if self._wrap_sigmoid:
-                return sj.div(jax.scipy.special.logit(action), hyperparams[var])
+                return jnp.divide(jax.scipy.special.logit(action), hyperparams[var])
             else:
                 return action
         
@@ -949,8 +949,7 @@ class GumbelSoftmaxTopK(nn.Module):
             logits = logits + g
             def body_fun(i, carry):
                 khot, logits_i = carry
-                khot_mask = jnp.maximum(1.0 - khot, 1e-12)
-                logits_new = logits_i + sj.log(khot_mask)
+                logits_new = logits_i + safe_log(1.0 - khot)
                 khot_new = khot + jax.nn.softmax(w * logits_new)
                 return (khot_new, logits_new)
             khot0 = jnp.zeros_like(logits)
@@ -1703,17 +1702,21 @@ class GaussianPGPE(PGPE):
         # according to super-symmetric sampling paper
         def _jax_wrapped_eps(sigma, epsilon):
             phi = 0.67449 * sigma
-            a = sj.div(sigma - jnp.abs(epsilon), sigma)
+            a = jnp.divide(sigma - jnp.abs(epsilon), sigma)
 
             # more accurate formula
             if super_symmetric_accurate:
                 aa = jnp.abs(a)
                 c1, c2, c3 = -0.06655, -0.9706, 0.124
-                term_neg_log = c1 * sj.div(aa * aa - 1.0, sj.log(aa + self.eps)) + c2
-                term_pos_log = 1.0 - c3 * jnp.log1p(-aa ** 3 + self.eps)
-                epsilon_star = jnp.sign(epsilon) * phi * jnp.exp(
-                    aa * jnp.where(a <= 0, term_neg_log, term_pos_log))
-            
+                term_neg = jnp.exp(jnp.where(
+                    aa == 1.,
+                    2. * c1 + c2,
+                    jnp.divide(c1 * aa * (aa * aa - 1.), jnp.log(aa)) + c2 * aa
+                ))
+                safe_base = jnp.maximum(1. - aa ** 3, jnp.finfo(aa.dtype).tiny)
+                term_pos = jnp.divide(jnp.exp(aa), jnp.power(safe_base, c3 * aa))
+                epsilon_star = jnp.sign(epsilon) * phi * jnp.where(a < 0, term_neg, term_pos)
+                
             # less accurate and simple formula
             else:
                 epsilon_star = jnp.sign(epsilon) * phi * jnp.exp(a)
@@ -1768,8 +1771,8 @@ class GaussianPGPE(PGPE):
                     scale2 = jnp.maximum(min_reward_scale, m - (r3 + r4) / 2)
                 else:
                     scale1 = scale2 = 1.0
-                r_mu1 = (r1 - r2) / (2 * scale1)
-                r_mu2 = (r3 - r4) / (2 * scale2)
+                r_mu1 = jnp.divide(r1 - r2, 2 * scale1)
+                r_mu2 = jnp.divide(r3 - r4, 2 * scale2)
                 grad = -(r_mu1 * epsilon + r_mu2 * epsilon_star)
             
             # for the basic pgpe
@@ -1778,7 +1781,7 @@ class GaussianPGPE(PGPE):
                     scale = jnp.maximum(min_reward_scale, m - (r1 + r2) / 2)
                 else:
                     scale = 1.0
-                r_mu = (r1 - r2) / (2 * scale)
+                r_mu = jnp.divide(r1 - r2, 2 * scale)
                 grad = -r_mu * epsilon
             return grad
         
@@ -1788,23 +1791,23 @@ class GaussianPGPE(PGPE):
             # for super symmetric sampling
             if super_symmetric:
                 epsilon_tau = jnp.where(r1 + r2 >= r3 + r4, epsilon, epsilon_star)
-                s = sj.div(jnp.square(epsilon_tau), sigma) - sigma
+                s = jnp.divide(jnp.square(epsilon_tau), sigma) - sigma
                 if scale_reward:
                     scale = jnp.maximum(min_reward_scale, m - (r1 + r2 + r3 + r4) / 4)
                 else:
                     scale = 1.0
-                r_sigma = ((r1 + r2) - (r3 + r4)) / (4 * scale)
+                r_sigma = jnp.divide((r1 + r2) - (r3 + r4), 4 * scale)
             
             # for basic pgpe
             else:
-                s = sj.div(jnp.square(epsilon), sigma) - sigma
+                s = jnp.divide(jnp.square(epsilon), sigma) - sigma
                 if scale_reward:
                     scale = jnp.maximum(min_reward_scale, jnp.abs(m))
                 else:
                     scale = 1.0
-                r_sigma = (r1 + r2) / (2 * scale)
+                r_sigma = jnp.divide(r1 + r2, 2 * scale)
 
-            return -(r_sigma * s + sj.div(ent, sigma))
+            return -(r_sigma * s + jnp.divide(ent, sigma))
             
         # calculate the policy gradients
         def _jax_wrapped_pgpe_grad(sim_state, planner_state, pgpe_state, ent):
@@ -1875,9 +1878,9 @@ class GaussianPGPE(PGPE):
 
         # estimate KL divergence between two updates
         def _jax_wrapped_pgpe_kl_term(old_mu, old_sigma, mu, sigma):
-            return 0.5 * jnp.sum(2 * sj.log(sj.div(sigma, old_sigma)) + 
-                                 jnp.square(sj.div(old_sigma, sigma)) + 
-                                 jnp.square(sj.div(mu - old_mu, sigma)) - 1)
+            return 0.5 * jnp.sum(2 * jnp.log(jnp.divide(sigma, old_sigma)) + 
+                                 jnp.square(jnp.divide(old_sigma, sigma)) + 
+                                 jnp.square(jnp.divide(mu - old_mu, sigma)) - 1)
         
         # update mean and std. deviation with a gradient step
         def _jax_wrapped_pgpe_update_helper(stats, grad, opt_state):
@@ -1913,7 +1916,7 @@ class GaussianPGPE(PGPE):
                         stats['mu'], stats['sigma'], new_stats['mu'], new_stats['sigma']
                     )
                     sum_kl = jax.tree_util.tree_reduce(jnp.add, kl)
-                    scale = jnp.minimum(1.0, sj.sqrt(sj.div(max_kl, sum_kl + self.eps)))
+                    scale = jnp.minimum(1.0, jnp.sqrt(jnp.divide(max_kl, sum_kl + self.eps)))
                     grad = jax.tree_util.tree_map(lambda g: g * scale, grad)
                     new_stats, new_opt_state = _jax_wrapped_pgpe_update_helper(
                         stats, grad, opt_state)
@@ -1970,7 +1973,8 @@ class GaussianPGPE(PGPE):
 
 @jax.jit
 def entropic_utility(returns: jnp.ndarray, beta: float) -> float:
-    return -sj.div(jax.scipy.special.logsumexp(-beta * returns, b=1. / returns.size), beta)
+    return -jnp.divide(
+        jax.scipy.special.logsumexp(-beta * returns, b=1. / returns.size), beta)
 
 
 @jax.jit
@@ -1999,7 +2003,7 @@ def mean_semivariance_utility(returns: jnp.ndarray, beta: float) -> float:
 
 @jax.jit
 def sharpe_utility(returns: jnp.ndarray, risk_free: float=0.0, eps: float=1e-12) -> float:
-    return sj.div(jnp.mean(returns) - risk_free, jnp.std(returns) + eps)
+    return jnp.divide(jnp.mean(returns) - risk_free, jnp.std(returns) + eps)
 
 
 @jax.jit
@@ -2010,13 +2014,13 @@ def var_utility(returns: jnp.ndarray, alpha: float, *args, **kwargs) -> float:
 @jax.jit
 def cvar_utility(returns: jnp.ndarray, alpha: float, *args, **kwargs) -> float:
     var = sj.percentile(returns, 100 * alpha, *args, **kwargs)
-    return var - sj.div(jnp.mean(jax.nn.relu(var - returns)), alpha)
+    return var - jnp.divide(jnp.mean(jax.nn.relu(var - returns)), alpha)
 
 
 @jax.jit
-def cvar_ste_utility(returns: jnp.ndarray, alpha: float, eps: float=1e-12) -> float:
+def cvar_ste_utility(returns: jnp.ndarray, alpha: float) -> float:
     mask = returns <= jnp.percentile(returns, 100 * alpha)
-    return sj.div(jnp.sum(mask * returns), jnp.count_nonzero(mask) + eps)
+    return jnp.divide(jnp.sum(mask * returns), jnp.maximum(1, jnp.count_nonzero(mask)))
 
 
 # set of all currently valid built-in utility functions
