@@ -73,7 +73,7 @@ def stable_tanh_jvp(primals, tangents):
 
 # it seems JAX uses the stability trick already
 def stable_softmax_weight_sum(logits: jnp.ndarray, values: jnp.ndarray, axis: int) -> jnp.ndarray:
-    return jnp.sum(values * jax.nn.softmax(logits), axis=axis)
+    return jnp.sum(values * jax.nn.softmax(logits, axis=axis), axis=axis)
 
 
 class JaxRDDLCompilerWithGrad(JaxRDDLCompiler):
@@ -358,8 +358,8 @@ class SoftmaxArgmax(JaxRDDLCompilerWithGrad):
         _, axis = self.traced.cached_sim_info(expr)   
         jax_expr = self._jax(arg, aux) 
         def argmax_op(x, params):
-            sample = self.soft_argmax(
-                x, w=params[id_]['argmax_weight'], axis=axis, dtype=self.INT)
+            w = params[id_]['argmax_weight']
+            sample = self.soft_argmax(x, w=w, axis=axis, dtype=self.INT)
             if self.use_argmax_ste:
                 hard_sample = jnp.argmax(x, axis=axis)
                 sample = sample + jax.lax.stop_gradient(hard_sample - sample)
@@ -376,8 +376,8 @@ class SoftmaxArgmax(JaxRDDLCompilerWithGrad):
         _, axis = self.traced.cached_sim_info(expr)   
         jax_expr = self._jax(arg, aux) 
         def argmin_op(x, params):
-            sample = self.soft_argmax(
-                -x, w=params[id_]['argmax_weight'], axis=axis, dtype=self.INT)
+            w = params[id_]['argmax_weight']
+            sample = self.soft_argmax(-x, w=w, axis=axis, dtype=self.INT)
             if self.use_argmax_ste:
                 hard_sample = jnp.argmax(-x, axis=axis)
                 sample = sample + jax.lax.stop_gradient(hard_sample - sample)
@@ -878,21 +878,18 @@ class LinearIfElse(JaxRDDLCompilerWithGrad):
         return _jax_wrapped_if_then_else_linear
 
 
-class TriangleKernelSwitch(JaxRDDLCompilerWithGrad):
-    '''Switch control flow using a traingular kernel.'''
+class SoftmaxSwitch(JaxRDDLCompilerWithGrad):
+    '''Switch control flow using a softmax.'''
     
-    def __init__(self, *args, switch_weight: float=1., 
-                 switch_eps: float=1e-12, 
+    def __init__(self, *args, switch_weight: float=10.,
                  use_switch_ste: bool=True, **kwargs) -> None:
-        super(TriangleKernelSwitch, self).__init__(*args, **kwargs)
+        super(SoftmaxSwitch, self).__init__(*args, **kwargs)
         self.switch_weight = float(switch_weight)
-        self.switch_eps = switch_eps
         self.use_switch_ste = use_switch_ste
         
     def get_kwargs(self) -> Dict[str, Any]:
         kwargs = super().get_kwargs()
         kwargs['switch_weight'] = self.switch_weight
-        kwargs['switch_eps'] = self.switch_eps
         kwargs['use_switch_ste'] = self.use_switch_ste
         return kwargs
 
@@ -905,8 +902,7 @@ class TriangleKernelSwitch(JaxRDDLCompilerWithGrad):
             return JaxRDDLCompilerWithGrad._jax_switch(self, expr, aux)  
         
         id_ = expr.id
-        aux['params'][id_] = {'switch_weight': self.switch_weight, 
-                              'switch_eps': self.switch_eps}
+        aux['params'][id_] = {'switch_weight': self.switch_weight}
         aux['overriden'][id_] = __class__.__name__
         
         # recursively compile predicate
@@ -924,15 +920,13 @@ class TriangleKernelSwitch(JaxRDDLCompilerWithGrad):
         def _jax_wrapped_switch_softmax(fls, nfls, params, key):
             sample_pred, sample_cases, key, err, params = jax_pred_and_cases(fls, nfls, params, key)
             
-            # replace integer indexing with weighted triangular kernel
+            # replace integer indexing with softmax
             sample_pred_soft = jnp.broadcast_to(
                 sample_pred[jnp.newaxis, ...], shape=jnp.shape(sample_cases))
             literals = enumerate_literals(jnp.shape(sample_cases), axis=0, dtype=self.INT)
-            strength, eps = params[id_]['switch_weight'], params[id_]['switch_eps']
-            weight = jax.nn.relu(1. - strength * jnp.abs(sample_pred_soft - literals))
-            normalizer = jnp.sum(weight, axis=0)
-            weight = sj.div(weight, normalizer)
-            sample = jnp.sum(weight * sample_cases, axis=0)
+            w = params[id_]['switch_weight']
+            logits = -w * jnp.abs(sample_pred_soft - literals)
+            sample = stable_softmax_weight_sum(logits, sample_cases, axis=0)
 
             # straight through estimator
             if self.use_switch_ste:
@@ -1678,7 +1672,7 @@ class DeterminizedPoisson(JaxRDDLCompilerWithGrad):
 class DefaultJaxRDDLCompilerWithGrad(SigmoidRelational, SoftmaxArgmax, 
                                      ProductNormLogical, 
                                      SoftFloor, SoftRound, 
-                                     LinearIfElse, TriangleKernelSwitch,
+                                     LinearIfElse, SoftmaxSwitch,
                                      ReparameterizedGeometric, 
                                      ReparameterizedSigmoidBernoulli,
                                      GumbelSoftmaxDiscrete, GumbelSoftmaxBinomial,
