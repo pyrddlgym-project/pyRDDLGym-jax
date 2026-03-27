@@ -345,6 +345,7 @@ class JaxPlannerState:
     opt_state: Pytree=None
     opt_aux: Pytree=None
     critic_params: Pytree=None
+    progress: float=None
 
 
 class JaxPlan(metaclass=ABCMeta):
@@ -633,7 +634,7 @@ class JaxStraightLinePlan(JaxPlan):
                  use_new_projection: bool=False,
                  max_constraint_iter: int=100,
                  stochastic: bool=True,
-                 sigma_range: Tuple[float, float]=(1e-6, 1e3),
+                 sigma_range: Tuple[float, float]=(1e-5, 1e3),
                  sigma_entropy_grad: bool=False) -> None:
         '''Creates a new straight line plan in JAX.
         
@@ -1589,7 +1590,7 @@ class PGPE(metaclass=ABCMeta):
     def initialize(self) -> Callable:
         return self._initializer
 
-    # signature is update(sim_state, planner_state, pgpe_state, progress: float) 
+    # signature is update(sim_state, planner_state, pgpe_state) 
     #     -> (sim_state, pgpe_state, converged: bool)
     @property
     def update(self) -> Callable:
@@ -1624,8 +1625,8 @@ class GaussianPGPE(PGPE):
                  clip_grad_mu: Optional[float]=None,
                  clip_grad_sigma: Optional[float]=None,
                  ema_decay: Optional[float]=None,
-                 start_entropy_coeff: float=1e-3,
-                 end_entropy_coeff: float=1e-8,
+                 start_entropy_coeff: float=1e-2,
+                 end_entropy_coeff: float=1e-5,
                  max_kl_update: Optional[float]=None,
                  eps: float=1e-10) -> None:
         '''Creates a new Gaussian PGPE planner.
@@ -1972,10 +1973,10 @@ class GaussianPGPE(PGPE):
                 partial(jnp.clip, min=sigma_lo, max=sigma_hi), new_stats['sigma'])
             return new_stats, new_opt_state
 
-        def _jax_wrapped_pgpe_update(sim_state, planner_state, pgpe_state, progress):
+        def _jax_wrapped_pgpe_update(sim_state, planner_state, pgpe_state):
             
             # calculate entropy coefficient
-            ent = start_entropy_coeff * jnp.power(entropy_coeff_decay, progress)
+            ent = start_entropy_coeff * jnp.power(entropy_coeff_decay, planner_state.progress)
 
             # do a single update step
             def _jax_wrapped_pgpe_update_step(_, carry):
@@ -2019,14 +2020,14 @@ class GaussianPGPE(PGPE):
             return rest
 
         # for parallel policy update
-        def _jax_wrapped_batched_pgpe_updates(sim_state, planner_state, pgpe_state, progress):
+        def _jax_wrapped_batched_pgpe_updates(sim_state, planner_state, pgpe_state):
             keys = random.split(sim_state.key, num=1 + parallel_updates)
             sim_state = sim_state.replace(key=keys[1:])
-            vmap_axes = (JaxRDDLSimState(key=0, model_params=0), None,
-                         JaxPGPEState(pgpe_params=0, pgpe_opt_state=0), None)
+            vmap_axes = (JaxRDDLSimState(key=0, model_params=0), 
+                         None,
+                         JaxPGPEState(pgpe_params=0, pgpe_opt_state=0))
             params, opt_state, converged = jax.vmap(
-                _jax_wrapped_pgpe_update, in_axes=vmap_axes)(
-                    sim_state, planner_state, pgpe_state, progress)
+                _jax_wrapped_pgpe_update, in_axes=vmap_axes)(sim_state, planner_state, pgpe_state)
             pgpe_state = pgpe_state.replace(pgpe_params=params, pgpe_opt_state=opt_state)
             sim_state = sim_state.replace(key=keys[0])
             return sim_state, pgpe_state, converged
@@ -2278,7 +2279,8 @@ class JaxBackpropPlanner:
                  use_symlog_reward: bool=False,
                  utility: Union[Callable[[jnp.ndarray], float], str]='mean',
                  utility_kwargs: Optional[Kwargs]=None,
-                 policy_entropy_coeff: float=0.01,
+                 start_entropy_coeff: float=1e-1,
+                 end_entropy_coeff: float=1e-5,
                  critic: Optional[Callable]=None,
                  logger: Optional[Logger]=None,
                  dashboard: Optional[Any]=None,
@@ -2321,7 +2323,8 @@ class JaxBackpropPlanner:
         scalar, or a a string identifying the utility function by name
         :param utility_kwargs: additional keyword arguments to pass hyper-
         parameters to the utility function call
-        :param policy_entropy_coeff: coefficient for policy entropy regularization
+        :param start_entropy_coeff: initial coefficient for policy entropy regularization
+        :param end_entropy_coeff: final coefficient for policy entropy regularization
         :param critic: optional critic to estimate the tail return
         :param logger: to log information about compilation to file
         :param dashboard: optional dashboard to display training progress and results
@@ -2389,7 +2392,8 @@ class JaxBackpropPlanner:
         self.compiler_kwargs = compiler_kwargs
         self.use_symlog_reward = use_symlog_reward
         self.critic_fn = critic
-        self.policy_entropy_coeff = policy_entropy_coeff
+        self.start_entropy_coeff = start_entropy_coeff
+        self.end_entropy_coeff = end_entropy_coeff
 
         self.logger = logger
         self.dashboard = dashboard
@@ -2455,13 +2459,14 @@ class JaxBackpropPlanner:
         instance.
         '''
         result = (f'[INFO] objective hyper-parameters:\n'
-                  f'    utility_fn        ={self.utility.__name__}\n'
-                  f'    utility args      ={self.utility_kwargs}\n'
-                  f'    use_symlog        ={self.use_symlog_reward}\n'
-                  f'    use_critic        ={self.critic_fn is not None}\n'
-                  f'    lookahead         ={self.horizon}\n'
-                  f'    user_action_bounds={self._action_bounds}\n'
-                  f'    entropy_coeff     ={self.policy_entropy_coeff}\n'
+                  f'    utility_fn         ={self.utility.__name__}\n'
+                  f'    utility args       ={self.utility_kwargs}\n'
+                  f'    use_symlog         ={self.use_symlog_reward}\n'
+                  f'    use_critic         ={self.critic_fn is not None}\n'
+                  f'    lookahead          ={self.horizon}\n'
+                  f'    user_action_bounds ={self._action_bounds}\n'
+                  f'    start_entropy_coeff={self.start_entropy_coeff}\n'
+                  f'    end_entropy_coeff  ={self.end_entropy_coeff}\n'
                   f'[INFO] optimizer hyper-parameters:\n'
                   f'    optimizer         ={self.optimizer_name}\n'
                   f'    optimizer args    ={self.optimizer_kwargs}\n'
@@ -2625,6 +2630,13 @@ class JaxBackpropPlanner:
         _jax_wrapped_returns = self._jax_return(use_symlog)
         _jax_wrapped_critic = self._jax_critic()
         
+        # entropy regularization penalty is decayed exponentially by elapsed budget
+        # this uses the optimizer progress (as percentage) to move the decay
+        if self.start_entropy_coeff == 0:
+            entropy_coeff_decay = 0
+        else:
+            entropy_coeff_decay = (self.end_entropy_coeff / self.start_entropy_coeff) ** 0.01
+        
         # the loss is the average cumulative reward across all roll-outs
         # but applies a utility function if requested to each return observation:
         # by default, the utility function is the mean
@@ -2645,12 +2657,14 @@ class JaxBackpropPlanner:
                     _jax_wrapped_critic, in_axes=vmap_axes)(sim_state, planner_state)
             
             # policy max entropy loss
+            ent = self.start_entropy_coeff * jnp.power(
+                entropy_coeff_decay, planner_state.progress)
             reg_loss = -jnp.mean(jnp.sum(log['entropy'], axis=1), axis=0)
 
             # evaluate cumulative return per rollout
             returns = _jax_wrapped_returns(log['reward'], critic_values)
             loss = -utility_fn(returns, **utility_kwargs)
-            loss = loss + self.policy_entropy_coeff * reg_loss
+            loss = loss + ent * reg_loss
             aux = (log, model_params)
             return loss, aux
         return _jax_wrapped_plan_loss
@@ -2823,7 +2837,7 @@ class JaxBackpropPlanner:
         sim_state = self.compiled.init_sim_state(key, None, self.batch_size_train)
         
         # initialize the planner state
-        planner_state = JaxPlannerState(critic_params=critic_params)
+        planner_state = JaxPlannerState(critic_params=critic_params, progress=0.)
         planner_state = self.initialize(sim_state, planner_state)
         policy_params = _unbatched_pytree(planner_state.policy_params, 0)
         planner_state = planner_state.replace(policy_params=policy_params)
@@ -3004,7 +3018,7 @@ class JaxBackpropPlanner:
         # ======================================================================
         
         planner_state = JaxPlannerState(
-            hyperparams=policy_hyperparams, critic_params=critic_params)
+            hyperparams=policy_hyperparams, critic_params=critic_params, progress=0.)
         if guess is not None:
             if policy_hyperparams is None:
                 raise ValueError('guess was provided without policy_hyperparams.')
@@ -3101,7 +3115,7 @@ class JaxBackpropPlanner:
 
                 # pgpe update of the plan
                 test_sim_state, pgpe_state, pgpe_converged = self.pgpe.update(
-                    test_sim_state, planner_state, pgpe_state, progress_percent)
+                    test_sim_state, planner_state, pgpe_state)
                 pgpe_policy_params = self.pgpe.policy_params(pgpe_state.pgpe_params)
                 
                 # evaluate
@@ -3191,6 +3205,7 @@ class JaxBackpropPlanner:
             # build a callback
             progress_percent = 100 * min(
                 1, max(0, elapsed / train_seconds, it / (epochs - 1)))
+            planner_state = planner_state.replace(progress=progress_percent)
             callback = {
                 'iteration': it,
                 'elapsed_time': elapsed,
