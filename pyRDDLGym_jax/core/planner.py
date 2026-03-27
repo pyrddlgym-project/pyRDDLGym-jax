@@ -633,7 +633,7 @@ class JaxStraightLinePlan(JaxPlan):
                  softmax_weight: float=1.0,
                  use_new_projection: bool=False,
                  max_constraint_iter: int=100,
-                 stochastic: bool=True,
+                 stochastic: bool=False,
                  sigma_range: Tuple[float, float]=(1e-5, 1e3),
                  sigma_entropy_grad: bool=False) -> None:
         '''Creates a new straight line plan in JAX.
@@ -1109,8 +1109,8 @@ class JaxDeepReactivePolicy(JaxPlan):
                  normalizer_kwargs: Optional[Kwargs]=None,
                  sigmoid_weight: float=1.0,
                  wrap_non_bool: bool=False,
-                 softmax_output_weight: float=1.0,
-                 stochastic: bool=True,
+                 softmax_weight: float=1.0,
+                 stochastic: bool=False,
                  sigma_entropy_grad: bool=False,
                  time_dependent: bool=False,
                  time_embedding: Optional[Type]=SinusoidalTimeEmbedding,
@@ -1129,7 +1129,7 @@ class JaxDeepReactivePolicy(JaxPlan):
         :param sigmoid_weight: weight for sigmoid operation on boolean action parameters
         :param wrap_non_bool: whether to wrap real or int action fluent parameters
         with non-linearity (e.g. sigmoid or ELU) to satisfy box constraints
-        :param softmax_output_weight: weight in softmax action constraint satisfaction
+        :param softmax_weight: weight in softmax action constraint satisfaction
         :param stochastic: whether the policy is stochastic
         :param sigma_entropy_grad: whether to apply entropy gradient to sigma
         :param time_dependent: whether to make the DRP time_dependent
@@ -1151,7 +1151,7 @@ class JaxDeepReactivePolicy(JaxPlan):
         self._normalizer_kwargs = normalizer_kwargs
         self._sigmoid_weight = sigmoid_weight
         self._wrap_non_bool = wrap_non_bool
-        self._softmax_output_weight = softmax_output_weight
+        self._softmax_output_weight = softmax_weight
         self._stochastic = stochastic
         self._sigma_entropy_grad = sigma_entropy_grad
 
@@ -1182,7 +1182,7 @@ class JaxDeepReactivePolicy(JaxPlan):
                 f'        parsed_action_bounds =\n        {bounds}\n'
                 f'        sigmoid_weight       ={self._sigmoid_weight}\n'
                 f'        wrap_non_bool        ={self._wrap_non_bool}\n'
-                f'        softmax_output_weight={self._softmax_output_weight}\n')
+                f'        softmax_weight       ={self._softmax_output_weight}\n')
         
     def compile(self, compiled: JaxRDDLCompilerWithGrad, 
                 test_compiled: JaxRDDLCompiler,
