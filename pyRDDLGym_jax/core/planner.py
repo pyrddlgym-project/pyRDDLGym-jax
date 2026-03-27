@@ -1295,6 +1295,7 @@ class JaxDeepReactivePolicy(JaxPlan):
         # predict actions from the policy network for current state
         wrap_non_bool = self._wrap_non_bool
         stochastic = self._stochastic
+        sigma_entropy_grad = self._sigma_entropy_grad
         time_dependent = self._time_dependent
         time_embedding = self._time_embedding
         time_embedding_kwargs = self._time_embedding_kwargs
@@ -1370,7 +1371,7 @@ class JaxDeepReactivePolicy(JaxPlan):
                             if not shapes[var]:
                                 log_sigma = jnp.squeeze(log_sigma)
                             entropy = entropy + jnp.sum(
-                                log_sigma if self._sigma_entropy_grad 
+                                log_sigma if sigma_entropy_grad 
                                 else jax.lax.stop_gradient(log_sigma)
                             )
                             key, subkey = random.split(key)
