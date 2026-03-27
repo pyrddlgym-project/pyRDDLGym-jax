@@ -1107,8 +1107,11 @@ class JaxDeepReactivePolicy(JaxPlan):
                  normalize: bool=False,
                  normalize_per_layer: bool=False,
                  normalizer_kwargs: Optional[Kwargs]=None,
+                 sigmoid_weight: float=1.0,
                  wrap_non_bool: bool=False,
                  softmax_output_weight: float=1.0,
+                 stochastic: bool=True,
+                 sigma_entropy_grad: bool=False,
                  time_dependent: bool=False,
                  time_embedding: Optional[Type]=SinusoidalTimeEmbedding,
                  time_embedding_kwargs: Optional[Kwargs]=None) -> None:
@@ -1123,9 +1126,12 @@ class JaxDeepReactivePolicy(JaxPlan):
         individually (only active if normalize is True)
         :param normalizer_kwargs: if normalize is True, apply additional arguments
         to layer norm
+        :param sigmoid_weight: weight for sigmoid operation on boolean action parameters
         :param wrap_non_bool: whether to wrap real or int action fluent parameters
         with non-linearity (e.g. sigmoid or ELU) to satisfy box constraints
         :param softmax_output_weight: weight in softmax action constraint satisfaction
+        :param stochastic: whether the policy is stochastic
+        :param sigma_entropy_grad: whether to apply entropy gradient to sigma
         :param time_dependent: whether to make the DRP time_dependent
         :param time_embedding: time embedding for time dependent policy
         :param time_embedding_kwargs: arguments to pass to time embedding on initialization
@@ -1143,8 +1149,11 @@ class JaxDeepReactivePolicy(JaxPlan):
         if normalizer_kwargs is None:
             normalizer_kwargs = {'use_bias': True, 'use_scale': True}
         self._normalizer_kwargs = normalizer_kwargs
+        self._sigmoid_weight = sigmoid_weight
         self._wrap_non_bool = wrap_non_bool
         self._softmax_output_weight = softmax_output_weight
+        self._stochastic = stochastic
+        self._sigma_entropy_grad = sigma_entropy_grad
 
         # for time embedding
         self._time_dependent = time_dependent
@@ -1163,12 +1172,15 @@ class JaxDeepReactivePolicy(JaxPlan):
                 f'    time_dependent    ={self._time_dependent}\n'
                 f'    time_embedding    ={self._time_embedding}\n'
                 f'    time_embed_kwargs ={self._time_embedding_kwargs}\n'
+                f'    stochastic        ={self._stochastic}\n'
+                f'    sigma_entropy_grad={self._sigma_entropy_grad}\n'
                 f'    input norm:\n'
                 f'        apply_input_norm    ={self._normalize}\n'
                 f'        input_norm_layerwise={self._normalize_per_layer}\n'
                 f'        input_norm_args     ={self._normalizer_kwargs}\n'
                 f'    constraint-sat strategy:\n'
                 f'        parsed_action_bounds =\n        {bounds}\n'
+                f'        sigmoid_weight       ={self._sigmoid_weight}\n'
                 f'        wrap_non_bool        ={self._wrap_non_bool}\n'
                 f'        softmax_output_weight={self._softmax_output_weight}\n')
         
@@ -1278,9 +1290,11 @@ class JaxDeepReactivePolicy(JaxPlan):
                                 if rddl.variable_ranges[var] == 'bool')
         use_constraint_satisfaction = rddl.max_allowed_actions < bool_action_count
         SOFTMAX_KEY = 'softmax_weight'
+        SIGMOID_KEY = 'sigmoid_weight'
 
         # predict actions from the policy network for current state
         wrap_non_bool = self._wrap_non_bool
+        stochastic = self._stochastic
         time_dependent = self._time_dependent
         time_embedding = self._time_embedding
         time_embedding_kwargs = self._time_embedding_kwargs
@@ -1311,38 +1325,85 @@ class JaxDeepReactivePolicy(JaxPlan):
                 
                 # each output is a linear layer reshaped to original lifted shape
                 actions = {}
+                entropy = 0.
                 for (var, size) in layer_sizes.items():
-                    if ranges[var] != 'bool' or not use_constraint_satisfaction:
-                        name = f'dense_{layer_names[var]}'
-                        linear = nn.Dense(features=size, kernel_init=init, name=name)
-                        output = linear(hidden)
-                        output = jnp.reshape(output, output.shape[:-1] + shapes[var])
-                        if not shapes[var]:
-                            output = jnp.squeeze(output)
                     
-                    # project action output to valid box constraints following Bueno et. al.
+                    # for bool action, create logit head with sigmoid activation
                     if ranges[var] == 'bool':
                         if not use_constraint_satisfaction:
-                            actions[var] = jax.nn.sigmoid(output)
+
+                            # linear head for logits
+                            name = f'dense_{layer_names[var]}_logit'
+                            linear = nn.Dense(features=size, kernel_init=init, name=name)
+                            logits = linear(hidden)
+                            logits = jnp.reshape(logits, logits.shape[:-1] + shapes[var])
+                            if not shapes[var]:
+                                logits = jnp.squeeze(logits)
+                            
+                            # stochastic sampling
+                            if stochastic:
+                                prob = jax.nn.sigmoid(hyperparams[SIGMOID_KEY] * logits)
+                                entropy = entropy - jnp.sum(
+                                    prob * safe_log(prob) + (1. - prob) * safe_log(1. - prob))
+                                key, subkey = random.split(key)
+                                noise = random.logistic(subkey, shape=jnp.shape(logits))
+                                logits = logits + train * noise
+                            actions[var] = jax.nn.sigmoid(hyperparams[SIGMOID_KEY] * logits)
+                    
+                    # for real and int action, create mean (and log sigma) head
+                    # project to valid ranges using Bueno et al. 2019 method
                     else:
+                        # linear head for mean action
+                        name = f'dense_{layer_names[var]}_mu'
+                        linear = nn.Dense(features=size, kernel_init=init, name=name)
+                        action = linear(hidden)
+                        action = jnp.reshape(action, action.shape[:-1] + shapes[var])
+                        if not shapes[var]:
+                            action = jnp.squeeze(action)
+                        
+                        # optional linear head for log sigma
+                        if stochastic:
+                            name = f'dense_{layer_names[var]}_log_sigma'
+                            linear = nn.Dense(features=size, kernel_init=init, name=name)
+                            log_sigma = linear(hidden)
+                            log_sigma = jnp.reshape(log_sigma, log_sigma.shape[:-1] + shapes[var])
+                            if not shapes[var]:
+                                log_sigma = jnp.squeeze(log_sigma)
+                            entropy = entropy + jnp.sum(
+                                log_sigma if self._sigma_entropy_grad 
+                                else jax.lax.stop_gradient(log_sigma)
+                            )
+                            key, subkey = random.split(key)
+                            noise = random.normal(subkey, shape=jnp.shape(log_sigma))
+                            action = action + train * jnp.exp(log_sigma) * noise
+
+                        # project to valid ranges using Bueno et al. 2019 method
                         if wrap_non_bool:
                             lower, upper = bounds[var]
                             branches = [jnp.asarray(mask, dtype=compiled.REAL) 
                                         for mask in cond_lists[var]]       
-                            actions[var] = _jax_bound_action(branches, lower, upper, output)
+                            actions[var] = _jax_bound_action(branches, lower, upper, action)
                         else:
-                            actions[var] = output
+                            actions[var] = action
                 
                 # for constraint satisfaction wrap bool actions with softmax
+                # costly approach would compute entropy using an extra top-k pass
+                # we avoid this by computing softmax probabilities directly from the logits
                 if use_constraint_satisfaction:
                     linear = nn.Dense(
                         features=bool_action_count, kernel_init=init, name='dense_topk')
                     logits = linear(hidden)
                     weight = hyperparams[SOFTMAX_KEY]
+                    if stochastic:
+                        prob = jax.nn.softmax(weight * logits)
+                        entropy = entropy - jnp.sum(prob * safe_log(prob))
+                        key, subkey = random.split(key)
+                        noise = random.gumbel(subkey, shape=jnp.shape(logits))
+                        logits = logits + train * noise
                     topk = GumbelSoftmaxTopK(
                         allowed_actions=rddl.max_allowed_actions, dtype=compiled.REAL)
                     actions[BOOL_KEY] = topk(key, logits, weight, train)
-                return actions
+                return actions, entropy
         predict_fn = DRP(name='drp')       
         
         # given a softmax output, this simply unpacks the result of the softmax back into
@@ -1363,7 +1424,7 @@ class JaxDeepReactivePolicy(JaxPlan):
         # the main subroutine to compute the trainable rddl actions from the trainable
         # parameters and the current state/obs dictionary       
         def _jax_wrapped_drp_predict_train(sim_state, planner_state, train=1):
-            actions = predict_fn.apply(
+            actions, entropy = predict_fn.apply(
                 planner_state.policy_params, sim_state.fls, planner_state.hyperparams, 
                 sim_state.step, train=train, rngs={"policy": sim_state.key})
             if not wrap_non_bool:
@@ -1374,14 +1435,14 @@ class JaxDeepReactivePolicy(JaxPlan):
                 bool_actions = _jax_unstack_bool_from_softmax(actions[BOOL_KEY])
                 actions.update(bool_actions)
                 del actions[BOOL_KEY]
-            return actions
+            return actions, entropy
         self.train_policy = _jax_wrapped_drp_predict_train
         
         # the main subroutine to compute the test rddl actions from the trainable 
         # parameters and state/obs dict: the difference here is that actions are converted 
         # to their required types (i.e. bool, int, float)
         def _jax_wrapped_drp_predict_test(sim_state, planner_state):
-            actions = _jax_wrapped_drp_predict_train(sim_state, planner_state, train=0)
+            actions, entropy = _jax_wrapped_drp_predict_train(sim_state, planner_state, train=0)
             new_actions = {}
             for (var, action) in actions.items():
                 prange = ranges[var]
@@ -1393,7 +1454,7 @@ class JaxDeepReactivePolicy(JaxPlan):
                 else:
                     new_action = jnp.clip(action, *bounds[var])
                 new_actions[var] = new_action
-            return new_actions
+            return new_actions, entropy
         self.test_policy = _jax_wrapped_drp_predict_test
         
         # ***********************************************************************
@@ -1415,7 +1476,8 @@ class JaxDeepReactivePolicy(JaxPlan):
         
         # initialize policy parameters according to user-desired weight initializer
         def _jax_wrapped_drp_init(sim_state):
-            hyperparams = {SOFTMAX_KEY: self._softmax_output_weight}
+            hyperparams = {SOFTMAX_KEY: self._softmax_output_weight,
+                           SIGMOID_KEY: self._sigmoid_weight}
             if preprocessor is not None:
                 hyperparams[Preprocessor.HYPERPARAMS_KEY] = preprocessor.initialize()
             obs_vars = {var: value[0, ...] 
