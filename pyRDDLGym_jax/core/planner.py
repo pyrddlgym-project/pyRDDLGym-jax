@@ -818,7 +818,7 @@ class JaxStraightLinePlan(JaxPlan):
             for (var, param) in planner_state.policy_params['real'].items():
                 action = jnp.asarray(param['mu'][step, ...], dtype=compiled.REAL)
                 if self._stochastic:
-                    log_sigma = param['log_sigma'][step, ...]
+                    log_sigma = jnp.clip(param['log_sigma'][step, ...], *log_sigma_bounds)
                     entropy = entropy + jnp.sum(
                         log_sigma if self._sigma_entropy_grad 
                         else jax.lax.stop_gradient(log_sigma)
@@ -988,7 +988,7 @@ class JaxStraightLinePlan(JaxPlan):
                         key, subkey = random.split(key)
                         param_log_sigma = init_fn(key=subkey, shape=shape, dtype=compiled.REAL)
                     else:
-                        param_log_sigma = None
+                        param_log_sigma = 0.
                     params['real'][var] = {'mu': param_mu, 'log_sigma': param_log_sigma}
             
             # init stacked bool actions as one tensor
@@ -1072,7 +1072,7 @@ class GumbelSoftmaxTopK(nn.Module):
             )
             return khot_final
 
-        return jax.lax.switch(train, [soft_top_k, hard_top_k], rng_key, action_logits, weight)
+        return jax.lax.switch(train, [hard_top_k, soft_top_k], rng_key, action_logits, weight)
 
 
 class FiLM(nn.Module):
