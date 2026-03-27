@@ -875,12 +875,11 @@ class JaxStraightLinePlan(JaxPlan):
                 
             # box projection for real actions
             for (var, param) in params['real'].items():
-                if self._wrap_non_bool:
-                    new_mean = param['mu']
-                else:
-                    new_mean = jnp.clip(param['mu'], *bounds[var])
+                new_mean = param['mu']
+                if not self._wrap_non_bool:
+                    new_mean = jnp.clip(new_mean, *bounds[var])
                 log_sigma = param['log_sigma']
-                if log_sigma is not None:
+                if self._stochastic:
                     log_sigma = jnp.clip(log_sigma, *log_sigma_bounds)
                 new_params['real'][var] = {'mu': new_mean, 'log_sigma': log_sigma}
             return new_params
@@ -3654,4 +3653,4 @@ class JaxOnlineController(BaseAgent):
             for (var, value) in self.planner.test_compiled.init_policy_values.items()
             if var not in self.planner.test_compiled.rddl.policy.param_fluents
         }
-    
+        
