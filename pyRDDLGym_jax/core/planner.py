@@ -1442,7 +1442,7 @@ class JaxDeepReactivePolicy(JaxPlan):
         # parameters and state/obs dict: the difference here is that actions are converted 
         # to their required types (i.e. bool, int, float)
         def _jax_wrapped_drp_predict_test(sim_state, planner_state):
-            actions, entropy = _jax_wrapped_drp_predict_train(sim_state, planner_state, train=0)
+            actions, _ = _jax_wrapped_drp_predict_train(sim_state, planner_state, train=0)
             new_actions = {}
             for (var, action) in actions.items():
                 prange = ranges[var]
@@ -1454,7 +1454,7 @@ class JaxDeepReactivePolicy(JaxPlan):
                 else:
                     new_action = jnp.clip(action, *bounds[var])
                 new_actions[var] = new_action
-            return new_actions, entropy
+            return new_actions, 0.
         self.test_policy = _jax_wrapped_drp_predict_test
         
         # ***********************************************************************
@@ -1549,7 +1549,7 @@ class JaxRDDLPolicy(JaxPlan):
                     value = jnp.clip(value, *bounds[var])
                     value = jnp.asarray(value, dtype=compiled.REAL)
                 new_fls[var] = value
-            return new_fls
+            return new_fls, 0.
         self.train_policy = _jax_wrapped_rddl_predict_train
 
         def _jax_wrapped_rddl_cast_param_fluents(params):
@@ -1584,7 +1584,7 @@ class JaxRDDLPolicy(JaxPlan):
                         value = jnp.clip(value, *bounds[var])
                         value = jnp.asarray(jnp.round(value), dtype=test_compiled.INT)
                 new_fls[var] = value
-            return new_fls
+            return new_fls, 0.
         self.test_policy = _jax_wrapped_rddl_predict_test
         
         # ***********************************************************************
