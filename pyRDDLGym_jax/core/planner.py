@@ -168,6 +168,11 @@ def _load_config(config, args):
     if plan_time_embed is not None:
         plan_kwargs['time_embedding'] = getattr(sys.modules[__name__], plan_time_embed)
 
+    # policy real noise
+    plan_action_noise_dist = plan_kwargs.get('action_noise_dist', None)
+    if plan_action_noise_dist is not None:
+        plan_kwargs['action_noise_dist'] = getattr(random, plan_action_noise_dist)
+
     # read the planner settings
     planner_args['plan'] = getattr(sys.modules[__name__], plan_method)(**plan_kwargs)
     
@@ -635,7 +640,8 @@ class JaxStraightLinePlan(JaxPlan):
                  max_constraint_iter: int=100,
                  stochastic: bool=False,
                  sigma_range: Tuple[float, float]=(1e-5, 1e3),
-                 sigma_entropy_grad: bool=False) -> None:
+                 sigma_entropy_grad: bool=False,
+                 action_noise_dist: Any=random.normal) -> None:
         '''Creates a new straight line plan in JAX.
         
         :param initializer: a Jax Initializer for setting the initial actions
@@ -660,6 +666,7 @@ class JaxStraightLinePlan(JaxPlan):
         :param stochastic: whether to use stochastic actions
         :param sigma_range: bounds on noise of actions
         :param sigma_entropy_grad: whether to use gradient of entropy of action distribution
+        :param action_noise_dist: distribution for action noise
         '''
         super(JaxStraightLinePlan, self).__init__()
         
@@ -676,15 +683,18 @@ class JaxStraightLinePlan(JaxPlan):
         self._stochastic = stochastic
         self._sigma_range = sigma_range
         self._sigma_entropy_grad = sigma_entropy_grad
-    
+        self._action_noise_dist = action_noise_dist
+
     def __str__(self) -> str:
         bounds = '\n        '.join(
             map(lambda kv: f'{kv[0]}: {kv[1]}', self.bounds.items()))
         return (f'[INFO] policy hyper-parameters:\n'
                 f'    initializer       ={self._initializer_base}\n'
-                f'    stochastic        ={self._stochastic}\n'
-                f'    sigma_range       ={self._sigma_range}\n'
-                f'    sigma_entropy_grad={self._sigma_entropy_grad}\n'
+                f'    stochastic policy:\n'
+                f'        stochastic        ={self._stochastic}\n'
+                f'        sigma_range       ={self._sigma_range}\n'
+                f'        sigma_entropy_grad={self._sigma_entropy_grad}\n'
+                f'        action_noise_dist ={self._action_noise_dist}\n'
                 f'    constraint-sat strategy (simple):\n'
                 f'        parsed_action_bounds =\n        {bounds}\n'
                 f'        wrap_sigmoid         ={self._wrap_sigmoid}\n'
@@ -785,7 +795,8 @@ class JaxStraightLinePlan(JaxPlan):
                         prob = jax.nn.softmax(softmax_weight * logits)
                         entropy = entropy - jnp.sum(prob * safe_log(prob))
                         key, subkey = random.split(key)
-                        noise = random.gumbel(subkey, shape=jnp.shape(logits))
+                        noise = random.gumbel(
+                            subkey, shape=jnp.shape(logits), dtype=compiled.REAL)
                         logits = logits + noise
                     output = jax.nn.softmax(softmax_weight * logits)
                     bool_actions = _jax_unstack_bool_from_softmax(output)
@@ -796,7 +807,8 @@ class JaxStraightLinePlan(JaxPlan):
                         entropy = entropy - jnp.sum(
                             prob * safe_log(prob) + (1. - prob) * safe_log(1. - prob))
                         key, subkey = random.split(key)
-                        noise = random.logistic(subkey, shape=jnp.shape(logits))
+                        noise = random.logistic(
+                            subkey, shape=jnp.shape(logits), dtype=compiled.REAL)
                         logits = logits + noise
                     actions[var] = _jax_bool_param_to_action(var, logits, hyperparams)
                     
@@ -812,7 +824,8 @@ class JaxStraightLinePlan(JaxPlan):
                         else jax.lax.stop_gradient(log_sigma)
                     )
                     key, subkey = random.split(key)
-                    noise = random.normal(subkey, shape=jnp.shape(action))
+                    noise = self._action_noise_dist(
+                        subkey, shape=jnp.shape(action), dtype=compiled.REAL)
                     action = action + jnp.exp(log_sigma) * noise
                 actions[var] = _jax_non_bool_param_to_action(var, action)
 
@@ -1011,19 +1024,25 @@ class GumbelSoftmaxTopK(nn.Module):
 
     allowed_actions: int
     dtype: Any
+    stochastic: bool=True
     name: str='topk'
 
     @nn.compact
-    def __call__(self, rng_key, action_logits, weight, train: bool):
+    def __call__(self, rng_key, action_logits, weight: float, train: bool):
         
         # no constraints to propagate
         if self.allowed_actions == 1:
+            if self.stochastic:
+                g = random.gumbel(
+                    key=rng_key, shape=jnp.shape(action_logits), dtype=self.dtype)
+                action_logits = action_logits + train * g
             return jax.nn.softmax(action_logits)
         
         # forward relaxation
         def soft_top_k(key, logits, w):
-            g = random.gumbel(key=key, shape=jnp.shape(logits), dtype=self.dtype)
-            logits = logits + g
+            if self.stochastic:
+                g = random.gumbel(key=key, shape=jnp.shape(logits), dtype=self.dtype)
+                logits = logits + g
             def body_fun(i, carry):
                 khot, logits_i = carry
                 logits_new = logits_i + safe_log(1.0 - khot)
@@ -1112,6 +1131,7 @@ class JaxDeepReactivePolicy(JaxPlan):
                  softmax_weight: float=1.0,
                  stochastic: bool=False,
                  sigma_entropy_grad: bool=False,
+                 action_noise_dist: Any=random.normal,
                  time_dependent: bool=False,
                  time_embedding: Optional[Type]=SinusoidalTimeEmbedding,
                  time_embedding_kwargs: Optional[Kwargs]=None) -> None:
@@ -1132,6 +1152,7 @@ class JaxDeepReactivePolicy(JaxPlan):
         :param softmax_weight: weight in softmax action constraint satisfaction
         :param stochastic: whether the policy is stochastic
         :param sigma_entropy_grad: whether to apply entropy gradient to sigma
+        :param action_noise_dist: distribution to sample noise for stochastic real actions
         :param time_dependent: whether to make the DRP time_dependent
         :param time_embedding: time embedding for time dependent policy
         :param time_embedding_kwargs: arguments to pass to time embedding on initialization
@@ -1154,6 +1175,7 @@ class JaxDeepReactivePolicy(JaxPlan):
         self._softmax_output_weight = softmax_weight
         self._stochastic = stochastic
         self._sigma_entropy_grad = sigma_entropy_grad
+        self._action_noise_dist = action_noise_dist
 
         # for time embedding
         self._time_dependent = time_dependent
@@ -1169,20 +1191,23 @@ class JaxDeepReactivePolicy(JaxPlan):
                 f'    topology          ={self._topology}\n'
                 f'    activation_fn     ={self._activations[0].__name__}\n'
                 f'    initializer       ={type(self._initializer_base).__name__}\n'
-                f'    time_dependent    ={self._time_dependent}\n'
-                f'    time_embedding    ={self._time_embedding}\n'
-                f'    time_embed_kwargs ={self._time_embedding_kwargs}\n'
-                f'    stochastic        ={self._stochastic}\n'
-                f'    sigma_entropy_grad={self._sigma_entropy_grad}\n'
+                f'    time embedding:\n'
+                f'        time_dependent   ={self._time_dependent}\n'
+                f'        time_embedding   ={self._time_embedding}\n'
+                f'        time_embed_kwargs={self._time_embedding_kwargs}\n'
+                f'    stochastic policy:\n'
+                f'        stochastic        ={self._stochastic}\n'
+                f'        sigma_entropy_grad={self._sigma_entropy_grad}\n'
+                f'        action_noise_dist ={self._action_noise_dist}\n'
                 f'    input norm:\n'
                 f'        apply_input_norm    ={self._normalize}\n'
                 f'        input_norm_layerwise={self._normalize_per_layer}\n'
                 f'        input_norm_args     ={self._normalizer_kwargs}\n'
                 f'    constraint-sat strategy:\n'
-                f'        parsed_action_bounds =\n        {bounds}\n'
-                f'        sigmoid_weight       ={self._sigmoid_weight}\n'
-                f'        wrap_non_bool        ={self._wrap_non_bool}\n'
-                f'        softmax_weight       ={self._softmax_output_weight}\n')
+                f'        parsed_action_bounds=\n        {bounds}\n'
+                f'        sigmoid_weight      ={self._sigmoid_weight}\n'
+                f'        wrap_non_bool       ={self._wrap_non_bool}\n'
+                f'        softmax_weight      ={self._softmax_output_weight}\n')
         
     def compile(self, compiled: JaxRDDLCompilerWithGrad, 
                 test_compiled: JaxRDDLCompiler,
@@ -1296,6 +1321,7 @@ class JaxDeepReactivePolicy(JaxPlan):
         wrap_non_bool = self._wrap_non_bool
         stochastic = self._stochastic
         sigma_entropy_grad = self._sigma_entropy_grad
+        action_noise_dist = self._action_noise_dist
         time_dependent = self._time_dependent
         time_embedding = self._time_embedding
         time_embedding_kwargs = self._time_embedding_kwargs
@@ -1347,7 +1373,8 @@ class JaxDeepReactivePolicy(JaxPlan):
                                 entropy = entropy - jnp.sum(
                                     prob * safe_log(prob) + (1. - prob) * safe_log(1. - prob))
                                 key, subkey = random.split(key)
-                                noise = random.logistic(subkey, shape=jnp.shape(logits))
+                                noise = random.logistic(
+                                    subkey, shape=jnp.shape(logits), dtype=compiled.REAL)
                                 logits = logits + train * noise
                             actions[var] = jax.nn.sigmoid(hyperparams[SIGMOID_KEY] * logits)
                     
@@ -1375,7 +1402,8 @@ class JaxDeepReactivePolicy(JaxPlan):
                                 else jax.lax.stop_gradient(log_sigma)
                             )
                             key, subkey = random.split(key)
-                            noise = random.normal(subkey, shape=jnp.shape(log_sigma))
+                            noise = action_noise_dist(
+                                subkey, shape=jnp.shape(log_sigma), dtype=compiled.REAL)
                             action = action + train * jnp.exp(log_sigma) * noise
 
                         # project to valid ranges using Bueno et al. 2019 method
@@ -1398,11 +1426,9 @@ class JaxDeepReactivePolicy(JaxPlan):
                     if stochastic:
                         prob = jax.nn.softmax(weight * logits)
                         entropy = entropy - jnp.sum(prob * safe_log(prob))
-                        key, subkey = random.split(key)
-                        noise = random.gumbel(subkey, shape=jnp.shape(logits))
-                        logits = logits + train * noise
                     topk = GumbelSoftmaxTopK(
-                        allowed_actions=rddl.max_allowed_actions, dtype=compiled.REAL)
+                        allowed_actions=rddl.max_allowed_actions, dtype=compiled.REAL,
+                        stochastic=stochastic)
                     actions[BOOL_KEY] = topk(key, logits, weight, train)
                 return actions, entropy
         predict_fn = DRP(name='drp')       
