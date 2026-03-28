@@ -988,7 +988,7 @@ class JaxStraightLinePlan(JaxPlan):
                         key, subkey = random.split(key)
                         param_log_sigma = init_fn(key=subkey, shape=shape, dtype=compiled.REAL)
                     else:
-                        param_log_sigma = 0.
+                        param_log_sigma = None
                     params['real'][var] = {'mu': param_mu, 'log_sigma': param_log_sigma}
             
             # init stacked bool actions as one tensor
