@@ -15,10 +15,10 @@ Purpose and features:
 1. automatic translation of RDDL description files into differentiable JAX simulators
 2. implementation of configurable operator relaxations for discrete and hybrid domains
 3. flexible policy representations and automated Bayesian hyper-parameter tuning
-4. interactive dashboard for dyanmic visualization and debugging
+4. interactive dashboard for dynamic visualization and debugging
 5. hybridization with parameter-exploring policy gradients (PGPE)
 6. risk-sensitive objectives
-6. optimization of structured/symbolic policies defined in RDDL blocks.
+7. optimization of structured/symbolic policies defined in RDDL blocks.
 
 Some demos of solved problems by JaxPlan:
 
