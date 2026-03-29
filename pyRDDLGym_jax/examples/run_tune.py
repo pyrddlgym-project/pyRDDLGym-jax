@@ -3,7 +3,7 @@ is performed using a batched parallelized Bayesian optimization.
 
 The syntax is:
 
-    python run_tune.py <domain> <instance> <method> [<trials>] [<iters>] [<workers>] [<dashboard>]
+    python run_tune.py <domain> <instance> <method> [<trials>] [<iters>] [<workers>] [<dashboard>] [<filepath>]
     
 where:
     <domain> is the name of a domain located in the /Examples directory
@@ -16,6 +16,7 @@ where:
     <workers> is the number of parallel workers (i.e. batch size), which must
     not exceed the number of cores available on the machine (defaults to 4)
     <dashboard> is whether the dashboard is displayed
+    <filepath> is the path to save the best configuration (optional)
 '''
 import os
 import sys

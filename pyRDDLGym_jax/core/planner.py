@@ -192,7 +192,7 @@ def _load_config(config, args):
         if 'optimizer' in pgpe_kwargs:
             pgpe_optimizer = _getattr_any(packages=[optax], item=pgpe_kwargs['optimizer'])
             if pgpe_optimizer is None:
-                raise ValueError(f'Invalid optimizer <{pgpe_optimizer}>.')
+                raise ValueError(f'Invalid optimizer <{pgpe_kwargs["optimizer"]}>.')
             else:
                 pgpe_kwargs['optimizer'] = pgpe_optimizer
         planner_args['pgpe'] = getattr(sys.modules[__name__], pgpe_method)(**pgpe_kwargs)
