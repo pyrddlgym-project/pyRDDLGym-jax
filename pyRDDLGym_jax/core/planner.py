@@ -285,7 +285,9 @@ class Preprocessor(metaclass=ABCMeta):
 class StaticNormalizer(Preprocessor):
     '''Normalize values by box constraints on fluents computed from the RDDL domain.'''
 
-    def __init__(self, fluent_bounds: Bounds={}) -> None:
+    def __init__(self, fluent_bounds: Optional[Bounds]=None) -> None:
+        if fluent_bounds is None:
+            fluent_bounds = {}
         self.fluent_bounds = fluent_bounds
 
     def compile(self, compiled: JaxRDDLCompilerWithGrad) -> None:
@@ -2689,7 +2691,8 @@ class JaxBackpropPlanner:
 
             # evaluate and validate critic
             critic_value = jnp.squeeze(critic_fn(planner_state.critic_params, obs, action))
-            assert jnp.isscalar(critic_value), 'Critic value must be a scalar.'
+            if not jnp.isscalar(critic_value):
+                raise ValueError('Critic value must be a scalar.')
             return critic_value
         return _jax_wrapped_critic            
 

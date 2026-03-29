@@ -117,7 +117,7 @@ class JaxRDDLCompiler:
         else:
             self.INT = jnp.int32
             self.REAL = jnp.float32
-        jax.config.update('jax_enable_x64', use64bit)
+        # jax.config.update('jax_enable_x64', use64bit)
         self.ONE = jnp.array(1, dtype=self.INT)
         self.JAX_TYPES = {
             'int': self.INT,

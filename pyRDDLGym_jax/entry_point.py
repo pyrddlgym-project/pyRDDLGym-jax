@@ -38,7 +38,7 @@ def main():
                              help='number of iterations of bayesian optimization')
     parser_tune.add_argument('-w', '--workers', type=int, required=False, default=4, 
                              help='number of parallel hyper-parameters to evaluate per iteration')
-    parser_tune.add_argument('-d', '--dashboard', type=bool, required=False, default=False, 
+    parser_tune.add_argument('-d', '--dashboard', action='store_true',
                              help='show the dashboard')
     parser_tune.add_argument('-f', '--filepath', type=str, required=False, default='', 
                              help='where to save the config file of the best hyper-parameters')
