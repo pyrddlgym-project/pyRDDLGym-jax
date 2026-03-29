@@ -85,8 +85,8 @@ def run_from_args(args):
     if len(args) >= 4: kwargs['trials'] = int(args[3])
     if len(args) >= 5: kwargs['iters'] = int(args[4])
     if len(args) >= 6: kwargs['workers'] = int(args[5])
-    if len(args) >= 7: kwargs['dashboard'] = bool(args[6])
-    if len(args) >= 8: kwargs['filepath'] = bool(args[7])
+    if len(args) >= 7: kwargs['dashboard'] = str(args[6]).strip().lower() in {'true', '1'}
+    if len(args) >= 8: kwargs['filepath'] = str(args[7])
     main(**kwargs) 
 
 
