@@ -110,6 +110,7 @@ class JaxRDDLCompiler:
         self.logger = logger
         # jax.config.update('jax_log_compiles', True) # for testing ONLY
         
+        # set precision
         self.use64bit = use64bit
         if use64bit:
             self.INT = jnp.int64
@@ -117,7 +118,8 @@ class JaxRDDLCompiler:
         else:
             self.INT = jnp.int32
             self.REAL = jnp.float32
-        # jax.config.update('jax_enable_x64', use64bit)
+        jax.config.update('jax_enable_x64', use64bit)
+
         self.ONE = jnp.array(1, dtype=self.INT)
         self.JAX_TYPES = {
             'int': self.INT,
@@ -188,7 +190,7 @@ class JaxRDDLCompiler:
      
     def compile(self, log_jax_expr: bool=False, 
                 heading: str='',
-                extra_aux: Dict[str, Any]={},
+                extra_aux: Optional[Dict[str, Any]]=None,
                 compile_constraints: bool=True,
                 compile_policy_block: bool=True) -> None: 
         '''Compiles the current RDDL into Jax expressions.
@@ -200,6 +202,8 @@ class JaxRDDLCompiler:
         :param compile_constraints: whether to compile constraints
         :param compile_policy_block: whether to compile the policy block
         '''
+        if extra_aux is None:
+            extra_aux = {}
         self.model_aux = {'params': {}, 'overriden': {}, 'exact': set()}
         self.model_aux.update(extra_aux)
         
