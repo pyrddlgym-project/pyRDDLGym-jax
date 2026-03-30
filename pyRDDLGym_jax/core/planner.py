@@ -3382,7 +3382,7 @@ class JaxBackpropPlanner:
             _, (final_log, _) = self.test_loss(test_sim_state, final_planner_state)
             final_returns = np.sum(final_log['reward'], axis=2)
             best_returns = np.ravel(final_returns[best_index])
-            mean, rlo, rhi = self._ci_bootstrap(best_returns)            
+            mean, rlo, rhi = self._ci_bootstrap(best_returns, key[0].item())            
 
             # diagnosis
             diagnosis = self._perform_diagnosis(
@@ -3401,10 +3401,11 @@ class JaxBackpropPlanner:
             )
     
     @staticmethod
-    def _ci_bootstrap(returns, confidence=0.95, n_boot=10000):
+    def _ci_bootstrap(returns, seed, confidence=0.95, n_boot=10000):
+        rng = np.random.default_rng(seed)
         means = np.zeros((n_boot,))
         for i in range(n_boot):
-            means[i] = np.mean(np.random.choice(returns, size=len(returns), replace=True))
+            means[i] = np.mean(rng.choice(returns, size=len(returns), replace=True))
         lower = np.percentile(means, 100 * 0.5 * (1 - confidence))
         upper = np.percentile(means, 100 * 0.5 * (1 + confidence))
         mean = np.mean(returns)
