@@ -2330,7 +2330,7 @@ def _build_optax_optimizer(optimizer, optimizer_kwargs, clip_grad, noise_kwargs,
     # apply optimizer chain of transformations
     pipeline = []  
     if clip_grad is not None:
-        pipeline.append(optax.clip(clip_grad))
+        pipeline.append(optax.clip_by_global_norm(clip_grad))
     if noise_kwargs is not None:
         pipeline.append(optax.add_noise(**noise_kwargs))
     pipeline.append(optimizer)
