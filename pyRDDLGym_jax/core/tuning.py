@@ -151,6 +151,7 @@ class JaxParameterTuning:
     
     @staticmethod
     def make_default_kernel():
+        '''Creates a default kernel for the Gaussian process surrogate model.'''
         weight1 = ConstantKernel(1.0, (0.01, 100.0))
         weight2 = ConstantKernel(1.0, (0.01, 100.0))
         weight3 = ConstantKernel(1.0, (0.01, 100.0))
@@ -160,6 +161,8 @@ class JaxParameterTuning:
         return weight1 * kernel1 + weight2 * kernel2 + weight3 * kernel3
         
     def summarize_hyperparameters(self) -> str:
+        '''Returns a summary string of the hyper-parameters being tuned and their bounds, 
+        as well as the tuning parameters for the optimizer and meta-objective.'''
         hyperparams_table = []
         for (_, param) in self.hyperparams_dict.items():
             hyperparams_table.append(f'        {str(param)}')
@@ -181,6 +184,7 @@ class JaxParameterTuning:
     @staticmethod
     def annealing_acquisition(n_samples: int, n_delay_samples: int=0,
                               kappa1: float=10.0, kappa2: float=1.0) -> UpperConfidenceBound:
+        '''Creates an annealing upper confidence bound acquisition function.'''
         acq_fn = UpperConfidenceBound(
             kappa=kappa1,
             exploration_decay=(kappa2 / kappa1) ** (1.0 / (n_samples - n_delay_samples)),
@@ -191,6 +195,8 @@ class JaxParameterTuning:
     @staticmethod
     def search_to_config_params(hyperparams: Hyperparameters, 
                                 params: ParameterValues) -> ParameterValues:
+        ''''Transforms the hyper-parameter values suggested by the optimizer to the 
+        corresponding config parameter values.'''
         config_params = {
             tag: param.search_to_config_map(params[tag])
             for (tag, param) in hyperparams.items()
@@ -199,6 +205,7 @@ class JaxParameterTuning:
     
     @staticmethod
     def config_from_template(config_template: str, config_params: ParameterValues) -> str:
+        '''Replaces all parameter tags in the config template with the corresponding values.'''
         config_string = config_template
         for (tag, param_value) in config_params.items():
             config_string = config_string.replace(tag, str(param_value))
@@ -207,13 +214,11 @@ class JaxParameterTuning:
     @property
     def best_config(self) -> str:
         '''Returns the concrete config by replacing all abstract parameters with
-        the best values found during tuning.
-        '''
+        the best values found during tuning.'''
         return self.config_from_template(self.config_template, self.best_params)
     
     def build_best_controller(self) -> Union[JaxOfflineController, JaxOnlineController]:
-        '''Creates the concrete controller instance with the best hyper-parameters.
-        '''
+        '''Creates the concrete controller instance with the best hyper-parameters.'''
         planner_args, _, train_args = load_config_from_string(self.best_config)
         planner = JaxBackpropPlanner(rddl=self.env.model, **planner_args)
         class_ = JaxOnlineController if self.online else JaxOfflineController
@@ -222,6 +227,7 @@ class JaxParameterTuning:
 
     @staticmethod
     def queue_listener(queue, dashboard):
+        '''Listens to the given queue and updates the dashboard with new experiment results.'''
         while True:
             args = queue.get()
             if args is None:
@@ -234,6 +240,7 @@ class JaxParameterTuning:
     @staticmethod
     def offline_trials(env, planner, train_args, key, iteration, index, num_trials, 
                        rollouts_per_trial, verbose, viz, queue):
+        '''Performs offline trials for the given environment and planner.'''
         average_reward = 0.0
         for trial in range(num_trials):
             key, subkey = jax.random.split(key)
@@ -276,6 +283,7 @@ class JaxParameterTuning:
     @staticmethod
     def online_trials(env, planner, train_args, key, iteration, index, num_trials, 
                       verbose, viz, queue):
+        '''Performs online trials for the given environment and planner.'''
         average_reward = 0.0
         for trial in range(num_trials):
             key, subkey = jax.random.split(key)

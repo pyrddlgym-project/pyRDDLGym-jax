@@ -41,6 +41,7 @@ Args = Dict[str, Union[np.ndarray, Value]]
 
 
 class JaxRDDLSimulator(RDDLSimulator):
+    '''A simulator for RDDL models with Jax as a backend.'''
         
     def __init__(self, rddl: RDDLLiftedModel,
                  key: Optional[jax.random.PRNGKey]=None,
@@ -131,6 +132,7 @@ class JaxRDDLSimulator(RDDLSimulator):
         self.terminal_names = [f'Termination {i}' for i in range(len(rddl.terminations))]
         
     def handle_error_code(self, error: int, msg: str) -> None:
+        '''Handles the given error code returned by a Jax expression.'''
         if self.raise_error:
             errors = JaxRDDLCompiler.get_error_messages(error)
             if errors:
