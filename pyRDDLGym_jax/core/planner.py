@@ -353,6 +353,7 @@ class JaxPlannerState:
     opt_aux: Pytree=None
     critic_params: Pytree=None
     progress: float=None
+    reward_mask: jnp.ndarray=None
 
 
 class JaxPlan(metaclass=ABCMeta):
@@ -2753,8 +2754,18 @@ class JaxBackpropPlanner:
                 entropy_coeff_decay, planner_state.progress)
             reg_loss = -jnp.mean(jnp.sum(log['entropy'], axis=1), axis=0)
 
+            # optional reward masking
+            rewards = log['reward']
+            if planner_state.reward_mask is not None:
+                mask = planner_state.reward_mask
+                if mask.ndim != 1:
+                    raise ValueError('Reward mask must be 1-dimensional.')
+                if mask.size != rewards.shape[1]:
+                    raise ValueError('Reward mask size must match reward dimension.')
+                rewards = rewards * mask[jnp.newaxis, ...]
+
             # evaluate cumulative return per rollout
-            returns = _jax_wrapped_returns(log['reward'], critic_values)
+            returns = _jax_wrapped_returns(rewards, critic_values)
             loss = -utility_fn(returns, **utility_kwargs)
             loss = loss + ent * reg_loss
             aux = (log, model_params)
