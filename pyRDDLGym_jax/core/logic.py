@@ -1068,15 +1068,18 @@ class GumbelSigmoidBernoulli(JaxRDDLCompilerWithGrad):
     
     def __init__(self, *args, 
                  bernoulli_sigmoid_weight: float=10., 
-                 use_ste_bernoulli: bool=False, **kwargs) -> None:
+                 use_ste_bernoulli: bool=False, 
+                 bernoulli_prob_eps: float=1e-12, **kwargs) -> None:
         super(GumbelSigmoidBernoulli, self).__init__(*args, **kwargs)
         self.bernoulli_sigmoid_weight = float(bernoulli_sigmoid_weight)
         self.use_ste_bernoulli = use_ste_bernoulli
+        self.bernoulli_prob_eps = bernoulli_prob_eps
     
     def get_kwargs(self) -> Dict[str, Any]:
         kwargs = super().get_kwargs()
         kwargs['bernoulli_sigmoid_weight'] = self.bernoulli_sigmoid_weight
         kwargs['use_ste_bernoulli'] = self.use_ste_bernoulli
+        kwargs['bernoulli_prob_eps'] = self.bernoulli_prob_eps
         return kwargs
 
     def _jax_bernoulli(self, expr, aux):
@@ -1089,17 +1092,19 @@ class GumbelSigmoidBernoulli(JaxRDDLCompilerWithGrad):
             return JaxRDDLCompilerWithGrad._jax_bernoulli(self, expr, aux)  
         
         id_ = expr.id
-        aux['params'][id_] = {'bernoulli_sigmoid_weight': self.bernoulli_sigmoid_weight}
+        aux['params'][id_] = {'bernoulli_sigmoid_weight': self.bernoulli_sigmoid_weight,
+                              'bernoulli_prob_eps': self.bernoulli_prob_eps}
         aux['overriden'][id_] = __class__.__name__
 
         jax_prob = self._jax(arg_prob, aux)
         
         def _jax_wrapped_distribution_bernoulli_gumbel_sigmoid(fls, nfls, params, key):
             w = params[id_]['bernoulli_sigmoid_weight']
+            eps = params[id_]['bernoulli_prob_eps']
             prob, key, err, params = jax_prob(fls, nfls, params, key)
             key, subkey = random.split(key)
             noise = random.logistic(key=subkey, shape=jnp.shape(prob), dtype=self.REAL)
-            logit = scipy.special.logit(prob) + noise          
+            logit = scipy.special.logit(jnp.clip(prob, eps, 1. - eps)) + noise          
             sample = jax.nn.sigmoid(w * logit)
             if self.use_ste_bernoulli:
                 hard_sample = jnp.asarray(logit > 0, dtype=logit.dtype)
