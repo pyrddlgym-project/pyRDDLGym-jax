@@ -421,6 +421,7 @@ class JaxPlan(metaclass=ABCMeta):
 
 
 def get_action_info(compiled: JaxRDDLCompiler, user_bounds: Bounds, horizon: int) -> Tuple[Any, Any, Any]:
+    '''Gets the shapes, bounds, and conditional lists for action-fluents in the RDDL domain.'''
     shapes, bounds, cond_lists = {}, {}, {}
     for (name, prange) in compiled.rddl.variable_ranges.items():
         if compiled.rddl.variable_types[name] != 'action-fluent':
@@ -2513,8 +2514,7 @@ class JaxBackpropPlanner:
     @staticmethod
     def summarize_system() -> str:
         '''Returns a string containing information about the system, Python version 
-        and jax-related packages that are relevant to the current planner.
-        '''         
+        and jax-related packages that are relevant to the current planner.'''         
         devices = jax.devices()
         default_device = devices[0] if devices else 'n/a'
         return termcolor.colored(
@@ -2525,8 +2525,7 @@ class JaxBackpropPlanner:
     
     def summarize_relaxations(self) -> str:
         '''Returns a summary table containing all non-differentiable operators
-        and their relaxations.
-        '''
+        and their relaxations.'''
         result = ''
         overriden_ops_info = self.compiled.overriden_ops_info()
         exact_ops_info = self.compiled.exact_ops_info()
@@ -2548,8 +2547,7 @@ class JaxBackpropPlanner:
         
     def summarize_hyperparameters(self) -> str:
         '''Returns a string summarizing the hyper-parameters of the current planner 
-        instance.
-        '''
+        instance.'''
         result = (f'[INFO] objective hyper-parameters:\n'
                   f'    utility_fn         ={self.utility.__name__}\n'
                   f'    utility args       ={self.utility_kwargs}\n'

@@ -44,6 +44,8 @@ from pyRDDLGym_jax.core.compiler import JaxRDDLCompiler, safe_log
 
 
 def enumerate_literals(shape: Tuple[int, ...], axis: int, dtype: type=jnp.int32) -> jnp.ndarray:
+    '''Returns an array of the same shape as the input, where the values along the specified axis 
+    are replaced by their literal indices.'''
     literals = jnp.arange(shape[axis], dtype=dtype)
     literals = literals[(...,) + (jnp.newaxis,) * (len(shape) - 1)]
     literals = jnp.moveaxis(literals, source=0, destination=axis)
@@ -73,6 +75,8 @@ def stable_tanh_jvp(primals, tangents):
 
 # it seems JAX uses the stability trick already
 def stable_softmax_weight_sum(logits: jnp.ndarray, values: jnp.ndarray, axis: int) -> jnp.ndarray:
+    '''Computes a weighted sum of the input values, where the weights are given by a softmax over 
+    the input logits.'''
     return jnp.sum(values * jax.nn.softmax(logits, axis=axis), axis=axis)
 
 
@@ -944,6 +948,7 @@ class SoftmaxSwitch(JaxRDDLCompilerWithGrad):
 # ===============================================================================
 
 class ReparameterizedGeometric(JaxRDDLCompilerWithGrad):
+    '''Reparameterized geometric distribution using the inverse CDF method.'''
 
     def __init__(self, *args, 
                  geometric_floor_weight: float=10., 
@@ -987,6 +992,7 @@ class ReparameterizedGeometric(JaxRDDLCompilerWithGrad):
 
 
 class DeterminizedGeometric(JaxRDDLCompilerWithGrad):
+    '''Deterministic geometric distribution using the mean of the distribution.'''
 
     def __init__(self, *args, **kwargs) -> None:
         super(DeterminizedGeometric, self).__init__(*args, **kwargs)
@@ -1021,6 +1027,7 @@ class DeterminizedGeometric(JaxRDDLCompilerWithGrad):
 # ===============================================================================
 
 class ReparameterizedSigmoidBernoulli(JaxRDDLCompilerWithGrad):
+    '''Reparameterized sigmoid Bernoulli distribution.'''
 
     def __init__(self, *args, 
                  bernoulli_sigmoid_weight: float=10., 
@@ -1065,7 +1072,8 @@ class ReparameterizedSigmoidBernoulli(JaxRDDLCompilerWithGrad):
 
 
 class GumbelSigmoidBernoulli(JaxRDDLCompilerWithGrad):
-    
+    '''Gumbel sigmoid Bernoulli distribution.'''
+
     def __init__(self, *args, 
                  bernoulli_sigmoid_weight: float=10., 
                  use_ste_bernoulli: bool=False, 
@@ -1116,6 +1124,7 @@ class GumbelSigmoidBernoulli(JaxRDDLCompilerWithGrad):
     
 
 class DeterminizedBernoulli(JaxRDDLCompilerWithGrad):
+    '''Deterministic Bernoulli distribution using the mean of the distribution.'''
 
     def __init__(self, *args, **kwargs) -> None:
         super(DeterminizedBernoulli, self).__init__(*args, **kwargs)
@@ -1151,6 +1160,7 @@ class DeterminizedBernoulli(JaxRDDLCompilerWithGrad):
 
 # https://arxiv.org/pdf/1611.01144
 class GumbelSoftmaxDiscrete(JaxRDDLCompilerWithGrad):
+    '''Reparameterized discrete distribution using the Gumbel-softmax trick.'''
     
     def __init__(self, *args, 
                  discrete_softmax_weight: float=10., 
@@ -1221,6 +1231,7 @@ class GumbelSoftmaxDiscrete(JaxRDDLCompilerWithGrad):
 
 
 class DeterminizedDiscrete(JaxRDDLCompilerWithGrad):
+    '''Deterministic discrete distribution using the mean of the distribution.'''
     
     def __init__(self, *args, **kwargs) -> None:
         super(DeterminizedDiscrete, self).__init__(*args, **kwargs)
@@ -1276,6 +1287,8 @@ class DeterminizedDiscrete(JaxRDDLCompilerWithGrad):
 # ===============================================================================
 
 class GumbelSoftmaxBinomial(JaxRDDLCompilerWithGrad):
+    '''Reparameterized binomial distribution using a combination of the normal approximation and 
+    the Gumbel-softmax trick.'''
 
     def __init__(self, *args, 
                  binomial_nbins: int=100, 
@@ -1363,6 +1376,7 @@ class GumbelSoftmaxBinomial(JaxRDDLCompilerWithGrad):
     
 
 class DeterminizedBinomial(JaxRDDLCompilerWithGrad):
+    '''Deterministic binomial distribution using the mean of the distribution.'''
 
     def __init__(self, *args, **kwargs) -> None:
         super(DeterminizedBinomial, self).__init__(*args, **kwargs)
@@ -1403,6 +1417,7 @@ class DeterminizedBinomial(JaxRDDLCompilerWithGrad):
 # ===============================================================================
 
 class ExponentialPoisson(JaxRDDLCompilerWithGrad):
+    '''Reparameterized Poisson distribution using the exponential/Poisson process trick.'''
     
     def __init__(self, *args, 
                  poisson_nbins: int=100, 
@@ -1506,6 +1521,8 @@ class ExponentialPoisson(JaxRDDLCompilerWithGrad):
 
 
 class GumbelSoftmaxPoisson(JaxRDDLCompilerWithGrad):
+    '''Reparameterized Poisson distribution using a combination of the normal approximation and the 
+    Gumbel-softmax trick.'''
 
     def __init__(self, *args, 
                  poisson_nbins: int=100, 
@@ -1618,6 +1635,7 @@ class GumbelSoftmaxPoisson(JaxRDDLCompilerWithGrad):
 
 
 class DeterminizedPoisson(JaxRDDLCompilerWithGrad):
+    '''Deterministic Poisson distribution using the mean of the distribution.'''
 
     def __init__(self, *args, **kwargs) -> None:
         super(DeterminizedPoisson, self).__init__(*args, **kwargs)
@@ -1682,6 +1700,7 @@ class DefaultJaxRDDLCompilerWithGrad(SigmoidRelational, SoftmaxArgmax,
                                      ReparameterizedSigmoidBernoulli,
                                      GumbelSoftmaxDiscrete, GumbelSoftmaxBinomial,
                                      ExponentialPoisson):
+    ''''Default JaxRDDLCompiler with a wide range of distribution relaxations and reparameterizations.'''
     
     def __init__(self, *args, **kwargs) -> None:
         super(DefaultJaxRDDLCompilerWithGrad, self).__init__(*args, **kwargs)

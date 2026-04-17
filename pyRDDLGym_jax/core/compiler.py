@@ -77,8 +77,7 @@ def safe_log_jvp(primals, tangents):
 
 class JaxRDDLCompiler:
     '''Compiles a RDDL AST representation into an equivalent JAX representation.
-    All operations are identical to their numpy equivalents.
-    '''
+    All operations are identical to their numpy equivalents.'''
     
     def __init__(self, rddl: RDDLLiftedModel, *args, 
                  allow_synchronous_state: bool=True,
@@ -168,8 +167,7 @@ class JaxRDDLCompiler:
         self.fls_hist_keys = fls_hist_keys
     
     def get_kwargs(self) -> Dict[str, Any]:
-        '''Returns a dictionary of configurable parameter name: parameter value pairs.
-        '''
+        '''Returns a dictionary of configurable parameter name: parameter value pairs.'''
         return {
             'allow_synchronous_state': self.allow_synchronous_state,
             'use64bit': self.use64bit,
@@ -177,8 +175,7 @@ class JaxRDDLCompiler:
         }
 
     def split_fls_and_nfls(self, values):
-        '''Splits given values dictionary into fluent and non-fluent dictionaries.
-        '''
+        '''Splits given values dictionary into fluent and non-fluent dictionaries.'''
         nonfluents = self.rddl.non_fluents
         fls = {name: value for (name, value) in values.items() if name not in nonfluents}
         nfls = {name: value for (name, value) in values.items() if name in nonfluents}
@@ -779,8 +776,7 @@ class JaxRDDLCompiler:
     
     def print_jax(self) -> Dict[str, Any]:
         '''Returns a dictionary containing the string representations of all 
-        Jax compiled expressions from the RDDL file.
-        '''
+        Jax compiled expressions from the RDDL file.'''
         fls, nfls = self.split_fls_and_nfls(self.init_values)
         params = self.model_aux['params']
         key = jax.random.PRNGKey(42)
