@@ -796,8 +796,9 @@ class JaxStraightLinePlan(JaxPlan):
                 if var == BOOL_KEY:
                     softmax_weight = hyperparams[BOOL_KEY]
                     if self._stochastic:
-                        prob = jax.nn.softmax(softmax_weight * logits)
-                        entropy = entropy - jnp.sum(prob * safe_log(prob))
+                        log_prob = jax.nn.log_softmax(softmax_weight * logits)
+                        prob = jnp.exp(log_prob)
+                        entropy = entropy - jnp.sum(prob * log_prob)
                         key, subkey = random.split(key)
                         noise = random.gumbel(
                             subkey, shape=jnp.shape(logits), dtype=compiled.REAL)
@@ -823,10 +824,9 @@ class JaxStraightLinePlan(JaxPlan):
                 action = jnp.asarray(param['mu'][step, ...], dtype=compiled.REAL)
                 if self._stochastic:
                     log_sigma = jnp.clip(param['log_sigma'][step, ...], *log_sigma_bounds)
-                    entropy = entropy + jnp.sum(
-                        log_sigma if self._sigma_entropy_grad 
-                        else jax.lax.stop_gradient(log_sigma)
-                    )
+                    if not self._sigma_entropy_grad:
+                        log_sigma = jax.lax.stop_gradient(log_sigma)
+                    entropy = entropy + jnp.sum(log_sigma)
                     key, subkey = random.split(key)
                     noise = self._action_noise_dist(
                         subkey, shape=jnp.shape(action), dtype=compiled.REAL)
@@ -1428,8 +1428,9 @@ class JaxDeepReactivePolicy(JaxPlan):
                     logits = linear(hidden)
                     weight = hyperparams[SOFTMAX_KEY]
                     if stochastic:
-                        prob = jax.nn.softmax(weight * logits)
-                        entropy = entropy - jnp.sum(prob * safe_log(prob))
+                        log_prob = jax.nn.log_softmax(weight * logits)
+                        prob = jnp.exp(log_prob)
+                        entropy = entropy - jnp.sum(prob * log_prob)
                     topk = GumbelSoftmaxTopK(
                         allowed_actions=rddl.max_allowed_actions, dtype=compiled.REAL,
                         stochastic=stochastic)
