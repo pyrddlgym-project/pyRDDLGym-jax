@@ -1521,8 +1521,8 @@ class ExponentialPoisson(JaxRDDLCompilerWithGrad):
 
 
 class GumbelSoftmaxPoisson(JaxRDDLCompilerWithGrad):
-    '''Reparameterized Poisson distribution using a combination of the normal approximation and the 
-    Gumbel-softmax trick.'''
+    '''Reparameterized Poisson distribution using a combination of the normal 
+    approximation and the Gumbel-softmax trick.'''
 
     def __init__(self, *args, 
                  poisson_nbins: int=100, 

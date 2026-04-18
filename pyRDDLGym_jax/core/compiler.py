@@ -918,16 +918,14 @@ class JaxRDDLCompiler:
     @staticmethod
     def get_error_codes(error: int) -> List[int]:
         '''Given a compacted integer error flag from the execution of Jax, and 
-        decomposes it into individual error codes.
-        '''
+        decomposes it into individual error codes.'''
         binary = reversed(bin(error)[2:])
         return [i for (i, c) in enumerate(binary) if c == '1']
     
     @staticmethod
     def get_error_messages(error: int) -> List[str]:
         '''Given a compacted integer error flag from the execution of Jax, and 
-        decomposes it into error strings.
-        '''
+        decomposes it into error strings.'''
         codes = JaxRDDLCompiler.get_error_codes(error)
         return [JaxRDDLCompiler.INVERSE_ERROR_CODES[i] for i in codes]
     
