@@ -824,9 +824,10 @@ class JaxStraightLinePlan(JaxPlan):
                 action = jnp.asarray(param['mu'][step, ...], dtype=compiled.REAL)
                 if self._stochastic:
                     log_sigma = jnp.clip(param['log_sigma'][step, ...], *log_sigma_bounds)
-                    if not self._sigma_entropy_grad:
-                        log_sigma = jax.lax.stop_gradient(log_sigma)
-                    entropy = entropy + jnp.sum(log_sigma)
+                    entropy = entropy + jnp.sum(
+                        log_sigma if self._sigma_entropy_grad 
+                        else jax.lax.stop_gradient(log_sigma)
+                    )
                     key, subkey = random.split(key)
                     noise = self._action_noise_dist(
                         subkey, shape=jnp.shape(action), dtype=compiled.REAL)
@@ -1398,7 +1399,8 @@ class JaxDeepReactivePolicy(JaxPlan):
                             name = f'dense_{layer_names[var]}_log_sigma'
                             linear = nn.Dense(features=size, kernel_init=init, name=name)
                             log_sigma = linear(hidden)
-                            log_sigma = jnp.reshape(log_sigma, log_sigma.shape[:-1] + shapes[var])
+                            log_sigma = jnp.reshape(
+                                log_sigma, log_sigma.shape[:-1] + shapes[var])
                             if not shapes[var]:
                                 log_sigma = jnp.squeeze(log_sigma)
                             entropy = entropy + jnp.sum(
