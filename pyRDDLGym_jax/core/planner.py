@@ -1134,7 +1134,8 @@ class JaxDeepReactivePolicy(JaxPlan):
                  sigmoid_weight: float=1.0,
                  wrap_non_bool: bool=False,
                  softmax_weight: float=1.0,
-                 stochastic: bool=False,
+                 stochastic: bool=True,
+                 sigma_range: Tuple[float, float]=(1e-5, 1e3),
                  sigma_entropy_grad: bool=False,
                  action_noise_dist: Any=random.normal,
                  time_dependent: bool=False,
@@ -1156,6 +1157,9 @@ class JaxDeepReactivePolicy(JaxPlan):
         with non-linearity (e.g. sigmoid or ELU) to satisfy box constraints
         :param softmax_weight: weight in softmax action constraint satisfaction
         :param stochastic: whether the policy is stochastic
+        :param sigma_range: bounds (lo, hi) on the action standard deviation; log_sigma
+        is clamped to (log(lo), log(hi)) before exponentiation to prevent vanishing or
+        exploding variance gradients
         :param sigma_entropy_grad: whether to apply entropy gradient to sigma
         :param action_noise_dist: distribution to sample noise for stochastic real actions
         :param time_dependent: whether to make the DRP time_dependent
@@ -1179,6 +1183,7 @@ class JaxDeepReactivePolicy(JaxPlan):
         self._wrap_non_bool = wrap_non_bool
         self._softmax_output_weight = softmax_weight
         self._stochastic = stochastic
+        self._sigma_range = sigma_range
         self._sigma_entropy_grad = sigma_entropy_grad
         self._action_noise_dist = action_noise_dist
 
@@ -1202,6 +1207,7 @@ class JaxDeepReactivePolicy(JaxPlan):
                 f'        time_embed_kwargs={self._time_embedding_kwargs}\n'
                 f'    stochastic policy:\n'
                 f'        stochastic        ={self._stochastic}\n'
+                f'        sigma_range       ={self._sigma_range}\n'
                 f'        sigma_entropy_grad={self._sigma_entropy_grad}\n'
                 f'        action_noise_dist ={self._action_noise_dist}\n'
                 f'    input norm:\n'
@@ -1325,6 +1331,7 @@ class JaxDeepReactivePolicy(JaxPlan):
         # predict actions from the policy network for current state
         wrap_non_bool = self._wrap_non_bool
         stochastic = self._stochastic
+        log_sigma_bounds = (np.log(self._sigma_range[0]), np.log(self._sigma_range[1]))
         sigma_entropy_grad = self._sigma_entropy_grad
         action_noise_dist = self._action_noise_dist
         time_dependent = self._time_dependent
@@ -1403,6 +1410,7 @@ class JaxDeepReactivePolicy(JaxPlan):
                                 log_sigma, log_sigma.shape[:-1] + shapes[var])
                             if not shapes[var]:
                                 log_sigma = jnp.squeeze(log_sigma)
+                            log_sigma = jnp.clip(log_sigma, *log_sigma_bounds)
                             entropy = entropy + jnp.sum(
                                 log_sigma if sigma_entropy_grad 
                                 else jax.lax.stop_gradient(log_sigma)
