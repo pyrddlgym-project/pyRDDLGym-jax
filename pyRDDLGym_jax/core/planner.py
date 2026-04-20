@@ -1786,10 +1786,10 @@ class GaussianPGPE(PGPE):
             optimizer_kwargs_sigma = {'learning_rate': 0.1}
         self.optimizer_kwargs_sigma = optimizer_kwargs_sigma
         self.optimizer_name = optimizer
-        mu_optimizer, inject_mu = _build_optax_optimizer(
-            optimizer, optimizer_kwargs_mu, clip_grad_mu, None, None, ema_decay)
-        sigma_optimizer, inject_sigma = _build_optax_optimizer(
-            optimizer, optimizer_kwargs_sigma, clip_grad_sigma, None, None, ema_decay)
+        mu_optimizer, inject_mu, _ = _build_optax_optimizer(
+            optimizer, optimizer_kwargs_mu, clip_grad_mu, None, None, ema_decay, None)
+        sigma_optimizer, inject_sigma, _ = _build_optax_optimizer(
+            optimizer, optimizer_kwargs_sigma, clip_grad_sigma, None, None, ema_decay, None)
         self.optimizer = optax.multi_transform(
             {'mu': mu_optimizer, 'sigma': sigma_optimizer}, 
             param_labels={'mu': 'mu', 'sigma': 'sigma'}
@@ -2325,8 +2325,9 @@ class NoImprovementStoppingRule(JaxPlannerStoppingRule):
 # ***********************************************************************
 
 
-def _build_optax_optimizer(optimizer, optimizer_kwargs, clip_grad, noise_kwargs, 
-                           line_search_kwargs, ema_decay):
+def _build_optax_optimizer(optimizer, optimizer_kwargs, clip_grad, noise_kwargs,
+                           line_search_kwargs, ema_decay,
+                           reduce_on_plateau_kwargs):
 
     # set optimizer
     try:
@@ -2341,7 +2342,8 @@ def _build_optax_optimizer(optimizer, optimizer_kwargs, clip_grad, noise_kwargs,
         injected = False
     
     # apply optimizer chain of transformations
-    pipeline = []  
+    pipeline = []
+    use_loss_metric = False
     if clip_grad is not None:
         pipeline.append(optax.clip_by_global_norm(clip_grad))
     if noise_kwargs is not None:
@@ -2349,9 +2351,19 @@ def _build_optax_optimizer(optimizer, optimizer_kwargs, clip_grad, noise_kwargs,
     pipeline.append(optimizer)
     if line_search_kwargs is not None:
         pipeline.append(optax.scale_by_zoom_linesearch(**line_search_kwargs))
+    if reduce_on_plateau_kwargs is not None:
+        rop = getattr(getattr(optax, 'contrib', None), 'reduce_on_plateau', None)
+        if rop is None:
+            print(termcolor.colored(
+                '[WARN] optax.contrib.reduce_on_plateau is unavailable: '
+                'disabling reduce_on_plateau_kwargs.', 'yellow'
+            ))
+        else:
+            pipeline.append(rop(**reduce_on_plateau_kwargs))
+            use_loss_metric = True
     if ema_decay is not None:
         pipeline.append(optax.ema(ema_decay))
-    return optax.chain(*pipeline), injected
+    return optax.chain(*pipeline), injected, use_loss_metric
 
 
 @jax.jit
@@ -2377,6 +2389,7 @@ class JaxBackpropPlanner:
                  line_search_kwargs: Optional[Kwargs]=None,
                  noise_kwargs: Optional[Kwargs]=None,
                  ema_decay: Optional[float]=None,
+                 reduce_on_plateau_kwargs: Optional[Kwargs]=None,
                  pgpe: Optional[PGPE]=GaussianPGPE(),
                  compiler: JaxRDDLCompilerWithGrad=DefaultJaxRDDLCompilerWithGrad,
                  compiler_kwargs: Optional[Kwargs]=None,
@@ -2417,6 +2430,8 @@ class JaxBackpropPlanner:
         method to scale learning rate
         :param noise_kwargs: parameters of optional gradient noise
         :param ema_decay: optional exponential moving average of past parameters
+        :param reduce_on_plateau_kwargs: optional keyword arguments for
+        optax.contrib.reduce_on_plateau to decay learning rate on objective plateaus
         :param pgpe: optional policy gradient to run alongside the planner
         :param compiler: compiler instance to use for planning
         :param compiler_kwargs: compiler instances kwargs for initialization
@@ -2461,6 +2476,7 @@ class JaxBackpropPlanner:
         self.line_search_kwargs = line_search_kwargs
         self.noise_kwargs = noise_kwargs
         self.ema_decay = ema_decay
+        self.reduce_on_plateau_kwargs = reduce_on_plateau_kwargs
         self.pgpe = pgpe
         self.use_pgpe = pgpe is not None
         self.preprocessor = preprocessor
@@ -2469,9 +2485,9 @@ class JaxBackpropPlanner:
         self.python_functions = python_functions
 
         # set optimizer
-        self.optimizer, _ = _build_optax_optimizer(
+        self.optimizer, _, self._optimizer_uses_loss = _build_optax_optimizer(
             optimizer, optimizer_kwargs, clip_grad, noise_kwargs, line_search_kwargs, 
-            ema_decay
+            ema_decay, reduce_on_plateau_kwargs
         )
         
         # set utility
@@ -2575,6 +2591,7 @@ class JaxBackpropPlanner:
                   f'    line_search_kwargs={self.line_search_kwargs}\n'
                   f'    noise_kwargs      ={self.noise_kwargs}\n'
                   f'    ema_decay         ={self.ema_decay}\n'
+                  f'    reduce_on_plateau ={self.reduce_on_plateau_kwargs}\n'
                   f'    batch_size_train  ={self.batch_size_train}\n'
                   f'    batch_size_test   ={self.batch_size_test}\n'
                   f'    steps_per_update  ={self.steps_per_update}\n'
@@ -2814,6 +2831,7 @@ class JaxBackpropPlanner:
         optimizer = self.optimizer
         projection = self.plan.projection
         use_ls = self.line_search_kwargs is not None
+        use_loss_metric = self._optimizer_uses_loss
         num_parallel = self.parallel_updates
         
         # check if the gradients are all zeros
@@ -2847,6 +2865,9 @@ class JaxBackpropPlanner:
                         value_fn=lambda p, s: _jax_wrapped_plan_params_loss(p, s)[0], 
                         s=_sim_state
                     )
+                elif use_loss_metric:
+                    updates, opt_state = optimizer.update(
+                        grad, opt_state, params=params, value=loss_val)
                 else:
                     updates, opt_state = optimizer.update(grad, opt_state, params=params) 
 
