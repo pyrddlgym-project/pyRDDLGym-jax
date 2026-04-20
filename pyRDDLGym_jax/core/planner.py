@@ -2774,14 +2774,10 @@ class JaxBackpropPlanner:
                 vmap_axes = (JaxRDDLSimState(key=0, fls=0), None)
                 critic_values = jax.vmap(
                     _jax_wrapped_critic, in_axes=vmap_axes)(sim_state, planner_state)
-            
-            # policy max entropy loss
-            ent = self.start_entropy_coeff * jnp.power(
-                entropy_coeff_decay, planner_state.progress)
-            reg_loss = -jnp.mean(jnp.sum(log['entropy'], axis=1), axis=0)
 
             # optional reward masking
             rewards = log['reward']
+            entropy = log['entropy']
             if planner_state.reward_mask is not None:
                 mask = planner_state.reward_mask
                 if mask.ndim != 1:
@@ -2789,6 +2785,12 @@ class JaxBackpropPlanner:
                 if mask.size != rewards.shape[1]:
                     raise ValueError('Reward mask size must match reward dimension.')
                 rewards = rewards * mask[jnp.newaxis, ...]
+                entropy = entropy * mask[jnp.newaxis, ...]
+            
+            # policy max entropy loss
+            ent = self.start_entropy_coeff * jnp.power(
+                entropy_coeff_decay, planner_state.progress)
+            reg_loss = -jnp.mean(jnp.sum(entropy, axis=1), axis=0)
 
             # evaluate cumulative return per rollout
             returns = _jax_wrapped_returns(rewards, critic_values)
@@ -3361,7 +3363,8 @@ class JaxBackpropPlanner:
                 'grad': train_log['grad'],
                 'best_grad': best_grad,
                 'train_log': train_log,
-                'test_log': test_log
+                'test_log': test_log,
+                'planner_state': planner_state,
             }
 
             # stopping condition reached
