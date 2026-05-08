@@ -31,7 +31,7 @@
 
 from functools import partial
 import termcolor
-from typing import Any, Dict, Optional, Set, Tuple
+from typing import Any, Callable, Dict, Optional, Set, Tuple
 
 import numpy as np
 import jax
@@ -75,8 +75,8 @@ def stable_tanh_jvp(primals, tangents):
 
 # it seems JAX uses the stability trick already
 def stable_softmax_weight_sum(logits: jnp.ndarray, values: jnp.ndarray, axis: int) -> jnp.ndarray:
-    '''Computes a weighted sum of the input values, where the weights are given by a softmax over 
-    the input logits.'''
+    '''Computes a weighted sum of the input values, where the weights are given by a 
+    softmax over the input logits.'''
     return jnp.sum(values * jax.nn.softmax(logits, axis=axis), axis=axis)
 
 
@@ -90,6 +90,7 @@ class JaxRDDLCompilerWithGrad(JaxRDDLCompiler):
     def __init__(self, *args,
                  cpfs_without_grad: Optional[Set[str]]=None,
                  print_warnings: bool=True, 
+                 sample_callback: Optional[Callable]=None,
                  **kwargs) -> None:
         '''Creates a new RDDL to Jax compiler, where operations that are not
         differentiable are converted to approximate forms that have defined gradients.
@@ -98,6 +99,7 @@ class JaxRDDLCompilerWithGrad(JaxRDDLCompiler):
         :param cpfs_without_grad: which CPFs do not have gradients (use straight
         through gradient trick)
         :param print_warnings: whether to print warnings
+        :param sample_callback: function to call for sample debugging
         :param *kwargs: keyword arguments to pass to base compiler
         '''
         super(JaxRDDLCompilerWithGrad, self).__init__(*args, **kwargs)
@@ -106,6 +108,7 @@ class JaxRDDLCompilerWithGrad(JaxRDDLCompiler):
             cpfs_without_grad = set()
         self.cpfs_without_grad = cpfs_without_grad
         self.print_warnings = print_warnings
+        self.sample_callback = sample_callback
         
         # actions and CPFs must be continuous
         pvars_cast = set()
@@ -121,9 +124,25 @@ class JaxRDDLCompilerWithGrad(JaxRDDLCompiler):
         kwargs = super().get_kwargs()
         kwargs['cpfs_without_grad'] = self.cpfs_without_grad
         kwargs['print_warnings'] = self.print_warnings
+        kwargs['sample_callback'] = self.sample_callback
         return kwargs
 
-    def init_fls_and_nfls(self, init_values: Dict[str, Any], batch_size: int) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    def _sample_callback(self, expr_id, expr_type, sample, args):
+        payload = {
+            'expr_id': int(expr_id),
+            'expr_type': expr_type,
+            'sample': np.asarray(sample),
+            'args': tuple(map(np.asarray, args))
+        }
+        self.sample_callback(payload)
+        
+    def _jax_sample_callback(self, expr_id, expr_type, sample, args):
+        if self.sample_callback is not None:
+            jax.debug.callback(
+                self._sample_callback, int(expr_id), expr_type, sample, args)
+
+    def init_fls_and_nfls(self, init_values: Dict[str, Any], batch_size: int
+                          ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         fls, nfls = super().init_fls_and_nfls(init_values, batch_size)
         return jax.tree_util.tree_map(partial(np.asarray, dtype=self.REAL), (fls, nfls))
     
@@ -174,7 +193,7 @@ class JaxRDDLCompilerWithGrad(JaxRDDLCompiler):
         
         if self.print_warnings and cpfs_cast:
             print(termcolor.colored(
-                f'[INFO] Compiler will cast policy cpfs {cpfs_cast} to float.', 'dark_grey'))
+                f'[INFO] Compiler will cast policy CPFs {cpfs_cast} to float.', 'dark_grey'))
             
         return jax_cpfs
 
@@ -248,6 +267,7 @@ class SigmoidRelational(JaxRDDLCompilerWithGrad):
         aux['overriden'][id_] = __class__.__name__
         def greater_op(x, y, params):
             sample = jax.nn.sigmoid(params[id_]['sigmoid_weight'] * (x - y))
+            self._jax_sample_callback(id_, 'greater', sample, (x, y))
             if self.use_sigmoid_ste:
                 sample = sample + jax.lax.stop_gradient(jnp.greater(x, y) - sample)
             return sample, params
@@ -261,6 +281,7 @@ class SigmoidRelational(JaxRDDLCompilerWithGrad):
         aux['overriden'][id_] = __class__.__name__
         def greater_equal_op(x, y, params):
             sample = jax.nn.sigmoid(params[id_]['sigmoid_weight'] * (x - y))
+            self._jax_sample_callback(id_, 'greater_equal', sample, (x, y))
             if self.use_sigmoid_ste:
                 sample = sample + jax.lax.stop_gradient(jnp.greater_equal(x, y) - sample)
             return sample, params
@@ -274,6 +295,7 @@ class SigmoidRelational(JaxRDDLCompilerWithGrad):
         aux['overriden'][id_] = __class__.__name__
         def less_op(x, y, params):
             sample = jax.nn.sigmoid(params[id_]['sigmoid_weight'] * (y - x))
+            self._jax_sample_callback(id_, 'less', sample, (x, y))
             if self.use_sigmoid_ste:
                 sample = sample + jax.lax.stop_gradient(jnp.less(x, y) - sample)
             return sample, params
@@ -287,6 +309,7 @@ class SigmoidRelational(JaxRDDLCompilerWithGrad):
         aux['overriden'][id_] = __class__.__name__
         def less_equal_op(x, y, params):
             sample = jax.nn.sigmoid(params[id_]['sigmoid_weight'] * (y - x))
+            self._jax_sample_callback(id_, 'less_equal', sample, (x, y))
             if self.use_sigmoid_ste:
                 sample = sample + jax.lax.stop_gradient(jnp.less_equal(x, y) - sample)
             return sample, params
@@ -300,6 +323,7 @@ class SigmoidRelational(JaxRDDLCompilerWithGrad):
         aux['overriden'][id_] = __class__.__name__
         def equal_op(x, y, params):
             sample = 1. - jnp.square(stable_tanh(params[id_]['sigmoid_weight'] * (y - x)))
+            self._jax_sample_callback(id_, 'equal', sample, (x, y))
             if self.use_tanh_ste:
                 sample = sample + jax.lax.stop_gradient(jnp.equal(x, y) - sample)
             return sample, params
@@ -313,6 +337,7 @@ class SigmoidRelational(JaxRDDLCompilerWithGrad):
         aux['overriden'][id_] = __class__.__name__
         def not_equal_op(x, y, params):
             sample = jnp.square(stable_tanh(params[id_]['sigmoid_weight'] * (y - x)))
+            self._jax_sample_callback(id_, 'not_equal', sample, (x, y))
             if self.use_tanh_ste:
                 sample = sample + jax.lax.stop_gradient(jnp.not_equal(x, y) - sample)
             return sample, params
@@ -326,6 +351,7 @@ class SigmoidRelational(JaxRDDLCompilerWithGrad):
         aux['overriden'][id_] = __class__.__name__
         def sgn_op(x, params):
             sample = stable_tanh(params[id_]['sigmoid_weight'] * x)
+            self._jax_sample_callback(id_, 'sgn', sample, (x,))
             if self.use_tanh_ste:
                 sample = sample + jax.lax.stop_gradient(jnp.sign(x) - sample)
             return sample, params
@@ -364,6 +390,7 @@ class SoftmaxArgmax(JaxRDDLCompilerWithGrad):
         def argmax_op(x, params):
             w = params[id_]['argmax_weight']
             sample = self.soft_argmax(x, w=w, axis=axis, dtype=self.INT)
+            self._jax_sample_callback(id_, 'argmax', sample, (x,))
             if self.use_argmax_ste:
                 hard_sample = jnp.argmax(x, axis=axis)
                 sample = sample + jax.lax.stop_gradient(hard_sample - sample)
@@ -382,6 +409,7 @@ class SoftmaxArgmax(JaxRDDLCompilerWithGrad):
         def argmin_op(x, params):
             w = params[id_]['argmax_weight']
             sample = self.soft_argmax(-x, w=w, axis=axis, dtype=self.INT)
+            self._jax_sample_callback(id_, 'argmin', sample, (x,))
             if self.use_argmax_ste:
                 hard_sample = jnp.argmax(-x, axis=axis)
                 sample = sample + jax.lax.stop_gradient(hard_sample - sample)
@@ -411,6 +439,7 @@ class ProductNormLogical(JaxRDDLCompilerWithGrad):
         aux['overriden'][expr.id] = __class__.__name__
         def not_op(x):
             sample = 1. - x
+            self._jax_sample_callback(expr.id, 'not', sample, (x,))
             if self.use_logic_ste:
                 hard_sample = jnp.asarray(x <= 0.5, dtype=self.REAL)
                 sample = sample + jax.lax.stop_gradient(hard_sample - sample)
@@ -423,6 +452,7 @@ class ProductNormLogical(JaxRDDLCompilerWithGrad):
         aux['overriden'][expr.id] = __class__.__name__
         def and_op(x, y):
             sample = jnp.multiply(x, y)
+            self._jax_sample_callback(expr.id, 'and', sample, (x, y))
             if self.use_logic_ste:
                 hard_sample = jnp.asarray(jnp.logical_and(x > 0.5, y > 0.5), dtype=self.REAL)
                 sample = sample + jax.lax.stop_gradient(hard_sample - sample)
@@ -435,6 +465,7 @@ class ProductNormLogical(JaxRDDLCompilerWithGrad):
         aux['overriden'][expr.id] = __class__.__name__
         def or_op(x, y):
             sample = 1. - (1. - x) * (1. - y)
+            self._jax_sample_callback(expr.id, 'or', sample, (x, y))
             if self.use_logic_ste:
                 hard_sample = jnp.asarray(jnp.logical_or(x > 0.5, y > 0.5), dtype=self.REAL)
                 sample = sample + jax.lax.stop_gradient(hard_sample - sample)
@@ -447,6 +478,7 @@ class ProductNormLogical(JaxRDDLCompilerWithGrad):
         aux['overriden'][expr.id] = __class__.__name__
         def xor_op(x, y):
             sample = (1. - (1. - x) * (1. - y)) * (1. - x * y)
+            self._jax_sample_callback(expr.id, 'xor', sample, (x, y))
             if self.use_logic_ste:
                 hard_sample = jnp.asarray(jnp.logical_xor(x > 0.5, y > 0.5), dtype=self.REAL)
                 sample = sample + jax.lax.stop_gradient(hard_sample - sample)
@@ -459,6 +491,7 @@ class ProductNormLogical(JaxRDDLCompilerWithGrad):
         aux['overriden'][expr.id] = __class__.__name__
         def implies_op(x, y):
             sample = 1. - x * (1. - y)
+            self._jax_sample_callback(expr.id, 'implies', sample, (x, y))
             if self.use_logic_ste:
                 hard_sample = jnp.asarray(jnp.logical_or(x <= 0.5, y > 0.5), dtype=self.REAL)
                 sample = sample + jax.lax.stop_gradient(hard_sample - sample)
@@ -471,6 +504,7 @@ class ProductNormLogical(JaxRDDLCompilerWithGrad):
         aux['overriden'][expr.id] = __class__.__name__
         def equiv_op(x, y):
             sample = (1. - x * (1. - y)) * (1. - y * (1. - x))
+            self._jax_sample_callback(expr.id, 'equiv', sample, (x, y))
             if self.use_logic_ste:
                 hard_sample = jnp.logical_and(
                     jnp.logical_or(x <= 0.5, y > 0.5), jnp.logical_or(y <= 0.5, x > 0.5))
@@ -485,6 +519,7 @@ class ProductNormLogical(JaxRDDLCompilerWithGrad):
         aux['overriden'][expr.id] = __class__.__name__
         def forall_op(x, axis):
             sample = jnp.prod(x, axis=axis)
+            self._jax_sample_callback(expr.id, 'forall', sample, (x,))
             if self.use_logic_ste:
                 hard_sample = jnp.all(x > 0.5, axis=axis)
                 sample = sample + jax.lax.stop_gradient(hard_sample - sample)
@@ -497,6 +532,7 @@ class ProductNormLogical(JaxRDDLCompilerWithGrad):
         aux['overriden'][expr.id] = __class__.__name__
         def exists_op(x, axis):
             sample = 1. - jnp.prod(1. - x, axis=axis)
+            self._jax_sample_callback(expr.id, 'exists', sample, (x,))
             if self.use_logic_ste:
                 hard_sample = jnp.any(x > 0.5, axis=axis)
                 sample = sample + jax.lax.stop_gradient(hard_sample - sample)
@@ -522,6 +558,7 @@ class GodelNormLogical(JaxRDDLCompilerWithGrad):
         aux['overriden'][expr.id] = __class__.__name__
         def not_op(x):
             sample = 1. - x
+            self._jax_sample_callback(expr.id, 'not', sample, (x,))
             if self.use_logic_ste:
                 hard_sample = jnp.asarray(x <= 0.5, dtype=self.REAL)
                 sample = sample + jax.lax.stop_gradient(hard_sample - sample)
@@ -534,6 +571,7 @@ class GodelNormLogical(JaxRDDLCompilerWithGrad):
         aux['overriden'][expr.id] = __class__.__name__
         def and_op(x, y):
             sample = jnp.minimum(x, y)
+            self._jax_sample_callback(expr.id, 'and', sample, (x, y))
             if self.use_logic_ste:
                 hard_sample = jnp.asarray(jnp.logical_and(x > 0.5, y > 0.5), dtype=self.REAL)
                 sample = sample + jax.lax.stop_gradient(hard_sample - sample)
@@ -546,6 +584,7 @@ class GodelNormLogical(JaxRDDLCompilerWithGrad):
         aux['overriden'][expr.id] = __class__.__name__
         def or_op(x, y):
             sample = jnp.maximum(x, y)
+            self._jax_sample_callback(expr.id, 'or', sample, (x, y))
             if self.use_logic_ste:
                 hard_sample = jnp.asarray(jnp.logical_or(x > 0.5, y > 0.5), dtype=self.REAL)
                 sample = sample + jax.lax.stop_gradient(hard_sample - sample)
@@ -558,6 +597,7 @@ class GodelNormLogical(JaxRDDLCompilerWithGrad):
         aux['overriden'][expr.id] = __class__.__name__
         def xor_op(x, y):
             sample = jnp.minimum(jnp.maximum(x, y), 1. - jnp.minimum(x, y))
+            self._jax_sample_callback(expr.id, 'xor', sample, (x, y))
             if self.use_logic_ste:
                 hard_sample = jnp.asarray(jnp.logical_xor(x > 0.5, y > 0.5), dtype=self.REAL)
                 sample = sample + jax.lax.stop_gradient(hard_sample - sample)
@@ -570,6 +610,7 @@ class GodelNormLogical(JaxRDDLCompilerWithGrad):
         aux['overriden'][expr.id] = __class__.__name__
         def implies_op(x, y):
             sample = jnp.maximum(1. - x, y)
+            self._jax_sample_callback(expr.id, 'implies', sample, (x, y))
             if self.use_logic_ste:
                 hard_sample = jnp.asarray(jnp.logical_or(x <= 0.5, y > 0.5), dtype=self.REAL)
                 sample = sample + jax.lax.stop_gradient(hard_sample - sample)
@@ -582,6 +623,7 @@ class GodelNormLogical(JaxRDDLCompilerWithGrad):
         aux['overriden'][expr.id] = __class__.__name__
         def equiv_op(x, y):
             sample = jnp.minimum(jnp.maximum(1. - x, y), jnp.maximum(1. - y, x))
+            self._jax_sample_callback(expr.id, 'equiv', sample, (x, y))
             if self.use_logic_ste:
                 hard_sample = jnp.logical_and(
                     jnp.logical_or(x <= 0.5, y > 0.5), jnp.logical_or(y <= 0.5, x > 0.5))
@@ -596,6 +638,7 @@ class GodelNormLogical(JaxRDDLCompilerWithGrad):
         aux['overriden'][expr.id] = __class__.__name__
         def all_op(x, axis):
             sample = jnp.min(x, axis=axis)
+            self._jax_sample_callback(expr.id, 'forall', sample, (x,))
             if self.use_logic_ste:
                 hard_sample = jnp.all(x > 0.5, axis=axis)
                 sample = sample + jax.lax.stop_gradient(hard_sample - sample)
@@ -608,6 +651,7 @@ class GodelNormLogical(JaxRDDLCompilerWithGrad):
         aux['overriden'][expr.id] = __class__.__name__
         def exists_op(x, axis):
             sample = jnp.max(x, axis=axis)
+            self._jax_sample_callback(expr.id, 'exists', sample, (x,))
             if self.use_logic_ste:
                 hard_sample = jnp.any(x > 0.5, axis=axis)
                 sample = sample + jax.lax.stop_gradient(hard_sample - sample)
@@ -633,6 +677,7 @@ class LukasiewiczNormLogical(JaxRDDLCompilerWithGrad):
         aux['overriden'][expr.id] = __class__.__name__
         def not_op(x):
             sample = 1. - x
+            self._jax_sample_callback(expr.id, 'not', sample, (x,))
             if self.use_logic_ste:
                 hard_sample = jnp.asarray(x <= 0.5, dtype=self.REAL)
                 sample = sample + jax.lax.stop_gradient(hard_sample - sample)
@@ -645,6 +690,7 @@ class LukasiewiczNormLogical(JaxRDDLCompilerWithGrad):
         aux['overriden'][expr.id] = __class__.__name__
         def and_op(x, y):
             sample = jax.nn.relu(x + y - 1.)
+            self._jax_sample_callback(expr.id, 'and', sample, (x, y))
             if self.use_logic_ste:
                 hard_sample = jnp.asarray(jnp.logical_and(x > 0.5, y > 0.5), dtype=self.REAL)
                 sample = sample + jax.lax.stop_gradient(hard_sample - sample)
@@ -657,6 +703,7 @@ class LukasiewiczNormLogical(JaxRDDLCompilerWithGrad):
         aux['overriden'][expr.id] = __class__.__name__
         def or_op(x, y):
             sample = 1. - jax.nn.relu(1. - x - y)
+            self._jax_sample_callback(expr.id, 'or', sample, (x, y))
             if self.use_logic_ste:
                 hard_sample = jnp.asarray(jnp.logical_or(x > 0.5, y > 0.5), dtype=self.REAL)
                 sample = sample + jax.lax.stop_gradient(hard_sample - sample)
@@ -669,6 +716,7 @@ class LukasiewiczNormLogical(JaxRDDLCompilerWithGrad):
         aux['overriden'][expr.id] = __class__.__name__
         def xor_op(x, y):
             sample = jax.nn.relu(1. - jnp.abs(1. - x - y))
+            self._jax_sample_callback(expr.id, 'xor', sample, (x, y))
             if self.use_logic_ste:
                 hard_sample = jnp.asarray(jnp.logical_xor(x > 0.5, y > 0.5), dtype=self.REAL)
                 sample = sample + jax.lax.stop_gradient(hard_sample - sample)
@@ -681,6 +729,7 @@ class LukasiewiczNormLogical(JaxRDDLCompilerWithGrad):
         aux['overriden'][expr.id] = __class__.__name__
         def implies_op(x, y):
             sample = 1. - jax.nn.relu(x - y)
+            self._jax_sample_callback(expr.id, 'implies', sample, (x, y))
             if self.use_logic_ste:
                 hard_sample = jnp.asarray(jnp.logical_or(x <= 0.5, y > 0.5), dtype=self.REAL)
                 sample = sample + jax.lax.stop_gradient(hard_sample - sample)
@@ -693,6 +742,7 @@ class LukasiewiczNormLogical(JaxRDDLCompilerWithGrad):
         aux['overriden'][expr.id] = __class__.__name__
         def equiv_op(x, y):
             sample = jax.nn.relu(1. - jnp.abs(x - y))
+            self._jax_sample_callback(expr.id, 'equiv', sample, (x, y))
             if self.use_logic_ste:
                 hard_sample = jnp.logical_and(
                     jnp.logical_or(x <= 0.5, y > 0.5), jnp.logical_or(y <= 0.5, x > 0.5))
@@ -707,6 +757,7 @@ class LukasiewiczNormLogical(JaxRDDLCompilerWithGrad):
         aux['overriden'][expr.id] = __class__.__name__
         def forall_op(x, axis):
             sample = jax.nn.relu(jnp.sum(x - 1., axis=axis) + 1.)
+            self._jax_sample_callback(expr.id, 'forall', sample, (x,))
             if self.use_logic_ste:
                 hard_sample = jnp.all(x > 0.5, axis=axis)
                 sample = sample + jax.lax.stop_gradient(hard_sample - sample)
@@ -719,6 +770,7 @@ class LukasiewiczNormLogical(JaxRDDLCompilerWithGrad):
         aux['overriden'][expr.id] = __class__.__name__
         def exists_op(x, axis):
             sample = 1. - jax.nn.relu(jnp.sum(-x, axis=axis) + 1.)
+            self._jax_sample_callback(expr.id, 'exists', sample, (x,))
             if self.use_logic_ste:
                 hard_sample = jnp.any(x > 0.5, axis=axis)
                 sample = sample + jax.lax.stop_gradient(hard_sample - sample)
@@ -759,6 +811,7 @@ class SoftFloor(JaxRDDLCompilerWithGrad):
         aux['overriden'][id_] = __class__.__name__
         def floor_op(x, params):
             sample = self.soft_floor(x, params[id_]['floor_weight'])
+            self._jax_sample_callback(id_, 'floor', sample, (x,))
             if self.use_floor_ste:
                 sample = sample + jax.lax.stop_gradient(jnp.floor(x) - sample)
             return sample, params
@@ -772,6 +825,7 @@ class SoftFloor(JaxRDDLCompilerWithGrad):
         aux['overriden'][id_] = __class__.__name__
         def ceil_op(x, params):
             sample = -self.soft_floor(-x, params[id_]['floor_weight'])
+            self._jax_sample_callback(id_, 'ceil', sample, (x,))
             if self.use_floor_ste:
                 sample = sample + jax.lax.stop_gradient(jnp.ceil(x) - sample)
             return sample, params
@@ -785,6 +839,7 @@ class SoftFloor(JaxRDDLCompilerWithGrad):
         aux['overriden'][id_] = __class__.__name__
         def div_op(x, y, params):
             sample = self.soft_floor(sj.div(x, y), params[id_]['floor_weight'])
+            self._jax_sample_callback(id_, 'div', sample, (x, y))
             if self.use_floor_ste:
                 sample = sample + jax.lax.stop_gradient(jnp.floor_divide(x, y) - sample)
             return sample, params
@@ -801,6 +856,7 @@ class SoftFloor(JaxRDDLCompilerWithGrad):
             if self.use_floor_ste:
                 div = div + jax.lax.stop_gradient(jnp.floor_divide(x, y) - div)
             sample = x - y * div
+            self._jax_sample_callback(id_, 'mod', sample, (x, y))
             return sample, params
         return self._jax_binary_helper_with_param(expr, aux, mod_op)
 
@@ -833,6 +889,7 @@ class SoftRound(JaxRDDLCompilerWithGrad):
         aux['overriden'][id_] = __class__.__name__
         def round_op(x, params):
             sample = self.soft_round(x, params[id_]['round_weight'])
+            self._jax_sample_callback(id_, 'round', sample, (x,))
             if self.use_round_ste:
                 sample = sample + jax.lax.stop_gradient(jnp.round(x) - sample)
             return sample, params
@@ -877,6 +934,8 @@ class LinearIfElse(JaxRDDLCompilerWithGrad):
                 hard_pred = jnp.asarray(sample_pred > 0.5, dtype=sample_pred.dtype)
                 sample_pred = sample_pred + jax.lax.stop_gradient(hard_pred - sample_pred)
             sample = sj.where(sample_pred, sample_true, sample_false)
+            self._jax_sample_callback(
+                expr.id, 'if', sample, (sample_pred, sample_true, sample_false))
             err = err1 | err2 | err3
             return sample, key, err, params
         return _jax_wrapped_if_then_else_linear
@@ -931,6 +990,7 @@ class SoftmaxSwitch(JaxRDDLCompilerWithGrad):
             w = params[id_]['switch_weight']
             logits = -w * jnp.abs(sample_pred_soft - literals)
             sample = stable_softmax_weight_sum(logits, sample_cases, axis=0)
+            self._jax_sample_callback(id_, 'switch', sample, (sample_pred, sample_cases))
 
             # straight through estimator
             if self.use_switch_ste:
@@ -985,6 +1045,7 @@ class ReparameterizedGeometric(JaxRDDLCompilerWithGrad):
             key, subkey = random.split(key)
             exp1 = random.exponential(key=subkey, shape=jnp.shape(prob), dtype=self.REAL)
             sample = 1. + SoftFloor.soft_floor(sj.div(-exp1, safe_log(1. - prob, eps)), w=w)
+            self._jax_sample_callback(id_, 'geometric', sample, (prob,))
             out_of_bounds = jnp.logical_not(jnp.all(jnp.logical_and(prob >= 0, prob <= 1)))
             err = err | (out_of_bounds * ERR)
             return sample, key, err, params
@@ -1016,6 +1077,7 @@ class DeterminizedGeometric(JaxRDDLCompilerWithGrad):
         def _jax_wrapped_distribution_geometric_determinized(fls, nfls, params, key):
             prob, key, err, params = jax_prob(fls, nfls, params, key)
             sample = sj.div(1., prob)
+            self._jax_sample_callback(expr.id, 'geometric', sample, (prob,))
             out_of_bounds = jnp.logical_not(jnp.all(jnp.logical_and(prob >= 0, prob <= 1)))
             err = err | (out_of_bounds * ERR)
             return sample, key, err, params
@@ -1062,6 +1124,7 @@ class ReparameterizedSigmoidBernoulli(JaxRDDLCompilerWithGrad):
             key, subkey = random.split(key)
             U = random.uniform(key=subkey, shape=jnp.shape(prob), dtype=self.REAL)
             sample = jax.nn.sigmoid(params[id_]['bernoulli_sigmoid_weight'] * (prob - U))
+            self._jax_sample_callback(id_, 'bernoulli', sample, (prob,))
             if self.use_ste_bernoulli:
                 hard_sample = jnp.asarray(prob > U, dtype=sample.dtype)
                 sample = sample + jax.lax.stop_gradient(hard_sample - sample)
@@ -1114,6 +1177,7 @@ class GumbelSigmoidBernoulli(JaxRDDLCompilerWithGrad):
             noise = random.logistic(key=subkey, shape=jnp.shape(prob), dtype=self.REAL)
             logit = scipy.special.logit(jnp.clip(prob, eps, 1. - eps)) + noise          
             sample = jax.nn.sigmoid(w * logit)
+            self._jax_sample_callback(id_, 'bernoulli', sample, (prob,))
             if self.use_ste_bernoulli:
                 hard_sample = jnp.asarray(logit > 0, dtype=logit.dtype)
                 sample = sample + jax.lax.stop_gradient(hard_sample - sample)
@@ -1148,6 +1212,7 @@ class DeterminizedBernoulli(JaxRDDLCompilerWithGrad):
         def _jax_wrapped_distribution_bernoulli_determinized(fls, nfls, params, key):
             prob, key, err, params = jax_prob(fls, nfls, params, key)
             sample = prob
+            self._jax_sample_callback(expr.id, 'bernoulli', sample, (prob,))
             out_of_bounds = jnp.logical_not(jnp.all(jnp.logical_and(prob >= 0, prob <= 1)))
             err = err | (out_of_bounds * ERR)
             return sample, key, err, params
@@ -1197,6 +1262,7 @@ class GumbelSoftmaxDiscrete(JaxRDDLCompilerWithGrad):
             g = random.gumbel(key=subkey, shape=jnp.shape(prob), dtype=self.REAL)
             logits = g + safe_log(prob, eps)
             sample = SoftmaxArgmax.soft_argmax(logits, w=w, axis=-1, dtype=self.INT)
+            self._jax_sample_callback(id_, 'discrete', sample, (prob,))
             err = JaxRDDLCompilerWithGrad._jax_update_discrete_oob_error(err, prob)
             return sample, key, err, params
         return _jax_wrapped_distribution_discrete_gumbel_softmax
@@ -1225,6 +1291,7 @@ class GumbelSoftmaxDiscrete(JaxRDDLCompilerWithGrad):
             g = random.gumbel(key=subkey, shape=jnp.shape(prob), dtype=self.REAL)
             logits = g + safe_log(prob, eps)
             sample = SoftmaxArgmax.soft_argmax(logits, w=w, axis=-1, dtype=self.INT)
+            self._jax_sample_callback(id_, 'discrete_pvar', sample, (prob,))
             err = JaxRDDLCompilerWithGrad._jax_update_discrete_oob_error(err, prob)
             return sample, key, err, params
         return _jax_wrapped_distribution_discrete_pvar_gumbel_softmax
@@ -1255,6 +1322,7 @@ class DeterminizedDiscrete(JaxRDDLCompilerWithGrad):
             prob, key, err, params = prob_fn(fls, nfls, params, key)
             literals = enumerate_literals(jnp.shape(prob), axis=-1, dtype=self.INT)
             sample = jnp.sum(literals * prob, axis=-1)
+            self._jax_sample_callback(expr.id, 'discrete', sample, (prob,))
             err = JaxRDDLCompilerWithGrad._jax_update_discrete_oob_error(err, prob)
             return sample, key, err, params
         return _jax_wrapped_distribution_discrete_determinized
@@ -1277,6 +1345,7 @@ class DeterminizedDiscrete(JaxRDDLCompilerWithGrad):
             prob, key, err, params = prob_fn(fls, nfls, params, key)
             literals = enumerate_literals(jnp.shape(prob), axis=-1, dtype=self.INT)
             sample = jnp.sum(literals * prob, axis=-1)
+            self._jax_sample_callback(expr.id, 'discrete_pvar', sample, (prob,))
             err = JaxRDDLCompilerWithGrad._jax_update_discrete_oob_error(err, prob)
             return sample, key, err, params
         return _jax_wrapped_distribution_discrete_pvar_determinized
@@ -1367,7 +1436,7 @@ class GumbelSoftmaxBinomial(JaxRDDLCompilerWithGrad):
                 self.gumbel_softmax_approx_to_binomial(subkey, trials, prob, w, eps), 
                 self.normal_approx_to_binomial(subkey, trials, prob)
             )
-
+            self._jax_sample_callback(id_, 'binomial', sample, (trials, prob))
             out_of_bounds = jnp.logical_not(jnp.all(
                 jnp.logical_and(jnp.logical_and(prob >= 0, prob <= 1), trials >= 0)))
             err = err1 | err2 | (out_of_bounds * ERR)
@@ -1405,6 +1474,7 @@ class DeterminizedBinomial(JaxRDDLCompilerWithGrad):
             trials = jnp.asarray(trials, dtype=self.REAL)
             prob = jnp.asarray(prob, dtype=self.REAL)
             sample = trials * prob
+            self._jax_sample_callback(expr.id, 'binomial', sample, (trials, prob))
             out_of_bounds = jnp.logical_not(jnp.all(
                 jnp.logical_and(jnp.logical_and(prob >= 0, prob <= 1), trials >= 0)))
             err = err1 | err2 | (out_of_bounds * ERR)
@@ -1477,7 +1547,8 @@ class ExponentialPoisson(JaxRDDLCompilerWithGrad):
             key, subkey = random.split(key)
             w = params[id_]['poisson_comparison_weight']
             min_cdf = params[id_]['poisson_min_cdf']
-            sample = self.branched_approx_to_poisson(subkey, rate, w, min_cdf)            
+            sample = self.branched_approx_to_poisson(subkey, rate, w, min_cdf)    
+            self._jax_sample_callback(id_, 'poisson', sample, (rate,))        
             out_of_bounds = jnp.logical_not(jnp.all(rate >= 0))
             err = err | (out_of_bounds * ERR)
             return sample, key, err, params
@@ -1513,6 +1584,7 @@ class ExponentialPoisson(JaxRDDLCompilerWithGrad):
             w = params[id_]['poisson_comparison_weight']
             min_cdf = params[id_]['poisson_min_cdf']
             sample = self.branched_approx_to_poisson(subkey, rate, w, min_cdf)   
+            self._jax_sample_callback(id_, 'negative_binomial', sample, (trials, prob))
             out_of_bounds = jnp.logical_not(jnp.all(
                 jnp.logical_and(jnp.logical_and(prob >= 0, prob <= 1), trials > 0)))
             err = err1 | err2 | (out_of_bounds * ERR)
@@ -1590,6 +1662,7 @@ class GumbelSoftmaxPoisson(JaxRDDLCompilerWithGrad):
             min_cdf = params[id_]['poisson_min_cdf']
             eps = params[id_]['poisson_eps']
             sample = self.branched_approx_to_poisson(subkey, rate, w, min_cdf, eps)
+            self._jax_sample_callback(id_, 'poisson', sample, (rate,))
             out_of_bounds = jnp.logical_not(jnp.all(rate >= 0))
             err = err | (out_of_bounds * ERR)
             return sample, key, err, params
@@ -1627,6 +1700,7 @@ class GumbelSoftmaxPoisson(JaxRDDLCompilerWithGrad):
             min_cdf = params[id_]['poisson_min_cdf']
             eps = params[id_]['poisson_eps']
             sample = self.branched_approx_to_poisson(subkey, rate, w, min_cdf, eps)   
+            self._jax_sample_callback(id_, 'negative_binomial', sample, (trials, prob))
             out_of_bounds = jnp.logical_not(jnp.all(
                 jnp.logical_and(jnp.logical_and(prob >= 0, prob <= 1), trials > 0)))
             err = err1 | err2 | (out_of_bounds * ERR)
@@ -1659,6 +1733,7 @@ class DeterminizedPoisson(JaxRDDLCompilerWithGrad):
         def _jax_wrapped_distribution_poisson_determinized(fls, nfls, params, key):
             rate, key, err, params = jax_rate(fls, nfls, params, key)
             sample = rate
+            self._jax_sample_callback(expr.id, 'poisson', sample, (rate,))
             out_of_bounds = jnp.logical_not(jnp.all(rate >= 0))
             err = err | (out_of_bounds * ERR)
             return sample, key, err, params
@@ -1685,6 +1760,7 @@ class DeterminizedPoisson(JaxRDDLCompilerWithGrad):
             trials = jnp.asarray(trials, dtype=self.REAL)
             prob = jnp.asarray(prob, dtype=self.REAL)
             sample = (sj.div(1., prob) - 1.) * trials
+            self._jax_sample_callback(expr.id, 'negative_binomial', sample, (trials, prob))
             out_of_bounds = jnp.logical_not(jnp.all(
                 jnp.logical_and(jnp.logical_and(prob >= 0, prob <= 1), trials > 0)))
             err = err1 | err2 | (out_of_bounds * ERR)
