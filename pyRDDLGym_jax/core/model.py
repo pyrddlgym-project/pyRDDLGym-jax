@@ -139,7 +139,7 @@ class JaxModelLearner:
     def __init__(self, rddl: RDDLLiftedModel, 
                  param_ranges: Dict[str, Tuple[Optional[np.ndarray], Optional[np.ndarray]]],
                  batch_size_train: int=32,
-                 samples_per_datapoint: int=1,
+                 samples_per_datapoint: int=16,
                  optimizer: Callable[..., optax.GradientTransformation]=optax.rmsprop,
                  optimizer_kwargs: Optional[Kwargs]=None,
                  initializer: initializers.Initializer = initializers.normal(),
@@ -537,8 +537,7 @@ def generate_rollouts(env, policy, episodes=10, max_steps=100):
                 states[key].append(obs[key])
                 next_states[key].append(next_obs[key])
             for key in actions:
-                if key in action:
-                    actions[key].append(action[key])
+                actions[key].append(action[key])
             obs = next_obs
             done = term or trunc
             steps += 1
@@ -572,19 +571,19 @@ if __name__ == '__main__':
     from pyRDDLGym_jax.core.planner import load_config, JaxBackpropPlanner, JaxOfflineController
     
     # make some data
-    policy = lambda obs: {}
-    env = pyRDDLGym.make('Wildfire_MDP_ippc2014', '1', vectorized=True)
-    states, actions, next_states = generate_rollouts(env, policy, episodes=40, max_steps=40)
+    policy = lambda obs: {'release': np.random.uniform(0.0, 20., size=(3,))}
+    env = pyRDDLGym.make('Reservoir_Continuous', '0', vectorized=True)
+    states, actions, next_states = generate_rollouts(env, policy, episodes=40, max_steps=100)
     data_iterator = batch_sampler(states, actions, next_states, batch_size=32)
 
     # train it
     model_learner = JaxModelLearner(rddl=env.model, 
                                     param_ranges={
-                                        'NEIGHBOR': (None, None)
+                                        'RAIN_VAR': (0., 10.)
                                     }, 
                                     batch_size_train=32, 
-                                    optimizer_kwargs = {'learning_rate': 0.001})
-    for cb in model_learner.optimize_generator(data_iterator, epochs=20000, print_progress=True):
+                                    optimizer_kwargs = {'learning_rate': 0.0003})
+    for cb in model_learner.optimize_generator(data_iterator, epochs=50000, print_progress=True):
         if cb['iteration'] % 2000 == 0:
             print(cb['param_fluents'])
         
@@ -598,5 +597,5 @@ if __name__ == '__main__':
     controller = JaxOfflineController(planner, **train_args)
 
     # evaluation of the plan
-    test_env = pyRDDLGym.make('CartPole_Continuous_gym', '0', vectorized=True)
+    test_env = pyRDDLGym.make('Reservoir_Continuous', '0', vectorized=True)
     controller.evaluate(test_env, episodes=1, verbose=True, render=True)
