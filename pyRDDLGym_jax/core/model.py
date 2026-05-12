@@ -26,36 +26,54 @@ Action = Dict[str, np.ndarray]
 DataStream = Iterable[Tuple[State, Action, State]]
 Params = Dict[str, np.ndarray]
 Callback = Dict[str, Any]
-LossFunction = Callable[[jnp.ndarray, jnp.ndarray], jnp.ndarray]
 
 
 # ***********************************************************************
-# ALL VERSIONS OF LOSS FUNCTIONS
+# SCORE-BASED MODEL LEARNER
 #
-# - loss functions based on specific likelihood assumptions (MSE, cross-entropy)
-# 
+# - denoising score matching for learning transition scores
+#
 # ***********************************************************************
 
 
-def mean_squared_error() -> LossFunction:
-    def _jax_wrapped_mse_loss(target, pred):
-        return jnp.square(target - pred)
-    return jax.jit(_jax_wrapped_mse_loss)
+class JaxScoreModel:
+    '''Score-style residual loss helper used by the learner.'''
 
+    def _flatten_targets(self, values, keys):
+        parts = []
+        for key in keys:
+            value = jnp.asarray(values[key])
+            parts.append(jnp.reshape(value, (value.shape[0], -1)))
+        return jnp.concatenate(parts, axis=-1)
 
-def binary_cross_entropy(eps: float=1e-8) -> LossFunction:
-    def _jax_wrapped_binary_cross_entropy_loss(target, pred):
-        pred = jnp.clip(pred, eps, 1.0 - eps)
-        log_pred = jnp.log(pred)
-        log_not_pred = jnp.log(1.0 - pred)
-        return -target * log_pred - (1.0 - target) * log_not_pred
-    return jax.jit(_jax_wrapped_binary_cross_entropy_loss)
+    def _flatten_prediction_samples(self, values, keys, batch_size):
+        parts = []
+        for key in keys:
+            value = jnp.asarray(values[key])
+            if value.ndim < 2 or value.shape[1] != batch_size:
+                raise ValueError(
+                    f'unexpected prediction shape for {key}: {value.shape} ' 
+                    f'(expected (S, {batch_size}, ...))')
+            parts.append(jnp.reshape(value, (value.shape[0], batch_size, -1)))
+        return jnp.concatenate(parts, axis=-1)
 
+    def compute_loss(self, next_states: Any, predicted_next_states: Any) -> jnp.ndarray:
+        next_keys = tuple(sorted(next_states))
+        target_vec = self._flatten_targets(next_states, next_keys)
+        pred_samples = self._flatten_prediction_samples(
+            predicted_next_states, next_keys, batch_size=target_vec.shape[0])
 
-def optax_loss(loss_fn: LossFunction, **kwargs) -> LossFunction:
-    def _jax_wrapped_optax_loss(target, pred):
-        return loss_fn(pred, target, **kwargs)
-    return jax.jit(_jax_wrapped_optax_loss)
+        # energy score E||X - y||^2 - 0.5 E||X - X'||^2
+        diff_to_target = pred_samples - jnp.expand_dims(target_vec, axis=0)
+        first_term = jnp.mean(jnp.sum(jnp.square(diff_to_target), axis=-1))
+
+        if pred_samples.shape[0] > 1:
+            pw = pred_samples[:, jnp.newaxis, :, :] - pred_samples[jnp.newaxis, :, :, :]
+            second_term = 0.5 * jnp.mean(jnp.sum(jnp.square(pw), axis=-1))
+        else:
+            second_term = 0.0
+
+        return first_term - second_term
 
 
 # ***********************************************************************
@@ -93,11 +111,8 @@ class JaxModelLearner:
                  optimizer: Callable[..., optax.GradientTransformation]=optax.rmsprop,
                  optimizer_kwargs: Optional[Kwargs]=None,
                  initializer: initializers.Initializer = initializers.normal(),
-                 wrap_non_bool: bool=True,
-                 bool_fluent_loss: LossFunction=binary_cross_entropy(),
-                 real_fluent_loss: LossFunction=mean_squared_error(),
-                 int_fluent_loss: LossFunction=mean_squared_error(),
-                 compiler: JaxRDDLCompilerWithGrad=JaxRDDLCompilerWithGrad,
+                 wrap_non_bool: bool=False,
+                 compiler: type=JaxRDDLCompilerWithGrad,
                  compiler_kwargs: Optional[Kwargs]=None,
                  model_params_reduction: Callable=lambda x: x[0]) -> None:
         '''Creates a new gradient-based algorithm for inferring unknown non-fluents
@@ -115,9 +130,6 @@ class JaxModelLearner:
         :param initializer: how to initialize non-fluents
         :param wrap_non_bool: whether to wrap non-boolean trainable parameters to satisfy
         required ranges as specified in param_ranges (use a projected gradient otherwise)
-        :param bool_fluent_loss: loss function to optimize for bool-valued fluents
-        :param real_fluent_loss: loss function to optimize for real-valued fluents
-        :param int_fluent_loss: loss function to optimize for int-valued fluents
         :param compiler: compiler instance to use for planning
         :param compiler_kwargs: compiler instances kwargs for initialization
         :param model_params_reduction: how to aggregate updated model_params across runs
@@ -132,32 +144,24 @@ class JaxModelLearner:
         self.optimizer_kwargs = optimizer_kwargs
         self.initializer = initializer
         self.wrap_non_bool = wrap_non_bool
-        self.bool_fluent_loss = bool_fluent_loss
-        self.real_fluent_loss = real_fluent_loss
-        self.int_fluent_loss = int_fluent_loss
         self.model_params_reduction = model_params_reduction
 
         # validate param_ranges
         for (name, values) in param_ranges.items():
             if name not in rddl.non_fluents:
-                raise ValueError(
-                    f'param_ranges key <{name}> is not a valid non-fluent '
-                    f'in the current rddl.')
+                raise ValueError(f'param_ranges key <{name}> is not a valid non-fluent.')
             if not isinstance(values, (tuple, list)):
-                raise ValueError(
-                    f'param_ranges values with key <{name}> are not a tuple or list.')
+                raise ValueError(f'param_ranges key <{name}> is not a tuple or list.')
             if len(values) != 2:
-                raise ValueError(
-                    f'param_ranges values with key <{name}> must be of length 2, '
-                    f'got length {len(values)}.')
+                raise ValueError(f'param_ranges key <{name}> must be of length 2, '
+                                 f'got length {len(values)}.')
             lower, upper = values
             if lower is not None and upper is not None and not np.all(lower <= upper):
-                raise ValueError(
-                    f'param_ranges values with key <{name}> do not satisfy lower <= upper.')
+                raise ValueError(f'param_ranges key <{name}> do not satisfy lower <= upper.')
 
         # build the optimizer
         optimizer = optimizer(**optimizer_kwargs)
-        pipeline = [optimizer]
+        pipeline = [optax.clip_by_global_norm(1.0), optimizer]
         self.optimizer = optax.chain(*pipeline)
 
         # build the computation graph
@@ -165,9 +169,13 @@ class JaxModelLearner:
             compiler_kwargs = {}
         self.compiler_kwargs = compiler_kwargs
         self.compiler_type = compiler
-
         self.step_fn = self._jax_compile_rddl()
         self.map_fn = self._jax_map()
+
+        # build the score model
+        self.score_model = JaxScoreModel()
+
+        # build the loss and update functions
         self.loss_fn = self._jax_loss(map_fn=self.map_fn, step_fn=self.step_fn)
         self.update_fn, self.project_fn = self._jax_update(loss_fn=self.loss_fn)
         self.init_fn = self._jax_init(project_fn=self.project_fn)
@@ -188,6 +196,7 @@ class JaxModelLearner:
         # compile the transition step function
         step_fn = self.compiled.compile_transition()
 
+        # wrap the step function to take in the trainable parameters and batch dimension
         def _jax_wrapped_step(sim_state, param_fluents, states, actions):
             nfls = sim_state.nfls.copy()
             nfls.update(param_fluents)
@@ -209,20 +218,7 @@ class JaxModelLearner:
                 self.model_params_reduction, sim_state.model_params)
             sim_state = sim_state.replace(model_params=model_params)
             return sim_state
-
-        # batched step function with parallel samples per data point
-        def _jax_wrapped_batched_parallel_step(sim_state, param_fluents, states, actions):
-            keys = random.split(sim_state.key, num=self.samples_per_datapoint)
-            sim_state = sim_state.replace(key=keys)
-            sim_state = jax.vmap(
-                _jax_wrapped_batched_step, 
-                in_axes=(JaxRDDLSimState(key=0), None, None, None)
-            )(sim_state, param_fluents, states, actions)
-            model_params = jax.tree_util.tree_map(
-                self.model_params_reduction, sim_state.model_params)
-            sim_state = sim_state.replace(model_params=model_params)
-            return sim_state
-        return jax.jit(_jax_wrapped_batched_parallel_step)
+        return jax.jit(_jax_wrapped_batched_step)
 
     def _jax_map(self):
 
@@ -259,27 +255,19 @@ class JaxModelLearner:
         return jax.jit(_jax_wrapped_params_to_fluents)
 
     def _jax_loss(self, map_fn, step_fn):
-
-        # use binary cross entropy for bool fluents
-        # mean squared error for continuous and integer fluents
-        def _jax_wrapped_batched_model_loss(
-                sim_state, params, states, actions, next_fluents):
+        def _jax_wrapped_batched_model_loss(sim_state, params, states, actions, next_fluents):
             param_fluents = map_fn(params)
-            next_sim_state = step_fn(sim_state, param_fluents, states, actions)
+
+            # draw independent transition samples for energy score
+            sample_keys = random.split(sim_state.key, num=self.samples_per_datapoint)
+
+            def _jax_wrapped_single_sample(subkey):
+                sample_state = sim_state.replace(key=subkey)
+                sample_next_state = step_fn(sample_state, param_fluents, states, actions)
+                return sample_next_state.fls
             
-            total_loss = 0.0
-            for (name, value) in next_fluents.items():
-                preds = jnp.asarray(next_sim_state.fls[name], dtype=self.compiled.REAL)
-                targets = jnp.asarray(value, dtype=self.compiled.REAL)[jnp.newaxis, ...]
-                prange = self.rddl.variable_ranges[name]
-                if prange == 'bool':
-                    loss = self.bool_fluent_loss(targets, preds)
-                elif prange == 'real':
-                    loss = self.real_fluent_loss(targets, preds)
-                else:
-                    loss = self.int_fluent_loss(targets, preds)
-                total_loss += jnp.mean(loss) / len(next_fluents)
-            return total_loss
+            pred_samples = jax.vmap(_jax_wrapped_single_sample)(sample_keys)
+            return self.score_model.compute_loss(next_fluents, pred_samples)
         return jax.jit(_jax_wrapped_batched_model_loss)
     
     def _jax_init(self, project_fn):
@@ -316,8 +304,8 @@ class JaxModelLearner:
         project_fn = jax.jit(_jax_wrapped_project_params)
 
         # gradient descent update
-        def _jax_wrapped_params_update(
-                sim_state, params, states, actions, next_fluents, opt_state):
+        def _jax_wrapped_params_update(sim_state, params, states, actions, next_fluents, 
+                                       opt_state):
             loss_val, grad = jax.value_and_grad(loss_fn, argnums=1)(
                 sim_state, params, states, actions, next_fluents)
             updates, opt_state = self.optimizer.update(grad, opt_state)
@@ -554,11 +542,12 @@ if __name__ == '__main__':
                                         'GRAVITY': (0., 20.)
                                     }, 
                                     batch_size_train=32, 
-                                    optimizer_kwargs = {'learning_rate': 0.001})
-    for cb in model_learner.optimize_generator(data_iterator, epochs=10000):
-        if cb['iteration'] % 100 == 0:
+                                    optimizer_kwargs = {'learning_rate': 0.003})
+    for cb in model_learner.optimize_generator(data_iterator, epochs=100000,
+                                               guess={'GRAVITY': np.array(1.0)}, print_progress=True):
+        if cb['iteration'] % 2000 == 0:
             print(cb['param_fluents'])
-
+        
     # planning in the trained model
     model = model_learner.learned_model(cb['param_fluents'])
     abs_path = os.path.dirname(os.path.abspath(__file__))        
