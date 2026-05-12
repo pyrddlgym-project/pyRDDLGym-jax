@@ -2,6 +2,7 @@ from collections import deque
 from copy import deepcopy
 from enum import Enum
 from functools import partial
+from itertools import chain, islice
 import sys
 import time
 from tqdm import tqdm
@@ -39,10 +40,45 @@ Callback = Dict[str, Any]
 class JaxScoreModel:
     '''Score-style residual loss helper used by the learner.'''
 
+    def __init__(self, norm_eps: float=1e-8) -> None:
+        self.norm_eps = norm_eps
+        self.norm_stats = None
+
+    def _fit_norm_stats(self, batches):
+
+        # fit sufficient stats for the next states from the provided batches of transitions
+        totals, totals_sq, counts = {}, {}, {}
+        for (_, _, next_states) in batches:
+            for (name, value) in next_states.items():
+                value = np.asarray(value, dtype=np.float32)
+                if value.ndim == 0:
+                    value = value.reshape((1,))
+                totals[name] = totals.get(name, 0) + np.sum(value, axis=0)
+                totals_sq[name] = totals_sq.get(name, 0) + np.sum(np.square(value), axis=0)
+                counts[name] = counts.get(name, 0) + value.shape[0]
+
+        # compute mean and std from the sufficient stats
+        stats = {}
+        for name in totals:
+            count = max(1, counts[name])
+            mean = totals[name] / count
+            var = np.maximum(totals_sq[name] / count - np.square(mean), 0.0)
+            std = np.sqrt(var)
+            stats[name] = (mean, std)
+        self.norm_stats = stats
+    
+    def _normalize(self, name, value):
+        if self.norm_stats is None or name not in self.norm_stats:
+            return value
+        else:
+            mean, std = self.norm_stats[name]
+            return (value - mean) / (std + self.norm_eps)
+
     def _flatten_targets(self, values, keys):
         parts = []
         for key in keys:
             value = jnp.asarray(values[key])
+            value = self._normalize(key, value)
             parts.append(jnp.reshape(value, (value.shape[0], -1)))
         return jnp.concatenate(parts, axis=-1)
 
@@ -50,6 +86,7 @@ class JaxScoreModel:
         parts = []
         for key in keys:
             value = jnp.asarray(values[key])
+            value = self._normalize(key, value)
             if value.ndim < 2 or value.shape[1] != batch_size:
                 raise ValueError(
                     f'unexpected prediction shape for {key}: {value.shape} ' 
@@ -66,13 +103,8 @@ class JaxScoreModel:
         # energy score E||X - y||^2 - 0.5 E||X - X'||^2
         diff_to_target = pred_samples - jnp.expand_dims(target_vec, axis=0)
         first_term = jnp.mean(jnp.sum(jnp.square(diff_to_target), axis=-1))
-
-        if pred_samples.shape[0] > 1:
-            pw = pred_samples[:, jnp.newaxis, :, :] - pred_samples[jnp.newaxis, :, :, :]
-            second_term = 0.5 * jnp.mean(jnp.sum(jnp.square(pw), axis=-1))
-        else:
-            second_term = 0.0
-
+        pw = pred_samples[:, jnp.newaxis, :, :] - pred_samples[jnp.newaxis, :, :, :]
+        second_term = 0.5 * jnp.mean(jnp.sum(jnp.square(pw), axis=-1))
         return first_term - second_term
 
 
@@ -112,6 +144,7 @@ class JaxModelLearner:
                  optimizer_kwargs: Optional[Kwargs]=None,
                  initializer: initializers.Initializer = initializers.normal(),
                  wrap_non_bool: bool=False,
+                 normalize_next_states: bool=True,
                  compiler: type=JaxRDDLCompilerWithGrad,
                  compiler_kwargs: Optional[Kwargs]=None,
                  model_params_reduction: Callable=lambda x: x[0]) -> None:
@@ -120,8 +153,7 @@ class JaxModelLearner:
         
         :param rddl: the RDDL domain to learn
         :param param_ranges: the ranges of all learnable non-fluents
-        :param batch_size_train: how many transitions to compute per optimization 
-        step
+        :param batch_size_train: how many transitions to compute per optimization step
         :param samples_per_datapoint: how many random samples to produce from the step
         function per data point during training
         :param optimizer: a factory for an optax SGD algorithm
@@ -144,6 +176,7 @@ class JaxModelLearner:
         self.optimizer_kwargs = optimizer_kwargs
         self.initializer = initializer
         self.wrap_non_bool = wrap_non_bool
+        self.normalize_next_states = normalize_next_states
         self.model_params_reduction = model_params_reduction
 
         # validate param_ranges
@@ -259,13 +292,12 @@ class JaxModelLearner:
             param_fluents = map_fn(params)
 
             # draw independent transition samples for energy score
-            sample_keys = random.split(sim_state.key, num=self.samples_per_datapoint)
-
             def _jax_wrapped_single_sample(subkey):
                 sample_state = sim_state.replace(key=subkey)
                 sample_next_state = step_fn(sample_state, param_fluents, states, actions)
                 return sample_next_state.fls
             
+            sample_keys = random.split(sim_state.key, num=self.samples_per_datapoint)
             pred_samples = jax.vmap(_jax_wrapped_single_sample)(sample_keys)
             return self.score_model.compute_loss(next_fluents, pred_samples)
         return jax.jit(_jax_wrapped_batched_model_loss)
@@ -329,7 +361,7 @@ class JaxModelLearner:
         for (state, next_state) in self.rddl.next_state.items():
             init_fls[next_state] = init_fls[state]
         return init_fls, init_nfls
-    
+
     # ===========================================================================
     # ESTIMATE API
     # ===========================================================================
@@ -347,6 +379,7 @@ class JaxModelLearner:
         :param guess: initial non-fluent parameters: if None will use the initializer
         specified in this instance   
         :param print_progress: whether to print the progress bar during training
+        :param norm_estimation_batches: number of batches to use for normalization
         '''
         it = self.optimize_generator(*args, **kwargs)
         
@@ -366,7 +399,8 @@ class JaxModelLearner:
                            epochs: int=999999,
                            train_seconds: float=120.,
                            guess: Optional[Params]=None,
-                           print_progress: bool=True) -> Generator[Callback, None, None]:
+                           print_progress: bool=True,
+                           norm_estimation_batches: int=32) -> Generator[Callback, None, None]:
         '''Return a generator for estimating the unknown parameters from the given data set. 
         Generator can be iterated over to lazily estimate the parameters, yielding
         a dictionary of intermediate computations.
@@ -380,6 +414,7 @@ class JaxModelLearner:
         :param guess: initial non-fluent parameters: if None will use the initializer
         specified in this instance
         :param print_progress: whether to print the progress bar during training
+        :param norm_estimation_batches: number of batches to use for normalization
         '''
         start_time = time.time()
         elapsed_outside_loop = 0
@@ -402,6 +437,12 @@ class JaxModelLearner:
                 None, total=100, bar_format='{l_bar}{bar}| {elapsed} {postfix}')
         else:
             progress_bar = None
+
+        # infer normalization from the provided dataset stream
+        if self.normalize_next_states:
+            norm_batches = list(islice(data, norm_estimation_batches))
+            self.score_model._fit_norm_stats(norm_batches)
+            data = chain(norm_batches, data)
 
         # main training loop
         for (it, (states, actions, next_states)) in enumerate(data):
@@ -429,8 +470,7 @@ class JaxModelLearner:
                 status = JaxLearnerStatus.ITER_BUDGET_REACHED
             
             # build a callback
-            progress_percent = 100 * min(
-                1, max(0, elapsed / train_seconds, it / (epochs - 1)))
+            progress = 100 * min(1, max(0, elapsed / train_seconds, it / (epochs - 1)))
             callback = {
                 'status': status,
                 'iteration': it,
@@ -438,7 +478,7 @@ class JaxModelLearner:
                 'params': params,
                 'param_fluents': param_fluents,
                 'key': sim_state.key,
-                'progress': progress_percent
+                'progress': progress
             }
             
             # update progress
@@ -447,7 +487,7 @@ class JaxModelLearner:
                     f'{it:7} it / {loss:13.8f} train / {status.value} status', refresh=False)
                 progress_bar.set_postfix_str(
                     f'{(it + 1) / (elapsed + 1e-6):.2f}it/s', refresh=False)
-                progress_bar.update(progress_percent - progress_bar.n)
+                progress_bar.update(progress - progress_bar.n)
             
             # yield the callback
             start_time_outside = time.time()
@@ -497,7 +537,8 @@ def generate_rollouts(env, policy, episodes=10, max_steps=100):
                 states[key].append(obs[key])
                 next_states[key].append(next_obs[key])
             for key in actions:
-                actions[key].append(action[key])
+                if key in action:
+                    actions[key].append(action[key])
             obs = next_obs
             done = term or trunc
             steps += 1
@@ -531,20 +572,19 @@ if __name__ == '__main__':
     from pyRDDLGym_jax.core.planner import load_config, JaxBackpropPlanner, JaxOfflineController
     
     # make some data
-    policy = lambda obs: {'force': 5 if obs['ang-pos'] + obs['ang-vel'] > 0 else -5}
-    env = pyRDDLGym.make('CartPole_Continuous_gym', '0', vectorized=True)
-    states, actions, next_states = generate_rollouts(env, policy, episodes=10, max_steps=100)
+    policy = lambda obs: {}
+    env = pyRDDLGym.make('Wildfire_MDP_ippc2014', '1', vectorized=True)
+    states, actions, next_states = generate_rollouts(env, policy, episodes=40, max_steps=40)
     data_iterator = batch_sampler(states, actions, next_states, batch_size=32)
 
     # train it
     model_learner = JaxModelLearner(rddl=env.model, 
                                     param_ranges={
-                                        'GRAVITY': (0., 20.)
+                                        'NEIGHBOR': (None, None)
                                     }, 
                                     batch_size_train=32, 
-                                    optimizer_kwargs = {'learning_rate': 0.003})
-    for cb in model_learner.optimize_generator(data_iterator, epochs=100000,
-                                               guess={'GRAVITY': np.array(1.0)}, print_progress=True):
+                                    optimizer_kwargs = {'learning_rate': 0.001})
+    for cb in model_learner.optimize_generator(data_iterator, epochs=20000, print_progress=True):
         if cb['iteration'] % 2000 == 0:
             print(cb['param_fluents'])
         
