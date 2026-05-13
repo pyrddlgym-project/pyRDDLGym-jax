@@ -1,12 +1,13 @@
 from collections import deque
 from copy import deepcopy
 from enum import Enum
+import gymnasium as gym
 from functools import partial
 from itertools import chain, islice
 import sys
 import time
 from tqdm import tqdm
-from typing import Any, Callable, Dict, Generator, Iterable, Optional, Tuple
+from typing import Any, Callable, Dict, Generator, Iterable, Optional, Tuple, Union
 
 import jax
 import jax.nn.initializers as initializers
@@ -21,10 +22,12 @@ from pyRDDLGym_jax.core.compiler import JaxRDDLSimState
 from pyRDDLGym_jax.core.logic import JaxRDDLCompilerWithGrad
 from pyRDDLGym_jax.core.planner import _jax_bound_action
 
+Floating = Union[np.ndarray, float]
 Kwargs = Dict[str, Any]
 State = Dict[str, np.ndarray]
 Action = Dict[str, np.ndarray]
-DataStream = Iterable[Tuple[State, Action, State]]
+Transition = Tuple[State, Action, State]
+DataStream = Iterable[Transition]
 Params = Dict[str, np.ndarray]
 Callback = Dict[str, Any]
 
@@ -58,9 +61,10 @@ class JaxModelLearner:
     gradient descent.'''
 
     def __init__(self, rddl: RDDLLiftedModel, 
-                 param_ranges: Dict[str, Tuple[Optional[np.ndarray], Optional[np.ndarray]]],
+                 param_ranges: Dict[str, Tuple[Optional[Floating], Optional[Floating]]],
                  batch_size_train: int=32,
                  samples_per_datapoint: int=16,
+                 antithetic_sampling: bool=True,
                  optimizer: Callable[..., optax.GradientTransformation]=optax.rmsprop,
                  optimizer_kwargs: Optional[Kwargs]=None,
                  initializer: initializers.Initializer = initializers.normal(),
@@ -77,6 +81,8 @@ class JaxModelLearner:
         :param batch_size_train: how many transitions to compute per optimization step
         :param samples_per_datapoint: how many random samples to produce from the step
         function per data point during training
+        :param antithetic_sampling: whether to pair Monte Carlo samples with
+        deterministic key-space mirrors to reduce gradient variance
         :param optimizer: a factory for an optax SGD algorithm
         :param optimizer_kwargs: a dictionary of parameters to pass to the SGD
         factory (e.g. which parameters are controllable externally)
@@ -92,6 +98,7 @@ class JaxModelLearner:
         self.param_ranges = param_ranges.copy()
         self.batch_size_train = batch_size_train
         self.samples_per_datapoint = samples_per_datapoint
+        self.antithetic_sampling = antithetic_sampling
         if optimizer_kwargs is None:
             optimizer_kwargs = {'learning_rate': 0.001}
         self.optimizer_kwargs = optimizer_kwargs
@@ -99,6 +106,7 @@ class JaxModelLearner:
         self.wrap_non_bool = wrap_non_bool
         self.normalize_next_states = normalize_next_states
         self.model_params_reduction = model_params_reduction
+        self.state_keys = tuple(sorted(rddl.state_fluents))
 
         # validate param_ranges
         for (name, values) in param_ranges.items():
@@ -130,42 +138,7 @@ class JaxModelLearner:
         self.loss_fn = self._jax_loss(map_fn=self.map_fn, step_fn=self.step_fn)
         self.update_fn, self.project_fn = self._jax_update(loss_fn=self.loss_fn)
         self.init_fn = self._jax_init(project_fn=self.project_fn)
-        self.norm_stats = None
     
-    # ===========================================================================
-    # DATA NORMALIZATION SUBROUTINES
-    # ===========================================================================
-
-    def _fit_norm_stats(self, batches):
-
-        # fit sufficient stats for the next states from the provided batches of transitions
-        totals, totals_sq, counts = {}, {}, {}
-        for (_, _, next_states) in batches:
-            for (name, value) in next_states.items():
-                value = np.asarray(value, dtype=np.float32)
-                if value.ndim == 0:
-                    value = value.reshape((1,))
-                totals[name] = totals.get(name, 0) + np.sum(value, axis=0)
-                totals_sq[name] = totals_sq.get(name, 0) + np.sum(np.square(value), axis=0)
-                counts[name] = counts.get(name, 0) + value.shape[0]
-
-        # compute mean and std from the sufficient stats
-        stats = {}
-        for name in totals:
-            count = max(1, counts[name])
-            mean = totals[name] / count
-            var = np.maximum(totals_sq[name] / count - np.square(mean), 0.0)
-            std = np.sqrt(var)
-            stats[name] = (mean, std)
-        self.norm_stats = stats
-    
-    def _normalize(self, name, value, eps=1e-10):
-        if self.norm_stats is None or name not in self.norm_stats:
-            return value
-        else:
-            mean, std = self.norm_stats[name]
-            return (value - mean) / (std + eps)
-
     # ===========================================================================
     # RDDL COMPILATION SUBROUTINES
     # ===========================================================================
@@ -240,56 +213,84 @@ class JaxModelLearner:
             return result
         return jax.jit(_jax_wrapped_params_to_fluents)
 
+    def _fit_norm_stats(self, batches):
+
+        # fit sufficient stats for the next states from the provided batches of transitions
+        totals, totals_sq, counts = {}, {}, {}
+        for (_, _, next_states) in batches:
+            for (name, value) in next_states.items():
+                value = np.asarray(value, dtype=np.float32)
+                if value.ndim == 0:
+                    value = value.reshape((1,))
+                totals[name] = totals.get(name, 0) + np.sum(value, axis=0)
+                totals_sq[name] = totals_sq.get(name, 0) + np.sum(np.square(value), axis=0)
+                counts[name] = counts.get(name, 0) + value.shape[0]
+
+        # compute mean and std from the sufficient stats
+        stats = {}
+        for name in totals:
+            count = max(1, counts[name])
+            mean = totals[name] / count
+            var = np.maximum(totals_sq[name] / count - np.square(mean), 0.0)
+            std = np.sqrt(var)
+            stats[name] = (mean, std)
+        return stats
+
     # ===========================================================================
     # LOSS CALCULATION AND TRAINING SUBROUTINES
     # ===========================================================================
 
-    def _flatten_targets(self, values, keys):
-        parts = []
-        for key in keys:
-            value = jnp.asarray(values[key])
-            value = self._normalize(key, value)
-            parts.append(jnp.reshape(value, (value.shape[0], -1)))
-        return jnp.concatenate(parts, axis=-1)
-
-    def _flatten_prediction_samples(self, values, keys, batch_size):
-        parts = []
-        for key in keys:
-            value = jnp.asarray(values[key])
-            value = self._normalize(key, value)
-            if value.ndim < 2 or value.shape[1] != batch_size:
-                raise ValueError(
-                    f'unexpected prediction shape for {key}: {value.shape} ' 
-                    f'(expected (S, {batch_size}, ...))')
-            parts.append(jnp.reshape(value, (value.shape[0], batch_size, -1)))
-        return jnp.concatenate(parts, axis=-1)
-
-    def _score_matching_loss(self, next_states, predicted_next_states):
-        next_keys = tuple(sorted(next_states))
-        target_vec = self._flatten_targets(next_states, next_keys)
-        pred_samples = self._flatten_prediction_samples(
-            predicted_next_states, next_keys, batch_size=target_vec.shape[0])
-
-        # energy score E||X - y||^2 - 0.5 E||X - X'||^2
-        diff_to_target = pred_samples - jnp.expand_dims(target_vec, axis=0)
-        first_term = jnp.mean(jnp.sum(jnp.square(diff_to_target), axis=-1))
-        pw = pred_samples[:, jnp.newaxis, :, :] - pred_samples[jnp.newaxis, :, :, :]
-        second_term = 0.5 * jnp.mean(jnp.sum(jnp.square(pw), axis=-1))
-        return first_term - second_term
-
     def _jax_loss(self, map_fn, step_fn):
-        def _jax_wrapped_batched_model_loss(sim_state, params, states, actions, next_fluents):
-            param_fluents = map_fn(params)
 
-            # draw independent transition samples for energy score
+        # flatten the samples into a single vector
+        def _jax_wrapped_flatten_and_norm(values, is_target, norm_stats):
+            parts = []
+            for key in self.state_keys:
+                value = jnp.asarray(values[key])
+                if norm_stats is not None:
+                    mean, std = norm_stats[key]
+                    value = (value - mean) / (std + 1e-10)
+                if is_target:
+                    value = jnp.reshape(value, (value.shape[0], -1))
+                else:
+                    value = jnp.reshape(value, (value.shape[0], value.shape[1], -1))
+                parts.append(value)
+            return jnp.concatenate(parts, axis=-1)
+        
+        # energy score E||X - y||^2 - 0.5 E||X - X'||^2
+        def _jax_wrapped_energy_score_loss(next_states, pred_next_states, norm_stats):
+            target_vec = _jax_wrapped_flatten_and_norm(next_states, True, norm_stats)
+            pred_vec = _jax_wrapped_flatten_and_norm(pred_next_states, False, norm_stats)
+            diff_to_target = pred_vec - jnp.expand_dims(target_vec, axis=0)
+            first_term = jnp.mean(jnp.sum(jnp.square(diff_to_target), axis=-1))
+            pw = pred_vec[:, jnp.newaxis, :, :] - pred_vec[jnp.newaxis, :, :, :]
+            second_term = 0.5 * jnp.mean(jnp.sum(jnp.square(pw), axis=-1))
+            return first_term - second_term
+
+        # draw independent transition samples for energy score
+        def _jax_wrapped_batched_model_loss(sim_state, params, states, actions, 
+                                            next_fluents, norm_stats):
+            param_fluents = map_fn(params)
             def _jax_wrapped_single_sample(subkey):
                 sample_state = sim_state.replace(key=subkey)
                 sample_next_state = step_fn(sample_state, param_fluents, states, actions)
                 return sample_next_state.fls
-            
-            sample_keys = random.split(sim_state.key, num=self.samples_per_datapoint)
+
+            # For energy score, we use at least two samples and optionally pair
+            # each sampled key with a deterministic mirror key.
+            num_samples = max(2, self.samples_per_datapoint)
+            if self.antithetic_sampling:
+                primary_count = (num_samples + 1) // 2
+                primary_keys = random.split(sim_state.key, num=primary_count)
+                mirror_mask = jnp.asarray([0xFFFFFFFF, 0x9E3779B9], dtype=primary_keys.dtype)
+                mirror_keys = jax.vmap(lambda k: jnp.bitwise_xor(k, mirror_mask))(primary_keys)
+                sample_keys = jnp.concatenate([primary_keys, mirror_keys], axis=0)[:num_samples]
+            else:
+                sample_keys = random.split(sim_state.key, num=num_samples)
+
             pred_samples = jax.vmap(_jax_wrapped_single_sample)(sample_keys)
-            return self._score_matching_loss(next_fluents, pred_samples)
+            loss = _jax_wrapped_energy_score_loss(next_fluents, pred_samples, norm_stats)
+            return loss
         return jax.jit(_jax_wrapped_batched_model_loss)
     
     def _jax_init(self, project_fn):
@@ -327,9 +328,9 @@ class JaxModelLearner:
 
         # gradient descent update
         def _jax_wrapped_params_update(sim_state, params, states, actions, next_fluents, 
-                                       opt_state):
+                                       norm_stats, opt_state):
             loss_val, grad = jax.value_and_grad(loss_fn, argnums=1)(
-                sim_state, params, states, actions, next_fluents)
+                sim_state, params, states, actions, next_fluents, norm_stats)
             updates, opt_state = self.optimizer.update(grad, opt_state)
             params = optax.apply_updates(params, updates)
             params = _jax_wrapped_project_params(params)
@@ -339,6 +340,10 @@ class JaxModelLearner:
 
         return update_fn, project_fn
     
+    # ===========================================================================
+    # ESTIMATE API
+    # ===========================================================================
+
     def _batched_init_subs(self): 
         init_fls, init_nfls = {}, {}
         for (name, value) in self.compiled.init_values.items():
@@ -351,10 +356,6 @@ class JaxModelLearner:
         for (state, next_state) in self.rddl.next_state.items():
             init_fls[next_state] = init_fls[state]
         return init_fls, init_nfls
-
-    # ===========================================================================
-    # ESTIMATE API
-    # ===========================================================================
 
     def optimize(self, *args, **kwargs) -> Optional[Callback]:
         '''Estimate the unknown parameters from the given data set. 
@@ -431,8 +432,10 @@ class JaxModelLearner:
         # infer normalization from the provided dataset stream
         if self.normalize_next_states:
             norm_batches = list(islice(data, norm_estimation_batches))
-            self._fit_norm_stats(norm_batches)
+            norm_stats = self._fit_norm_stats(norm_batches)
             data = chain(norm_batches, data)
+        else:
+            norm_stats = None
 
         # main training loop
         for (it, (states, actions, next_states)) in enumerate(data):
@@ -442,7 +445,7 @@ class JaxModelLearner:
             key, subkey = random.split(key)
             sim_state = sim_state.replace(key=subkey)
             opt_state, params, loss, zero_grads = self.update_fn(
-                sim_state, params, states, actions, next_states, opt_state)
+                sim_state, params, states, actions, next_states, norm_stats, opt_state)
             
             # extract non-fluent values from the trainable parameters
             param_fluents = self.map_fn(params)
@@ -509,8 +512,23 @@ class JaxModelLearner:
         return model
 
 
-def generate_rollouts(env, policy, episodes=10, max_steps=100):
-    '''Generates rollouts from the given environment and policy.'''
+# ***********************************************************************
+# DATA GENERATION HELPERS
+#
+# - rollout generation
+# - batched sampling
+# 
+# ***********************************************************************
+
+def generate_rollouts(env: gym.Env, policy: Callable, episodes: int, max_steps: int
+                      ) -> Transition:
+    '''Generates rollouts from the given environment and policy.
+    
+    :param env: the environment to generate rollouts from
+    :param policy: a function that takes in an observation and returns an action
+    :param episodes: how many episodes to generate
+    :param max_steps: the maximum number of steps per episode
+    '''
     model = env.model
     states = {k: [] for k in model.state_fluents}
     actions = {k: [] for k in model.action_fluents}
@@ -532,6 +550,7 @@ def generate_rollouts(env, policy, episodes=10, max_steps=100):
             done = term or trunc
             steps += 1
     
+    # reshape the data into arrays of shape (num_transitions, fluent_size)
     state_shapes = {k: (-1, *np.shape(v)) for k, v in model.state_fluents.items()}
     action_shapes = {k: (-1, *np.shape(v)) for k, v in model.action_fluents.items()}
     states = {k: np.reshape(v, state_shapes[k]) for k, v in states.items()}
@@ -540,8 +559,15 @@ def generate_rollouts(env, policy, episodes=10, max_steps=100):
     return states, actions, next_states
 
 
-def batch_sampler(states, actions, next_states, batch_size=32):
-    '''Yields batches of transitions from the given states, actions, and next_states.'''
+def batch_sampler(states: State, actions: Action, next_states: State, batch_size: int=32
+                  ) -> Generator[Transition, None, None]:
+    '''Yields batches of transitions from the given states, actions, and next_states.
+    
+    :param states: a dictionary mapping state fluent names to numpy arrays
+    :param actions: a dictionary mapping action fluent names to numpy arrays
+    :param next_states: a dictionary mapping state fluent names to numpy arrays
+    :param batch_size: how many transitions to include in each batch
+    '''
     num_transitions = len(next(iter(states.values())))
     indices = np.arange(num_transitions)
     while True:
@@ -563,8 +589,8 @@ if __name__ == '__main__':
     # make some data
     policy = lambda obs: {'release': np.random.uniform(0.0, 20., size=(3,))}
     env = pyRDDLGym.make('Reservoir_Continuous', '0', vectorized=True)
-    states, actions, next_states = generate_rollouts(env, policy, episodes=100, max_steps=40)
-    data_iterator = batch_sampler(states, actions, next_states, batch_size=32)
+    transitions = generate_rollouts(env, policy, episodes=100, max_steps=40)
+    data_iterator = batch_sampler(*transitions, batch_size=32)
 
     # train it
     model_learner = JaxModelLearner(rddl=env.model, 
@@ -579,11 +605,10 @@ if __name__ == '__main__':
         
     # planning in the trained model
     model = model_learner.learned_model(cb['param_fluents'])
-    abs_path = os.path.dirname(os.path.abspath(__file__))        
-    config_path = os.path.join(
-        os.path.dirname(abs_path), 'examples', 'configs', 'default_drp.cfg') 
+    abs_path = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))   
+    config_path = os.path.join(abs_path, 'examples', 'configs', 'default_drp.cfg') 
     planner_args, _, train_args = load_config(config_path)
-    planner = JaxBackpropPlanner(rddl=model, **planner_args)
+    planner = JaxBackpropPlanner(model, **planner_args)
     controller = JaxOfflineController(planner, **train_args)
 
     # evaluation of the plan
