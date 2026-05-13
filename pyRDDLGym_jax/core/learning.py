@@ -245,6 +245,7 @@ class JaxModelLearner:
     # ===========================================================================
 
     def _jax_loss(self, map_fn, step_fn):
+        num_samples = max(2, self.samples_per_datapoint)
 
         # flatten the samples into a single vector
         def _jax_wrapped_flatten_and_norm(values, is_target, norm_stats):
@@ -271,18 +272,21 @@ class JaxModelLearner:
             second_term = 0.5 * jnp.mean(jnp.sum(jnp.square(pw), axis=-1))
             return first_term - second_term
 
+        # helper to produce antithetic keys for variance reduction
+        def _jax_wrapped_antithetic_keys(key, num_samples):
+            primary_keys = random.split(key, num=(num_samples + 1) // 2)
+            mirror_mask = jnp.asarray([0xFFFFFFFF, 0x9E3779B9], dtype=primary_keys.dtype)
+            mirror_keys = jax.vmap(lambda k: jnp.bitwise_xor(k, mirror_mask))(primary_keys)
+            sample_keys = jnp.concatenate([primary_keys, mirror_keys], axis=0)[:num_samples]
+            return sample_keys
+        
         # draw independent transition samples for energy score
         def _jax_wrapped_batched_model_loss(sim_state, params, states, actions, 
                                             next_fluents, norm_stats):
             
             # get keys for antithetic sampling or regular parallel sampling
-            num_samples = max(2, self.samples_per_datapoint)
             if self.antithetic_sampling:
-                primary_count = (num_samples + 1) // 2
-                primary_keys = random.split(sim_state.key, num=primary_count)
-                mirror_mask = jnp.asarray([0xFFFFFFFF, 0x9E3779B9], dtype=primary_keys.dtype)
-                mirror_keys = jax.vmap(lambda k: jnp.bitwise_xor(k, mirror_mask))(primary_keys)
-                sample_keys = jnp.concatenate([primary_keys, mirror_keys], axis=0)[:num_samples]
+                sample_keys = _jax_wrapped_antithetic_keys(sim_state.key, num_samples)
             else:
                 sample_keys = random.split(sim_state.key, num=num_samples)
 
@@ -332,24 +336,22 @@ class JaxModelLearner:
                 return new_params
         project_fn = jax.jit(_jax_wrapped_project_params)
 
+        # gradient normalization
+        def _jax_wrapped_normalize_grad(grad, eps=1e-10):
+            grad_normalized = {}
+            for (key, g) in grad.items():
+                g_flat = jnp.reshape(g, (-1,))
+                g_norm = jnp.max(jnp.abs(g_flat))
+                grad_normalized[key] = g / (g_norm + eps)
+            return grad_normalized
+
         # gradient descent update
         def _jax_wrapped_params_update(sim_state, params, states, actions, next_fluents, 
                                        norm_stats, opt_state):
-            
-            # calculate loss and gradient
             loss_val, grad = jax.value_and_grad(loss_fn, argnums=1)(
                 sim_state, params, states, actions, next_fluents, norm_stats)
-            
-            # normalize gradients per parameter to balance learning across coordinates
             if self.normalize_grad:
-                grad_normalized = {}
-                for (key, g) in grad.items():
-                    g_flat = jnp.reshape(g, (-1,))
-                    g_norm = jnp.max(jnp.abs(g_flat)) + 1e-10
-                    grad_normalized[key] = g / (g_norm + 1e-10)
-                grad = grad_normalized
-            
-            # proceed with regular gradient update
+                grad = _jax_wrapped_normalize_grad(grad)
             updates, opt_state = self.optimizer.update(grad, opt_state)
             params = optax.apply_updates(params, updates)
             params = _jax_wrapped_project_params(params)
@@ -617,10 +619,10 @@ if __name__ == '__main__':
                                         'RAIN_VAR': (0., 10.)
                                     }, 
                                     batch_size_train=32, 
-                                    optimizer_kwargs = {'learning_rate': 0.0003})
+                                    optimizer_kwargs = {'learning_rate': 0.001})
     for cb in model_learner.optimize_generator(data_iterator, epochs=50000, print_progress=True,
                                                guess={'RAIN_VAR': np.random.uniform(0., 10., size=(3,))}):
-        if cb['iteration'] % 2000 == 0:
+        if cb['iteration'] % 500 == 0:
             print(cb['param_fluents'])
         
     # planning in the trained model
