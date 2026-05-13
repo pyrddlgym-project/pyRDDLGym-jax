@@ -70,6 +70,7 @@ class JaxModelLearner:
                  initializer: initializers.Initializer = initializers.normal(),
                  wrap_non_bool: bool=False,
                  normalize_next_states: bool=True,
+                 normalize_grad: bool=True,
                  compiler: type=JaxRDDLCompilerWithGrad,
                  compiler_kwargs: Optional[Kwargs]=None,
                  model_params_reduction: Callable=lambda x: x[0]) -> None:
@@ -89,6 +90,8 @@ class JaxModelLearner:
         :param initializer: how to initialize non-fluents
         :param wrap_non_bool: whether to wrap non-boolean trainable parameters to satisfy
         required ranges as specified in param_ranges (use a projected gradient otherwise)
+        :param normalize_grad: whether to normalize gradients per parameter to balance
+        learning across multi-dimensional parameters (e.g., per-reservoir RAIN_VAR)
         :param compiler: compiler instance to use for planning
         :param compiler_kwargs: compiler instances kwargs for initialization
         :param model_params_reduction: how to aggregate updated model_params across runs
@@ -99,6 +102,7 @@ class JaxModelLearner:
         self.batch_size_train = batch_size_train
         self.samples_per_datapoint = samples_per_datapoint
         self.antithetic_sampling = antithetic_sampling
+        self.normalize_grad = normalize_grad
         if optimizer_kwargs is None:
             optimizer_kwargs = {'learning_rate': 0.001}
         self.optimizer_kwargs = optimizer_kwargs
@@ -270,14 +274,8 @@ class JaxModelLearner:
         # draw independent transition samples for energy score
         def _jax_wrapped_batched_model_loss(sim_state, params, states, actions, 
                                             next_fluents, norm_stats):
-            param_fluents = map_fn(params)
-            def _jax_wrapped_single_sample(subkey):
-                sample_state = sim_state.replace(key=subkey)
-                sample_next_state = step_fn(sample_state, param_fluents, states, actions)
-                return sample_next_state.fls
-
-            # For energy score, we use at least two samples and optionally pair
-            # each sampled key with a deterministic mirror key.
+            
+            # get keys for antithetic sampling or regular parallel sampling
             num_samples = max(2, self.samples_per_datapoint)
             if self.antithetic_sampling:
                 primary_count = (num_samples + 1) // 2
@@ -288,7 +286,15 @@ class JaxModelLearner:
             else:
                 sample_keys = random.split(sim_state.key, num=num_samples)
 
+            # batched parallel sampling
+            param_fluents = map_fn(params)
+            def _jax_wrapped_single_sample(subkey):
+                sample_state = sim_state.replace(key=subkey)
+                sample_next_state = step_fn(sample_state, param_fluents, states, actions)
+                return sample_next_state.fls
             pred_samples = jax.vmap(_jax_wrapped_single_sample)(sample_keys)
+
+            # evaluate loss
             loss = _jax_wrapped_energy_score_loss(next_fluents, pred_samples, norm_stats)
             return loss
         return jax.jit(_jax_wrapped_batched_model_loss)
@@ -318,19 +324,32 @@ class JaxModelLearner:
                 return params
             else:
                 new_params = {}
-                for (name, value) in params.items():
-                    if self.rddl.variable_ranges[name] == 'bool':
-                        new_params[name] = value
+                for (key, value) in params.items():
+                    if self.rddl.variable_ranges[key] == 'bool':
+                        new_params[key] = value
                     else:
-                        new_params[name] = jnp.clip(value, *self.param_ranges[name])
+                        new_params[key] = jnp.clip(value, *self.param_ranges[key])
                 return new_params
         project_fn = jax.jit(_jax_wrapped_project_params)
 
         # gradient descent update
         def _jax_wrapped_params_update(sim_state, params, states, actions, next_fluents, 
                                        norm_stats, opt_state):
+            
+            # calculate loss and gradient
             loss_val, grad = jax.value_and_grad(loss_fn, argnums=1)(
                 sim_state, params, states, actions, next_fluents, norm_stats)
+            
+            # normalize gradients per parameter to balance learning across coordinates
+            if self.normalize_grad:
+                grad_normalized = {}
+                for (key, g) in grad.items():
+                    g_flat = jnp.reshape(g, (-1,))
+                    g_norm = jnp.max(jnp.abs(g_flat)) + 1e-10
+                    grad_normalized[key] = g / (g_norm + 1e-10)
+                grad = grad_normalized
+            
+            # proceed with regular gradient update
             updates, opt_state = self.optimizer.update(grad, opt_state)
             params = optax.apply_updates(params, updates)
             params = _jax_wrapped_project_params(params)
@@ -599,7 +618,8 @@ if __name__ == '__main__':
                                     }, 
                                     batch_size_train=32, 
                                     optimizer_kwargs = {'learning_rate': 0.0003})
-    for cb in model_learner.optimize_generator(data_iterator, epochs=50000, print_progress=True):
+    for cb in model_learner.optimize_generator(data_iterator, epochs=50000, print_progress=True,
+                                               guess={'RAIN_VAR': np.random.uniform(0., 10., size=(3,))}):
         if cb['iteration'] % 2000 == 0:
             print(cb['param_fluents'])
         
