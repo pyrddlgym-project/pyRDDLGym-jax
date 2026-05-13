@@ -30,85 +30,6 @@ Callback = Dict[str, Any]
 
 
 # ***********************************************************************
-# SCORE-BASED MODEL LEARNER
-#
-# - denoising score matching for learning transition scores
-#
-# ***********************************************************************
-
-
-class JaxScoreModel:
-    '''Score-style residual loss helper used by the learner.'''
-
-    def __init__(self, norm_eps: float=1e-8) -> None:
-        self.norm_eps = norm_eps
-        self.norm_stats = None
-
-    def _fit_norm_stats(self, batches):
-
-        # fit sufficient stats for the next states from the provided batches of transitions
-        totals, totals_sq, counts = {}, {}, {}
-        for (_, _, next_states) in batches:
-            for (name, value) in next_states.items():
-                value = np.asarray(value, dtype=np.float32)
-                if value.ndim == 0:
-                    value = value.reshape((1,))
-                totals[name] = totals.get(name, 0) + np.sum(value, axis=0)
-                totals_sq[name] = totals_sq.get(name, 0) + np.sum(np.square(value), axis=0)
-                counts[name] = counts.get(name, 0) + value.shape[0]
-
-        # compute mean and std from the sufficient stats
-        stats = {}
-        for name in totals:
-            count = max(1, counts[name])
-            mean = totals[name] / count
-            var = np.maximum(totals_sq[name] / count - np.square(mean), 0.0)
-            std = np.sqrt(var)
-            stats[name] = (mean, std)
-        self.norm_stats = stats
-    
-    def _normalize(self, name, value):
-        if self.norm_stats is None or name not in self.norm_stats:
-            return value
-        else:
-            mean, std = self.norm_stats[name]
-            return (value - mean) / (std + self.norm_eps)
-
-    def _flatten_targets(self, values, keys):
-        parts = []
-        for key in keys:
-            value = jnp.asarray(values[key])
-            value = self._normalize(key, value)
-            parts.append(jnp.reshape(value, (value.shape[0], -1)))
-        return jnp.concatenate(parts, axis=-1)
-
-    def _flatten_prediction_samples(self, values, keys, batch_size):
-        parts = []
-        for key in keys:
-            value = jnp.asarray(values[key])
-            value = self._normalize(key, value)
-            if value.ndim < 2 or value.shape[1] != batch_size:
-                raise ValueError(
-                    f'unexpected prediction shape for {key}: {value.shape} ' 
-                    f'(expected (S, {batch_size}, ...))')
-            parts.append(jnp.reshape(value, (value.shape[0], batch_size, -1)))
-        return jnp.concatenate(parts, axis=-1)
-
-    def compute_loss(self, next_states: Any, predicted_next_states: Any) -> jnp.ndarray:
-        next_keys = tuple(sorted(next_states))
-        target_vec = self._flatten_targets(next_states, next_keys)
-        pred_samples = self._flatten_prediction_samples(
-            predicted_next_states, next_keys, batch_size=target_vec.shape[0])
-
-        # energy score E||X - y||^2 - 0.5 E||X - X'||^2
-        diff_to_target = pred_samples - jnp.expand_dims(target_vec, axis=0)
-        first_term = jnp.mean(jnp.sum(jnp.square(diff_to_target), axis=-1))
-        pw = pred_samples[:, jnp.newaxis, :, :] - pred_samples[jnp.newaxis, :, :, :]
-        second_term = 0.5 * jnp.mean(jnp.sum(jnp.square(pw), axis=-1))
-        return first_term - second_term
-
-
-# ***********************************************************************
 # ALL VERSIONS OF JAX MODEL LEARNER
 #
 # - gradient based model learning
@@ -205,16 +126,48 @@ class JaxModelLearner:
         self.step_fn = self._jax_compile_rddl()
         self.map_fn = self._jax_map()
 
-        # build the score model
-        self.score_model = JaxScoreModel()
-
         # build the loss and update functions
         self.loss_fn = self._jax_loss(map_fn=self.map_fn, step_fn=self.step_fn)
         self.update_fn, self.project_fn = self._jax_update(loss_fn=self.loss_fn)
         self.init_fn = self._jax_init(project_fn=self.project_fn)
+        self.norm_stats = None
     
     # ===========================================================================
-    # COMPILATION SUBROUTINES
+    # DATA NORMALIZATION SUBROUTINES
+    # ===========================================================================
+
+    def _fit_norm_stats(self, batches):
+
+        # fit sufficient stats for the next states from the provided batches of transitions
+        totals, totals_sq, counts = {}, {}, {}
+        for (_, _, next_states) in batches:
+            for (name, value) in next_states.items():
+                value = np.asarray(value, dtype=np.float32)
+                if value.ndim == 0:
+                    value = value.reshape((1,))
+                totals[name] = totals.get(name, 0) + np.sum(value, axis=0)
+                totals_sq[name] = totals_sq.get(name, 0) + np.sum(np.square(value), axis=0)
+                counts[name] = counts.get(name, 0) + value.shape[0]
+
+        # compute mean and std from the sufficient stats
+        stats = {}
+        for name in totals:
+            count = max(1, counts[name])
+            mean = totals[name] / count
+            var = np.maximum(totals_sq[name] / count - np.square(mean), 0.0)
+            std = np.sqrt(var)
+            stats[name] = (mean, std)
+        self.norm_stats = stats
+    
+    def _normalize(self, name, value, eps=1e-10):
+        if self.norm_stats is None or name not in self.norm_stats:
+            return value
+        else:
+            mean, std = self.norm_stats[name]
+            return (value - mean) / (std + eps)
+
+    # ===========================================================================
+    # RDDL COMPILATION SUBROUTINES
     # ===========================================================================
 
     def _jax_compile_rddl(self):
@@ -287,6 +240,43 @@ class JaxModelLearner:
             return result
         return jax.jit(_jax_wrapped_params_to_fluents)
 
+    # ===========================================================================
+    # LOSS CALCULATION AND TRAINING SUBROUTINES
+    # ===========================================================================
+
+    def _flatten_targets(self, values, keys):
+        parts = []
+        for key in keys:
+            value = jnp.asarray(values[key])
+            value = self._normalize(key, value)
+            parts.append(jnp.reshape(value, (value.shape[0], -1)))
+        return jnp.concatenate(parts, axis=-1)
+
+    def _flatten_prediction_samples(self, values, keys, batch_size):
+        parts = []
+        for key in keys:
+            value = jnp.asarray(values[key])
+            value = self._normalize(key, value)
+            if value.ndim < 2 or value.shape[1] != batch_size:
+                raise ValueError(
+                    f'unexpected prediction shape for {key}: {value.shape} ' 
+                    f'(expected (S, {batch_size}, ...))')
+            parts.append(jnp.reshape(value, (value.shape[0], batch_size, -1)))
+        return jnp.concatenate(parts, axis=-1)
+
+    def _score_matching_loss(self, next_states, predicted_next_states):
+        next_keys = tuple(sorted(next_states))
+        target_vec = self._flatten_targets(next_states, next_keys)
+        pred_samples = self._flatten_prediction_samples(
+            predicted_next_states, next_keys, batch_size=target_vec.shape[0])
+
+        # energy score E||X - y||^2 - 0.5 E||X - X'||^2
+        diff_to_target = pred_samples - jnp.expand_dims(target_vec, axis=0)
+        first_term = jnp.mean(jnp.sum(jnp.square(diff_to_target), axis=-1))
+        pw = pred_samples[:, jnp.newaxis, :, :] - pred_samples[jnp.newaxis, :, :, :]
+        second_term = 0.5 * jnp.mean(jnp.sum(jnp.square(pw), axis=-1))
+        return first_term - second_term
+
     def _jax_loss(self, map_fn, step_fn):
         def _jax_wrapped_batched_model_loss(sim_state, params, states, actions, next_fluents):
             param_fluents = map_fn(params)
@@ -299,7 +289,7 @@ class JaxModelLearner:
             
             sample_keys = random.split(sim_state.key, num=self.samples_per_datapoint)
             pred_samples = jax.vmap(_jax_wrapped_single_sample)(sample_keys)
-            return self.score_model.compute_loss(next_fluents, pred_samples)
+            return self._score_matching_loss(next_fluents, pred_samples)
         return jax.jit(_jax_wrapped_batched_model_loss)
     
     def _jax_init(self, project_fn):
@@ -441,7 +431,7 @@ class JaxModelLearner:
         # infer normalization from the provided dataset stream
         if self.normalize_next_states:
             norm_batches = list(islice(data, norm_estimation_batches))
-            self.score_model._fit_norm_stats(norm_batches)
+            self._fit_norm_stats(norm_batches)
             data = chain(norm_batches, data)
 
         # main training loop
@@ -573,7 +563,7 @@ if __name__ == '__main__':
     # make some data
     policy = lambda obs: {'release': np.random.uniform(0.0, 20., size=(3,))}
     env = pyRDDLGym.make('Reservoir_Continuous', '0', vectorized=True)
-    states, actions, next_states = generate_rollouts(env, policy, episodes=40, max_steps=100)
+    states, actions, next_states = generate_rollouts(env, policy, episodes=100, max_steps=40)
     data_iterator = batch_sampler(states, actions, next_states, batch_size=32)
 
     # train it
