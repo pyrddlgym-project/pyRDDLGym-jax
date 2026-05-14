@@ -56,7 +56,7 @@ class JaxLearnerStatus(Enum):
         return self.value >= 2
     
 
-class JaxModelLearner:
+class JaxNonFluentLearner:
     '''A class for data-driven estimation of unknown parameters in a given RDDL MDP using 
     gradient descent.'''
 
@@ -457,6 +457,7 @@ class JaxModelLearner:
             data = chain(norm_batches, data)
         else:
             norm_stats = None
+        self.norm_stats = norm_stats
 
         # main training loop
         for (it, (states, actions, next_states)) in enumerate(data):
@@ -532,6 +533,98 @@ class JaxModelLearner:
             model.non_fluents[name] = values
         return model
 
+    def posterior_laplace(self, data: DataStream,
+                          map_params: Params,
+                          key: Optional[random.PRNGKey]=None,
+                          beta: float=1.0,
+                          prior_precision: float=1e-6,
+                          damping: float=1e-6) -> Dict[str, Any]:
+        '''Approximates the posterior around MAP using a full-matrix Laplace method.
+        The objective is the generalized Bayes energy beta * sum_i L_i(theta) with
+        an isotropic Gaussian prior centered at MAP.
+
+        :param data: sequence of transition batches
+        :param map_params: MAP parameters from training (unmapped parameter space)
+        :param key: JAX PRNG key (derived from clock if not provided)
+        :param beta: inverse temperature scaling the loss contribution
+        :param prior_precision: isotropic Gaussian prior precision at MAP
+        :param damping: additional diagonal stabilization for numerical robustness
+        '''
+        if key is None:
+            key = random.PRNGKey(round(time.time() * 1000))
+
+        # stack all batches into (num_batches, batch_size_train, ...) arrays for lax.scan
+        batches = list(data)
+        if not batches:
+            raise ValueError('infer_posterior_laplace requires at least one batch.')
+        key, scan_key = random.split(key)
+        batch_keys = random.split(scan_key, len(batches))
+
+        # Initialize simulation state and flatten parameters
+        fls, nfls = self._batched_init_subs()
+        hyperparams = self.compiled.model_aux['params']
+        sim_state = JaxRDDLSimState(key=key, fls=fls, nfls=nfls, model_params=hyperparams)
+        flat_map, unravel_fn = jax.flatten_util.ravel_pytree(map_params)
+        
+        # Per-batch data objective at MAP with batch-specific stochastic key.
+        def single_batch_data_loss(theta_flat, state_key, batch_size, states, actions, next_states):
+            params = unravel_fn(theta_flat)
+            state_i = sim_state.replace(key=state_key)
+            loss = self.loss_fn(state_i, params, states, actions, next_states, self.norm_stats)
+            return beta * loss * batch_size
+
+        grad_fn = jax.jit(jax.grad(single_batch_data_loss, argnums=0))
+        hess_fn = jax.jit(jax.hessian(single_batch_data_loss, argnums=0))
+
+        dim = flat_map.size
+        grads = []
+        hess_accum = np.zeros((dim, dim), dtype=np.float64)
+        for i, (states, actions, next_states) in enumerate(batches):
+            batch_size = float(np.asarray(states[self.state_keys[0]]).shape[0])
+            grad_i = grad_fn(flat_map, batch_keys[i], batch_size, states, actions, next_states)
+            hess_i = hess_fn(flat_map, batch_keys[i], batch_size, states, actions, next_states)
+            grad_i = np.asarray(grad_i)
+            hess_i = np.asarray(hess_i)
+            grads.append(grad_i)
+            hess_accum += hess_i
+        
+        # compute the "outer product" of the gradients for the sandwich covariance
+        grads = np.stack(grads, axis=0)
+        grads_centered = grads - np.mean(grads, axis=0, keepdims=True)
+        score_outer = grads_centered.T @ grads_centered
+        
+        # Prior curvature is added once at MAP (mean centered at map_params).
+        hess_accum += prior_precision * np.eye(dim, dtype=hess_accum.dtype)
+        hess_accum = 0.5 * (hess_accum + hess_accum.T)
+
+        # eigendecomposition for the covariance and precision matrices
+        evals, evecs = np.linalg.eigh(hess_accum)
+        evals = np.maximum(evals, damping)
+        covariance = (evecs / evals) @ evecs.T
+
+        # sandwich covariance
+        cov_sandwich = covariance @ score_outer @ covariance
+        cov_sandwich = 0.5 * (cov_sandwich + cov_sandwich.T)
+        var_sandwich = np.maximum(np.diag(cov_sandwich), damping)
+        std_sandwich = np.sqrt(var_sandwich)
+        prec_sandwich_diag = 1.0 / var_sandwich
+        cov_eigs = 1.0 / evals
+        cov_cond = float(np.max(cov_eigs) / np.maximum(np.min(cov_eigs), damping))
+        ci95 = {
+            'lower': unravel_fn(jnp.asarray(flat_map - 1.96 * std_sandwich)),
+            'upper': unravel_fn(jnp.asarray(flat_map + 1.96 * std_sandwich))
+        }
+
+        posterior = {
+            'mean': map_params,
+            'covariance': cov_sandwich,
+            'covariance_eigs': jnp.asarray(cov_eigs),
+            'covariance_condition_number': cov_cond,
+            'std_diag': unravel_fn(jnp.asarray(std_sandwich)),
+            'credible_interval_95': ci95,
+            'precision_diag': unravel_fn(jnp.asarray(prec_sandwich_diag))
+        }
+        return posterior
 
 # ***********************************************************************
 # DATA GENERATION HELPERS
@@ -580,18 +673,19 @@ def generate_rollouts(env: gym.Env, policy: Callable, episodes: int, max_steps: 
     return states, actions, next_states
 
 
-def batch_sampler(states: State, actions: Action, next_states: State, batch_size: int=32
-                  ) -> Generator[Transition, None, None]:
+def batch_sampler(states: State, actions: Action, next_states: State, batch_size: int=32,
+                  max_iters: int=99999999) -> Generator[Transition, None, None]:
     '''Yields batches of transitions from the given states, actions, and next_states.
     
     :param states: a dictionary mapping state fluent names to numpy arrays
     :param actions: a dictionary mapping action fluent names to numpy arrays
     :param next_states: a dictionary mapping state fluent names to numpy arrays
     :param batch_size: how many transitions to include in each batch
+    :param max_iters: the maximum number of batches to yield
     '''
     num_transitions = len(next(iter(states.values())))
     indices = np.arange(num_transitions)
-    while True:
+    for _ in range(max_iters):
         np.random.shuffle(indices)
         for start in range(0, num_transitions - batch_size, batch_size):
             end = start + batch_size
@@ -610,21 +704,25 @@ if __name__ == '__main__':
     # make some data
     policy = lambda obs: {'release': np.random.uniform(0.0, 20., size=(3,))}
     env = pyRDDLGym.make('Reservoir_Continuous', '0', vectorized=True)
-    transitions = generate_rollouts(env, policy, episodes=100, max_steps=40)
+    transitions = generate_rollouts(env, policy, episodes=50, max_steps=40)
     data_iterator = batch_sampler(*transitions, batch_size=32)
 
     # train it
-    model_learner = JaxModelLearner(rddl=env.model, 
-                                    param_ranges={
-                                        'RAIN_VAR': (0., 10.)
-                                    }, 
-                                    batch_size_train=32, 
-                                    optimizer_kwargs = {'learning_rate': 0.001})
-    for cb in model_learner.optimize_generator(data_iterator, epochs=50000, print_progress=True,
+    model_learner = JaxNonFluentLearner(rddl=env.model, 
+                                        param_ranges={
+                                            'RAIN_VAR': (0., np.inf)
+                                        }, 
+                                        batch_size_train=32, 
+                                        optimizer_kwargs = {'learning_rate': 0.001})
+    for cb in model_learner.optimize_generator(data_iterator, epochs=10000, print_progress=True,
                                                guess={'RAIN_VAR': np.random.uniform(0., 10., size=(3,))}):
         if cb['iteration'] % 500 == 0:
             print(cb['param_fluents'])
-        
+    
+    # posterior approximation
+    test_iterator = batch_sampler(*transitions, batch_size=32, max_iters=1)
+    print(model_learner.posterior_laplace(test_iterator, map_params=cb['params']))
+    
     # planning in the trained model
     model = model_learner.learned_model(cb['param_fluents'])
     abs_path = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))   
@@ -636,3 +734,5 @@ if __name__ == '__main__':
     # evaluation of the plan
     test_env = pyRDDLGym.make('Reservoir_Continuous', '0', vectorized=True)
     controller.evaluate(test_env, episodes=1, verbose=True, render=True)
+
+
