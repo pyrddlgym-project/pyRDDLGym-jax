@@ -4,6 +4,7 @@ from enum import Enum
 import gymnasium as gym
 from functools import partial
 from itertools import chain, islice
+import os
 import sys
 import time
 from tqdm import tqdm
@@ -362,7 +363,7 @@ class JaxNonFluentLearner:
         return update_fn, project_fn
     
     # ===========================================================================
-    # ESTIMATE API
+    # LEARNING FUNCTIONS
     # ===========================================================================
 
     def _batched_init_subs(self): 
@@ -513,6 +514,10 @@ class JaxNonFluentLearner:
             if status.is_terminal():
                 break
     
+    # ===========================================================================
+    # INFERENCE FUNCTIONS
+    # ===========================================================================
+
     def learned_model(self, param_fluents: Params) -> RDDLLiftedModel:
         '''Substitutes the given learned non-fluent values into the RDDL model and returns
         the new model.
@@ -538,7 +543,8 @@ class JaxNonFluentLearner:
                           key: Optional[random.PRNGKey]=None,
                           beta: float=1.0,
                           prior_precision: float=1e-6,
-                          damping: float=1e-6) -> Dict[str, Any]:
+                          damping: float=1e-6,
+                          save_name: Optional[str]=None) -> Dict[str, Any]:
         '''Approximates the posterior around MAP using a full-matrix Laplace method.
         The objective is the generalized Bayes energy beta * sum_i L_i(theta) with
         an isotropic Gaussian prior centered at MAP.
@@ -549,6 +555,7 @@ class JaxNonFluentLearner:
         :param beta: inverse temperature scaling the loss contribution
         :param prior_precision: isotropic Gaussian prior precision at MAP
         :param damping: additional diagonal stabilization for numerical robustness
+        :param save_name: optional path for a saved posterior summary plot
         '''
         if key is None:
             key = random.PRNGKey(round(time.time() * 1000))
@@ -614,6 +621,53 @@ class JaxNonFluentLearner:
             'lower': unravel_fn(jnp.asarray(flat_map - 1.96 * std_sandwich)),
             'upper': unravel_fn(jnp.asarray(flat_map + 1.96 * std_sandwich))
         }
+
+        # optionally save a plot summarizing the Laplace posterior over the non-fluents
+        if save_name is not None:
+            import matplotlib.pyplot as plt
+            
+            labels = []
+            rows = []
+            for name in self.param_ranges:
+                mean_value = np.asarray(map_params[name]).reshape(-1)
+                std_value = np.asarray(unravel_fn(jnp.asarray(std_sandwich))[name]).reshape(-1)
+                lower_value = np.asarray(ci95['lower'][name]).reshape(-1)
+                upper_value = np.asarray(ci95['upper'][name]).reshape(-1)
+                for idx, (mean_i, std_i, lower_i, upper_i) in enumerate(
+                    zip(mean_value, std_value, lower_value, upper_value)
+                ):
+                    label = name if mean_value.size == 1 else f'{name}[{idx}]'
+                    rows.append((label, mean_i, std_i, lower_i, upper_i))
+
+            rows.sort(key=lambda item: item[2], reverse=True)
+            if rows:
+                labels, means, stds, lowers, uppers = zip(*rows)
+                ypos = np.arange(len(rows))
+                widths = np.asarray(uppers) - np.asarray(lowers)
+                fig_h = max(4.0, 0.35 * len(rows) + 1.5)
+                fig, ax = plt.subplots(figsize=(10.0, fig_h))
+                ax.errorbar(
+                    means,
+                    ypos,
+                    xerr=[np.asarray(means) - np.asarray(lowers), 
+                          np.asarray(uppers) - np.asarray(means)],
+                    fmt='o',
+                    color='#1f77b4',
+                    ecolor='#1f77b4',
+                    elinewidth=1.5,
+                    capsize=3,
+                    markersize=4,
+                )
+                ax.scatter(means, ypos, c=widths, cmap='viridis', s=24, zorder=3)
+                ax.set_yticks(ypos)
+                ax.set_yticklabels(labels)
+                ax.invert_yaxis()
+                ax.set_xlabel('Posterior mean with 95% interval')
+                ax.set_title('Laplace posterior summary over non-fluents')
+                ax.grid(axis='x', alpha=0.25)
+                fig.tight_layout()
+                fig.savefig(save_name, dpi=200, bbox_inches='tight')
+                plt.close(fig)
 
         posterior = {
             'mean': map_params,
@@ -704,24 +758,22 @@ if __name__ == '__main__':
     # make some data
     policy = lambda obs: {'release': np.random.uniform(0.0, 20., size=(3,))}
     env = pyRDDLGym.make('Reservoir_Continuous', '0', vectorized=True)
-    transitions = generate_rollouts(env, policy, episodes=50, max_steps=40)
+    transitions = generate_rollouts(env, policy, episodes=100, max_steps=40)
     data_iterator = batch_sampler(*transitions, batch_size=32)
 
     # train it
     model_learner = JaxNonFluentLearner(rddl=env.model, 
                                         param_ranges={
                                             'RAIN_VAR': (0., np.inf)
-                                        }, 
-                                        batch_size_train=32, 
-                                        optimizer_kwargs = {'learning_rate': 0.001})
-    for cb in model_learner.optimize_generator(data_iterator, epochs=10000, print_progress=True,
+                                        })
+    for cb in model_learner.optimize_generator(data_iterator, epochs=5000, print_progress=True,
                                                guess={'RAIN_VAR': np.random.uniform(0., 10., size=(3,))}):
         if cb['iteration'] % 500 == 0:
             print(cb['param_fluents'])
     
     # posterior approximation
     test_iterator = batch_sampler(*transitions, batch_size=32, max_iters=1)
-    print(model_learner.posterior_laplace(test_iterator, map_params=cb['params']))
+    print(model_learner.posterior_laplace(test_iterator, map_params=cb['params'], save_name='laplace.pdf'))
     
     # planning in the trained model
     model = model_learner.learned_model(cb['param_fluents'])
@@ -734,5 +786,3 @@ if __name__ == '__main__':
     # evaluation of the plan
     test_env = pyRDDLGym.make('Reservoir_Continuous', '0', vectorized=True)
     controller.evaluate(test_env, episodes=1, verbose=True, render=True)
-
-
