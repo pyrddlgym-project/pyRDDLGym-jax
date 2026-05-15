@@ -680,6 +680,117 @@ class JaxNonFluentLearner:
         }
         return posterior
 
+    def posterior_nuts(self, data: DataStream,
+                       map_params: Params,
+                       key: Optional[random.PRNGKey]=None,
+                       num_samples: int=500,
+                       num_warmup: int=200,
+                       beta: float=1.0,
+                       prior_precision: float=1e-6) -> Dict[str, Any]:
+        '''Samples the posterior with BlackJAX NUTS and summarizes the draws.
+
+        The log-density is the generalized Bayes posterior
+        exp(-beta * sum_i L_i(theta)) multiplied by an isotropic Gaussian prior
+        centered at the MAP estimate.
+
+        :param data: sequence of transition batches
+        :param map_params: MAP parameters from training (unmapped parameter space)
+        :param key: JAX PRNG key (derived from clock if not provided)
+        :param num_samples: number of posterior samples to draw after warmup
+        :param num_warmup: number of warmup steps for adaptation
+        :param beta: inverse temperature scaling the loss contribution
+        :param prior_precision: isotropic Gaussian prior precision at MAP
+        '''
+        import blackjax
+
+        if key is None:
+            key = random.PRNGKey(round(time.time() * 1000))
+
+        batches = list(data)
+        if not batches:
+            raise ValueError('posterior_nuts requires at least one batch.')
+        key, warmup_key, data_key = random.split(key, 3)
+        batch_keys = list(random.split(data_key, len(batches)))
+
+        fls, nfls = self._batched_init_subs()
+        hyperparams = self.compiled.model_aux['params']
+        sim_state = JaxRDDLSimState(key=key, fls=fls, nfls=nfls, model_params=hyperparams)
+        flat_map, unravel_fn = jax.flatten_util.ravel_pytree(map_params)
+
+        def single_batch_data_loss(theta_flat, state_key, batch_size, states, actions, next_states):
+            params = unravel_fn(theta_flat)
+            state_i = sim_state.replace(key=state_key)
+            loss = self.loss_fn(state_i, params, states, actions, next_states, self.norm_stats)
+            return beta * loss * batch_size
+
+        @jax.jit
+        def logdensity(theta_flat):
+            params = unravel_fn(theta_flat)
+            in_bounds = jnp.array(True)
+            for (name, (lo, hi)) in self.param_ranges.items():
+                value = params[name]
+                if lo is not None and np.isfinite(lo):
+                    in_bounds = jnp.logical_and(in_bounds, jnp.all(value >= lo))
+                if hi is not None and np.isfinite(hi):
+                    in_bounds = jnp.logical_and(in_bounds, jnp.all(value <= hi))
+            total_loss = 0.0
+            for state_key, (states, actions, next_states) in zip(batch_keys, batches):
+                batch_size = float(np.asarray(states[self.state_keys[0]]).shape[0])
+                total_loss = total_loss + single_batch_data_loss(
+                    theta_flat, state_key, batch_size, states, actions, next_states)
+            total_loss = total_loss + 0.5 * prior_precision * jnp.dot(
+                theta_flat - flat_map, theta_flat - flat_map)
+            return jnp.where(in_bounds, -total_loss, -jnp.inf)
+
+        warmup = blackjax.window_adaptation(blackjax.nuts, logdensity)
+        (warmup_state, parameters), _ = warmup.run(warmup_key, flat_map, num_steps=num_warmup)
+        nuts = blackjax.nuts(
+            logdensity,
+            step_size=parameters['step_size'],
+            inverse_mass_matrix=parameters['inverse_mass_matrix']
+        )
+        step_fn = jax.jit(nuts.step)
+
+        positions = []
+        state = warmup_state
+        run_key = data_key
+        for _ in range(num_samples):
+            run_key, sample_key = random.split(run_key)
+            state, _ = step_fn(sample_key, state)
+            positions.append(np.asarray(state.position))
+
+        samples = np.stack(positions, axis=0)
+        sample_mean = np.mean(samples, axis=0)
+        sample_cov = np.cov(samples, rowvar=False, bias=False)
+        sample_cov = np.atleast_2d(sample_cov)
+        sample_cov = 0.5 * (sample_cov + sample_cov.T)
+        sample_var = np.maximum(np.diag(sample_cov), prior_precision)
+        sample_std = np.sqrt(sample_var)
+        sample_prec_diag = 1.0 / sample_var
+        sample_eigs = np.linalg.eigvalsh(sample_cov)
+        sample_cond = float(np.max(sample_eigs) / np.maximum(np.min(sample_eigs), prior_precision))
+        ci_bounds = np.quantile(samples.astype(np.float64), [0.025, 0.975], axis=0)
+        lower_flat = np.minimum(ci_bounds[0], ci_bounds[1])
+        upper_flat = np.maximum(ci_bounds[0], ci_bounds[1])
+        
+        posterior = {
+            'mean': unravel_fn(jnp.asarray(sample_mean)),
+            'covariance': sample_cov,
+            'covariance_eigs': jnp.asarray(sample_eigs),
+            'covariance_condition_number': sample_cond,
+            'std_diag': unravel_fn(jnp.asarray(sample_std)),
+            'credible_interval_95': {
+                'lower': unravel_fn(jnp.asarray(lower_flat)),
+                'upper': unravel_fn(jnp.asarray(upper_flat))
+            },
+            'precision_diag': unravel_fn(jnp.asarray(sample_prec_diag)),
+            'samples': samples,
+            'num_samples': num_samples,
+            'warmup_steps': num_warmup,
+        }
+        return posterior
+    
+
 # ***********************************************************************
 # DATA GENERATION HELPERS
 #
@@ -759,30 +870,32 @@ if __name__ == '__main__':
     policy = lambda obs: {'release': np.random.uniform(0.0, 20., size=(3,))}
     env = pyRDDLGym.make('Reservoir_Continuous', '0', vectorized=True)
     transitions = generate_rollouts(env, policy, episodes=100, max_steps=40)
-    data_iterator = batch_sampler(*transitions, batch_size=32)
+    data_iterator = batch_sampler(*transitions, batch_size=128)
 
     # train it
     model_learner = JaxNonFluentLearner(rddl=env.model, 
                                         param_ranges={
                                             'RAIN_VAR': (0., np.inf)
-                                        })
+                                        },
+                                        batch_size_train=128)
     for cb in model_learner.optimize_generator(data_iterator, epochs=5000, print_progress=True,
                                                guess={'RAIN_VAR': np.random.uniform(0., 10., size=(3,))}):
         if cb['iteration'] % 500 == 0:
             print(cb['param_fluents'])
     
     # posterior approximation
-    test_iterator = batch_sampler(*transitions, batch_size=32, max_iters=1)
-    print(model_learner.posterior_laplace(test_iterator, map_params=cb['params'], save_name='laplace.pdf'))
+    test_iterator = batch_sampler(*transitions, batch_size=128, max_iters=1)
+    print(model_learner.posterior_nuts(test_iterator, map_params=cb['params']))
     
     # planning in the trained model
-    model = model_learner.learned_model(cb['param_fluents'])
-    abs_path = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))   
-    config_path = os.path.join(abs_path, 'examples', 'configs', 'default_drp.cfg') 
-    planner_args, _, train_args = load_config(config_path)
-    planner = JaxBackpropPlanner(model, **planner_args)
-    controller = JaxOfflineController(planner, **train_args)
+    # model = model_learner.learned_model(cb['param_fluents'])
+    # abs_path = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))   
+    # config_path = os.path.join(abs_path, 'examples', 'configs', 'default_drp.cfg') 
+    # planner_args, _, train_args = load_config(config_path)
+    # planner = JaxBackpropPlanner(model, **planner_args)
+    # controller = JaxOfflineController(planner, **train_args)
 
-    # evaluation of the plan
-    test_env = pyRDDLGym.make('Reservoir_Continuous', '0', vectorized=True)
-    controller.evaluate(test_env, episodes=1, verbose=True, render=True)
+    # # evaluation of the plan
+    # test_env = pyRDDLGym.make('Reservoir_Continuous', '0', vectorized=True)
+    # controller.evaluate(test_env, episodes=1, verbose=True, render=True)
+
