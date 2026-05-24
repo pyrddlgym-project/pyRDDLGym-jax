@@ -2210,6 +2210,16 @@ def cvar_ste_utility(returns: jnp.ndarray, alpha: float) -> float:
     return jnp.divide(jnp.sum(mask * returns), jnp.maximum(1, jnp.count_nonzero(mask)))
 
 
+@jax.jit(static_argnames=['max_iter'])
+def expectile_utility(returns: jnp.ndarray, alpha: float, max_iter: int=30) -> float:
+    def scan_body(current_val, _):
+        weights = jnp.where(returns > current_val, alpha, 1.0 - alpha)
+        next_val = jnp.sum(weights * returns) / jnp.sum(weights)
+        return next_val, None
+    final_val, _ = jax.lax.scan(scan_body, jnp.mean(returns), xs=None, length=max_iter)
+    return final_val
+
+
 # set of all currently valid built-in utility functions
 UTILITY_LOOKUP = {
     'mean': jnp.mean,
@@ -2222,7 +2232,8 @@ UTILITY_LOOKUP = {
     'exponential': entropic_utility,
     'var': var_utility,
     'cvar': cvar_utility,
-    'cvar_ste': cvar_ste_utility
+    'cvar_ste': cvar_ste_utility,
+    'expectile': expectile_utility,
 }
 
 
