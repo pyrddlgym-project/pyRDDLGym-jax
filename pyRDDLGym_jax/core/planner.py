@@ -2220,6 +2220,15 @@ def expectile_utility(returns: jnp.ndarray, alpha: float, max_iter: int=30) -> f
     return final_val
 
 
+@jax.jit
+def gini_utility(returns: jnp.ndarray, gamma: float) -> float:
+    mean_return = jnp.mean(returns)
+    diffs = returns[:, jnp.newaxis] - returns[jnp.newaxis, :]
+    downside_diffs = jax.nn.relu(-diffs)
+    gini_dispersion = 2.0 * jnp.mean(downside_diffs)
+    return mean_return - gamma * gini_dispersion
+
+
 # set of all currently valid built-in utility functions
 UTILITY_LOOKUP = {
     'mean': jnp.mean,
@@ -2234,6 +2243,7 @@ UTILITY_LOOKUP = {
     'cvar': cvar_utility,
     'cvar_ste': cvar_ste_utility,
     'expectile': expectile_utility,
+    'gini': gini_utility,
 }
 
 
