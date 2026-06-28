@@ -3358,10 +3358,13 @@ class JaxBackpropPlanner:
             if it >= epochs - 1:
                 status = JaxPlannerStatus.ITER_BUDGET_REACHED
             
-            # build a callback
-            progress_percent = 100 * min(
-                1, max(0, elapsed / train_seconds, it / (epochs - 1)))
+            # measure percent of progress based on elapsed time and iterations completed
+            progress_time = elapsed / train_seconds
+            progress_it = it / (epochs - 1) if epochs > 1 else 0
+            progress_percent = 100 * min(1, max(0, progress_time, progress_it))
             planner_state = planner_state.replace(progress=progress_percent)
+            
+            # build a callback
             callback = {
                 'iteration': it,
                 'elapsed_time': elapsed,
