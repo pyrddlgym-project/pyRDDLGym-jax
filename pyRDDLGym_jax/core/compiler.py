@@ -292,7 +292,7 @@ class JaxRDDLCompiler:
                 result.append((left, right))
             elif op == '>' or op == '>=':
                 result.append((right, left))
-        elif etype == 'boolean' and op == '^':
+        elif etype == 'boolean' and (op == '^' or op == '&'):
             for arg in expr.args:
                 result.extend(self._extract_inequality_constraint(arg))
         return result
@@ -304,7 +304,7 @@ class JaxRDDLCompiler:
             left, right = expr.args
             if op == '==':
                 result.append((left, right))
-        elif etype == 'boolean' and op == '^':
+        elif etype == 'boolean' and (op == '^' or op == '&'):
             for arg in expr.args:
                 result.extend(self._extract_equality_constraint(arg))
         return result
@@ -1398,7 +1398,7 @@ class JaxRDDLCompiler:
         elif op == 'lngamma':
             return self._jax_lngamma(expr, aux)
         elif op == 'gamma':
-            return self._jax_gamma(expr, aux)
+            return self._jax_gamma_func(expr, aux)
         
         # binary functions
         elif op == 'div':
@@ -1490,7 +1490,7 @@ class JaxRDDLCompiler:
         aux['exact'].add(expr.id)
         return self._jax_unary_helper(expr, aux, scipy.special.gammaln, at_least_int=True)
     
-    def _jax_gamma(self, expr, aux):
+    def _jax_gamma_func(self, expr, aux):
         aux['exact'].add(expr.id)
         return self._jax_unary_helper(expr, aux, scipy.special.gamma, at_least_int=True)
 

@@ -3466,11 +3466,11 @@ class JaxBackpropPlanner:
             )
     
     @staticmethod
-    def _ci_bootstrap(returns, seed, confidence=0.95, n_boot=10000):
+    def _ci_bootstrap(returns, seed, confidence=0.95, n_boot=8192):
         rng = np.random.default_rng(seed)
-        means = np.zeros((n_boot,))
-        for i in range(n_boot):
-            means[i] = np.mean(rng.choice(returns, size=len(returns), replace=True))
+        returns = np.asarray(returns)
+        resampled = rng.choice(returns, size=(n_boot, returns.shape[0]), replace=True)
+        means = np.mean(resampled, axis=1)
         lower = np.percentile(means, 100 * 0.5 * (1 - confidence))
         upper = np.percentile(means, 100 * 0.5 * (1 + confidence))
         mean = np.mean(returns)
