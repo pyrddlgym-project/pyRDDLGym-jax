@@ -799,9 +799,9 @@ class SoftFloor(JaxRDDLCompilerWithGrad):
 
     @staticmethod
     def soft_floor(x: jnp.ndarray, w: float) -> jnp.ndarray:
-        s = x - jnp.floor(x)
-        return jnp.floor(x) + 0.5 * (
-            1. + jnp.divide(stable_tanh(w * (s - 1.) / 2.), stable_tanh(w / 4.)))
+        r = jnp.floor(x + 0.5)
+        d = x - r
+        return r - 1. + 0.5 * (1. + jnp.divide(stable_tanh(w * d), stable_tanh(w / 2.)))
 
     def _jax_floor(self, expr, aux):
         if not self.traced.cached_is_fluent(expr):
