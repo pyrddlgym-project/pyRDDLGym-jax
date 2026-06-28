@@ -3248,7 +3248,7 @@ class JaxBackpropPlanner:
             # update the preprocessor    
             proc_key = Preprocessor.HYPERPARAMS_KEY
             if self.preprocessor is not None and proc_key in planner_state.hyperparams: 
-                hyperparams = planner_state.hyperparams
+                hyperparams = dict(planner_state.hyperparams)
                 hyperparams[proc_key] = self.preprocessor.update(
                     train_log['fluents'], hyperparams[proc_key])
                 planner_state = planner_state.replace(hyperparams=hyperparams)
