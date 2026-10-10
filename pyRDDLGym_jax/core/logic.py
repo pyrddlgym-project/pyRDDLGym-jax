@@ -80,6 +80,26 @@ def stable_softmax_weight_sum(logits: jnp.ndarray, values: jnp.ndarray, axis: in
     return jnp.sum(values * jax.nn.softmax(logits, axis=axis), axis=axis)
 
 
+# identity whose backward pass rescales the incoming gradient to have norm <= max_norm
+@partial(jax.custom_vjp, nondiff_argnums=(1,))
+def _clip_grad_norm(x: Any, max_norm: float) -> Any:
+    return x
+
+
+def _clip_grad_norm_fwd(x, max_norm):
+    return x, None
+
+
+def _clip_grad_norm_bwd(max_norm, _, grad):
+    leaves = jax.tree_util.tree_leaves(grad)
+    norm = jnp.sqrt(sum(jnp.sum(jnp.square(leaf)) for leaf in leaves))
+    scale = jnp.minimum(1., max_norm / (norm + 1e-12))
+    return (jax.tree_util.tree_map(lambda leaf: leaf * scale, grad),)
+
+
+_clip_grad_norm.defvjp(_clip_grad_norm_fwd, _clip_grad_norm_bwd)
+
+
 class JaxRDDLCompilerWithGrad(JaxRDDLCompiler):
     '''Compiles a RDDL AST representation to an equivalent JAX representation. 
     Unlike its parent class, this class treats all fluents as real-valued, and
@@ -91,6 +111,8 @@ class JaxRDDLCompilerWithGrad(JaxRDDLCompiler):
                  cpfs_without_grad: Optional[Set[str]]=None,
                  print_warnings: bool=True, 
                  sample_callback: Optional[Callable]=None,
+                 round_int_actions: bool=False,
+                 state_grad_clip: Optional[float]=1e8,
                  **kwargs) -> None:
         '''Creates a new RDDL to Jax compiler, where operations that are not
         differentiable are converted to approximate forms that have defined gradients.
@@ -100,6 +122,12 @@ class JaxRDDLCompilerWithGrad(JaxRDDLCompiler):
         through gradient trick)
         :param print_warnings: whether to print warnings
         :param sample_callback: function to call for sample debugging
+        :param round_int_actions: whether to round int and enum actions in the forward pass
+        using the straight-through trick, so that training sees the same actions as testing
+        :param state_grad_clip: optional maximum norm of the gradient of the loss with
+        respect to the state at each step, to bound the compounding of exploding Jacobian
+        products over long horizons (scale-dependent: should be set relative to the
+        magnitude of the return divided by the typical magnitude of the state)
         :param *kwargs: keyword arguments to pass to base compiler
         '''
         super(JaxRDDLCompilerWithGrad, self).__init__(*args, **kwargs)
@@ -109,6 +137,8 @@ class JaxRDDLCompilerWithGrad(JaxRDDLCompiler):
         self.cpfs_without_grad = cpfs_without_grad
         self.print_warnings = print_warnings
         self.sample_callback = sample_callback
+        self.round_int_actions = round_int_actions
+        self.state_grad_clip = state_grad_clip
         
         # actions and CPFs must be continuous
         pvars_cast = set()
@@ -125,7 +155,41 @@ class JaxRDDLCompilerWithGrad(JaxRDDLCompiler):
         kwargs['cpfs_without_grad'] = self.cpfs_without_grad
         kwargs['print_warnings'] = self.print_warnings
         kwargs['sample_callback'] = self.sample_callback
+        kwargs['round_int_actions'] = self.round_int_actions
+        kwargs['state_grad_clip'] = self.state_grad_clip
         return kwargs
+
+    def compile_transition(self, check_constraints: bool=False,
+                           constraint_func: bool=False,
+                           cache_path_info: bool=False,
+                           aux_constr: Dict[str, Any]={}) -> Callable:
+        relaxed_fn = super().compile_transition(
+            check_constraints, constraint_func, cache_path_info, aux_constr)
+        transition_fn = relaxed_fn
+
+        # round int and enum actions in the forward pass only
+        if self.round_int_actions:
+            int_actions = {name for name in self.rddl.action_fluents
+                           if self.rddl.variable_ranges[name] == 'int'
+                           or self.rddl.variable_ranges[name] in self.rddl.enum_types}
+            unrounded_fn = transition_fn
+
+            def _jax_wrapped_round_int_actions(sim_state, actions):
+                actions = {k: (v + jax.lax.stop_gradient(jnp.round(v) - v)
+                               if k in int_actions else v)
+                           for (k, v) in actions.items()}
+                return unrounded_fn(sim_state, actions)
+            transition_fn = _jax_wrapped_round_int_actions
+
+        # clip the gradient flowing back into the state at every step
+        if self.state_grad_clip is not None:
+            unclipped_fn = transition_fn
+            def _jax_wrapped_clip_state_grad(sim_state, actions):
+                fls = _clip_grad_norm(sim_state.fls, self.state_grad_clip)
+                return unclipped_fn(sim_state.replace(fls=fls), actions)
+            transition_fn = _jax_wrapped_clip_state_grad
+        
+        return transition_fn
 
     def _sample_callback(self, expr_id, expr_type, sample, args):
         payload = {
