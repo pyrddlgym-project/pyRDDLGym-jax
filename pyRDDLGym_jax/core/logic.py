@@ -246,27 +246,59 @@ class SigmoidRelational(JaxRDDLCompilerWithGrad):
     
     def __init__(self, *args, sigmoid_weight: float=10., 
                  use_sigmoid_ste: bool=True, use_tanh_ste: bool=True, 
+                 use_sigmoid_scaling: bool=False, sigmoid_scaling_decay: float=0.99,
                  **kwargs) -> None:
         super(SigmoidRelational, self).__init__(*args, **kwargs)
         self.sigmoid_weight = float(sigmoid_weight)
         self.use_sigmoid_ste = use_sigmoid_ste
         self.use_tanh_ste = use_tanh_ste
+        self.use_sigmoid_scaling = use_sigmoid_scaling
+        self.sigmoid_scaling_decay = float(sigmoid_scaling_decay)
     
     def get_kwargs(self) -> Dict[str, Any]:
         kwargs = super().get_kwargs()
         kwargs['sigmoid_weight'] = self.sigmoid_weight
         kwargs['use_sigmoid_ste'] = self.use_sigmoid_ste
         kwargs['use_tanh_ste'] = self.use_tanh_ste
+        kwargs['use_sigmoid_scaling'] = self.use_sigmoid_scaling
+        kwargs['sigmoid_scaling_decay'] = self.sigmoid_scaling_decay
         return kwargs
+
+    def _sigmoid_params(self, expr):
+        params = {'sigmoid_weight': self.sigmoid_weight}
+        if self.use_sigmoid_scaling:
+            scope = self.traced.cached_objects_in_scope(expr)
+            shape = tuple(self.rddl.object_counts(ptype for (_, ptype) in scope))
+            params['sigmoid_scaling_m2'] = np.zeros(shape, dtype=self.REAL)
+            params['sigmoid_scaling_count'] = 0.
+        return params
+    
+    # divides the sigmoid argument by a running (bias-corrected EMA) estimate of its
+    # root-mean-square, kept separately for each grounding of the expression, so the 
+    # sigmoid weight is invariant to the units of each compared quantity
+    def _sigmoid_scaled(self, id_, x, params):
+        if not self.use_sigmoid_scaling:
+            return x, params
+        decay = self.sigmoid_scaling_decay
+        node = params[id_]
+        sq = jnp.square(jax.lax.stop_gradient(x))
+        sq = jnp.broadcast_to(sq, jnp.shape(node['sigmoid_scaling_m2']))
+        m2 = decay * node['sigmoid_scaling_m2'] + (1. - decay) * sq
+        count = node['sigmoid_scaling_count'] + 1.
+        rms = jnp.sqrt(m2 / (1. - decay ** count))
+        node = {**node, 'sigmoid_scaling_m2': m2, 'sigmoid_scaling_count': count}
+        params = {**params, id_: node}
+        return x / jnp.maximum(rms, 1e-6), params
 
     def _jax_greater(self, expr, aux):
         if not self.traced.cached_is_fluent(expr):
             return JaxRDDLCompilerWithGrad._jax_greater(self, expr, aux)
         id_ = expr.id
-        aux['params'][id_] = {'sigmoid_weight': self.sigmoid_weight}
+        aux['params'][id_] = self._sigmoid_params(expr)
         aux['overriden'][id_] = __class__.__name__
         def greater_op(x, y, params):
-            sample = jax.nn.sigmoid(params[id_]['sigmoid_weight'] * (x - y))
+            diff, params = self._sigmoid_scaled(id_, x - y, params)
+            sample = jax.nn.sigmoid(params[id_]['sigmoid_weight'] * diff)
             self._jax_sample_callback(id_, 'greater', sample, (x, y))
             if self.use_sigmoid_ste:
                 sample = sample + jax.lax.stop_gradient(jnp.greater(x, y) - sample)
@@ -277,10 +309,11 @@ class SigmoidRelational(JaxRDDLCompilerWithGrad):
         if not self.traced.cached_is_fluent(expr):
             return JaxRDDLCompilerWithGrad._jax_greater_equal(self, expr, aux)
         id_ = expr.id
-        aux['params'][id_] = {'sigmoid_weight': self.sigmoid_weight}
+        aux['params'][id_] = self._sigmoid_params(expr)
         aux['overriden'][id_] = __class__.__name__
         def greater_equal_op(x, y, params):
-            sample = jax.nn.sigmoid(params[id_]['sigmoid_weight'] * (x - y))
+            diff, params = self._sigmoid_scaled(id_, x - y, params)
+            sample = jax.nn.sigmoid(params[id_]['sigmoid_weight'] * diff)
             self._jax_sample_callback(id_, 'greater_equal', sample, (x, y))
             if self.use_sigmoid_ste:
                 sample = sample + jax.lax.stop_gradient(jnp.greater_equal(x, y) - sample)
@@ -291,10 +324,11 @@ class SigmoidRelational(JaxRDDLCompilerWithGrad):
         if not self.traced.cached_is_fluent(expr):
             return JaxRDDLCompilerWithGrad._jax_less(self, expr, aux)
         id_ = expr.id
-        aux['params'][id_] = {'sigmoid_weight': self.sigmoid_weight}
+        aux['params'][id_] = self._sigmoid_params(expr)
         aux['overriden'][id_] = __class__.__name__
         def less_op(x, y, params):
-            sample = jax.nn.sigmoid(params[id_]['sigmoid_weight'] * (y - x))
+            diff, params = self._sigmoid_scaled(id_, y - x, params)
+            sample = jax.nn.sigmoid(params[id_]['sigmoid_weight'] * diff)
             self._jax_sample_callback(id_, 'less', sample, (x, y))
             if self.use_sigmoid_ste:
                 sample = sample + jax.lax.stop_gradient(jnp.less(x, y) - sample)
@@ -305,10 +339,11 @@ class SigmoidRelational(JaxRDDLCompilerWithGrad):
         if not self.traced.cached_is_fluent(expr):
             return JaxRDDLCompilerWithGrad._jax_less_equal(self, expr, aux)
         id_ = expr.id
-        aux['params'][id_] = {'sigmoid_weight': self.sigmoid_weight}
+        aux['params'][id_] = self._sigmoid_params(expr)
         aux['overriden'][id_] = __class__.__name__
         def less_equal_op(x, y, params):
-            sample = jax.nn.sigmoid(params[id_]['sigmoid_weight'] * (y - x))
+            diff, params = self._sigmoid_scaled(id_, y - x, params)
+            sample = jax.nn.sigmoid(params[id_]['sigmoid_weight'] * diff)
             self._jax_sample_callback(id_, 'less_equal', sample, (x, y))
             if self.use_sigmoid_ste:
                 sample = sample + jax.lax.stop_gradient(jnp.less_equal(x, y) - sample)
@@ -319,10 +354,11 @@ class SigmoidRelational(JaxRDDLCompilerWithGrad):
         if not self.traced.cached_is_fluent(expr):
             return JaxRDDLCompilerWithGrad._jax_equal(self, expr, aux)
         id_ = expr.id
-        aux['params'][id_] = {'sigmoid_weight': self.sigmoid_weight}
+        aux['params'][id_] = self._sigmoid_params(expr)
         aux['overriden'][id_] = __class__.__name__
         def equal_op(x, y, params):
-            sample = 1. - jnp.square(stable_tanh(params[id_]['sigmoid_weight'] * (y - x)))
+            diff, params = self._sigmoid_scaled(id_, y - x, params)
+            sample = 1. - jnp.square(stable_tanh(params[id_]['sigmoid_weight'] * diff))
             self._jax_sample_callback(id_, 'equal', sample, (x, y))
             if self.use_tanh_ste:
                 sample = sample + jax.lax.stop_gradient(jnp.equal(x, y) - sample)
@@ -333,10 +369,11 @@ class SigmoidRelational(JaxRDDLCompilerWithGrad):
         if not self.traced.cached_is_fluent(expr):
             return JaxRDDLCompilerWithGrad._jax_not_equal(self, expr, aux)
         id_ = expr.id
-        aux['params'][id_] = {'sigmoid_weight': self.sigmoid_weight}
+        aux['params'][id_] = self._sigmoid_params(expr)
         aux['overriden'][id_] = __class__.__name__
         def not_equal_op(x, y, params):
-            sample = jnp.square(stable_tanh(params[id_]['sigmoid_weight'] * (y - x)))
+            diff, params = self._sigmoid_scaled(id_, y - x, params)
+            sample = jnp.square(stable_tanh(params[id_]['sigmoid_weight'] * diff))
             self._jax_sample_callback(id_, 'not_equal', sample, (x, y))
             if self.use_tanh_ste:
                 sample = sample + jax.lax.stop_gradient(jnp.not_equal(x, y) - sample)
@@ -347,10 +384,11 @@ class SigmoidRelational(JaxRDDLCompilerWithGrad):
         if not self.traced.cached_is_fluent(expr):
             return JaxRDDLCompilerWithGrad._jax_sgn(self, expr, aux)
         id_ = expr.id
-        aux['params'][id_] = {'sigmoid_weight': self.sigmoid_weight}
+        aux['params'][id_] = self._sigmoid_params(expr)
         aux['overriden'][id_] = __class__.__name__
         def sgn_op(x, params):
-            sample = stable_tanh(params[id_]['sigmoid_weight'] * x)
+            diff, params = self._sigmoid_scaled(id_, x, params)
+            sample = stable_tanh(params[id_]['sigmoid_weight'] * diff)
             self._jax_sample_callback(id_, 'sgn', sample, (x,))
             if self.use_tanh_ste:
                 sample = sample + jax.lax.stop_gradient(jnp.sign(x) - sample)
