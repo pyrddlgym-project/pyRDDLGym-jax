@@ -764,6 +764,7 @@ class JaxStraightLinePlan(JaxPlan):
                 
         # a different option to handle boolean action concurrency constraints with |A| = 1
         # is to use a softmax activation layer over pooled action parameters
+        # one noop slot is appended per allowed action, and is dropped when unstacking
         ranges = rddl.variable_ranges
         action_sizes = {var: np.prod(shape[1:], dtype=np.int64) 
                         for (var, shape) in shapes.items()
@@ -847,8 +848,8 @@ class JaxStraightLinePlan(JaxPlan):
             for (var, param) in planner_state.policy_params['bool'].items():
                 logits = jnp.asarray(param['logit'][step, ...], dtype=compiled.REAL)
                 if var == BOOL_KEY:
-                    softmax_weight = planner_state.hyperparams[BOOL_KEY]
-                    output = jax.nn.softmax(softmax_weight * logits)
+                    output = jax.nn.one_hot(
+                        jnp.argmax(logits), jnp.shape(logits)[-1], dtype=compiled.REAL)
                     bool_actions = _jax_unstack_bool_from_softmax(output)
                     for (bool_var, bool_action) in bool_actions.items():
                         actions[bool_var] = bool_action > 0.5
@@ -998,7 +999,7 @@ class JaxStraightLinePlan(JaxPlan):
             
             # init stacked bool actions as one tensor
             if stack_bool_params:
-                shape = (horizon, bool_action_count)
+                shape = (horizon, bool_action_count + allowed_actions)
                 key, subkey = random.split(key)
                 param = init_fn(key=subkey, shape=shape, dtype=compiled.REAL)
                 params['bool'][BOOL_KEY] = {'logit': param}
@@ -1035,15 +1036,7 @@ class GumbelSoftmaxTopK(nn.Module):
     @nn.compact
     def __call__(self, rng_key, action_logits, weight: float, train: bool):
         
-        # no constraints to propagate
-        if self.allowed_actions == 1:
-            if self.stochastic:
-                g = random.gumbel(
-                    key=rng_key, shape=jnp.shape(action_logits), dtype=self.dtype)
-                action_logits = action_logits + train * g
-            return jax.nn.softmax(action_logits)
-        
-        # forward relaxation
+        # forward relaxation (for k = 1 this is the gumbel-softmax)
         def soft_top_k(key, logits, w):
             if self.stochastic:
                 g = random.gumbel(key=key, shape=jnp.shape(logits), dtype=self.dtype)
@@ -1432,9 +1425,13 @@ class JaxDeepReactivePolicy(JaxPlan):
                 # for constraint satisfaction wrap bool actions with softmax
                 # costly approach would compute entropy using an extra top-k pass
                 # we avoid this by computing softmax probabilities directly from the logits
+                # one noop slot is added per allowed action so that up to k actions are
+                # selected, and the noop slots are dropped after selection
                 if use_constraint_satisfaction:
+                    num_noop_slots = rddl.max_allowed_actions
                     linear = nn.Dense(
-                        features=bool_action_count, kernel_init=init, name='dense_topk')
+                        features=bool_action_count + num_noop_slots, kernel_init=init,
+                        name='dense_topk')
                     logits = linear(hidden)
                     weight = hyperparams[SOFTMAX_KEY]
                     if stochastic:
@@ -1444,7 +1441,8 @@ class JaxDeepReactivePolicy(JaxPlan):
                     topk = GumbelSoftmaxTopK(
                         allowed_actions=rddl.max_allowed_actions, dtype=compiled.REAL,
                         stochastic=stochastic)
-                    actions[BOOL_KEY] = topk(key, logits, weight, train)
+                    output = topk(key, logits, weight, train)
+                    actions[BOOL_KEY] = output[..., :bool_action_count]
                 return actions, entropy
         predict_fn = DRP(name='drp')       
         
