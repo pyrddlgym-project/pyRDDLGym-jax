@@ -617,6 +617,26 @@ class JaxSogbofaActionProjection(JaxActionProjection):
         return _jax_wrapped_sogbofa_project
 
 
+# clip whose gradient outside the bounds is kept only if descent moves back inside
+# (i.e. projected gradient), so that saturated values can still recover
+@jax.custom_vjp
+def _jax_clip_inward(x, lower, upper):
+    return jnp.clip(x, lower, upper)
+
+
+def _jax_clip_inward_fwd(x, lower, upper):
+    return jnp.clip(x, lower, upper), (x, lower, upper)
+
+
+def _jax_clip_inward_bwd(res, grad):
+    x, lower, upper = res
+    keep = ((x >= lower) & (x <= upper)) | ((x > upper) & (grad > 0)) | ((x < lower) & (grad < 0))
+    return jnp.where(keep, grad, 0.), None, None
+
+
+_jax_clip_inward.defvjp(_jax_clip_inward_fwd, _jax_clip_inward_bwd)
+
+
 def _jax_bound_action(branches, lower, upper, param):
     lower = jnp.where(jnp.isfinite(lower), lower, 0.0)
     upper = jnp.where(jnp.isfinite(upper), upper, 0.0)
@@ -824,7 +844,7 @@ class JaxStraightLinePlan(JaxPlan):
             for (var, param) in planner_state.policy_params['real'].items():
                 action = jnp.asarray(param['mu'][step, ...], dtype=compiled.REAL)
                 if self._stochastic:
-                    log_sigma = jnp.clip(param['log_sigma'][step, ...], *log_sigma_bounds)
+                    log_sigma = _jax_clip_inward(param['log_sigma'][step, ...], *log_sigma_bounds)
                     entropy = entropy + jnp.sum(
                         log_sigma if self._sigma_entropy_grad 
                         else jax.lax.stop_gradient(log_sigma)
@@ -1403,7 +1423,7 @@ class JaxDeepReactivePolicy(JaxPlan):
                                 log_sigma, log_sigma.shape[:-1] + shapes[var])
                             if not shapes[var]:
                                 log_sigma = jnp.squeeze(log_sigma)
-                            log_sigma = jnp.clip(log_sigma, *log_sigma_bounds)
+                            log_sigma = _jax_clip_inward(log_sigma, *log_sigma_bounds)
                             entropy = entropy + jnp.sum(
                                 log_sigma if sigma_entropy_grad 
                                 else jax.lax.stop_gradient(log_sigma)
@@ -1470,7 +1490,7 @@ class JaxDeepReactivePolicy(JaxPlan):
             if not wrap_non_bool:
                 for (var, action) in actions.items():
                     if var != BOOL_KEY and ranges[var] != 'bool':
-                        actions[var] = jnp.clip(action, *bounds[var])
+                        actions[var] = _jax_clip_inward(action, *bounds[var])
             if use_constraint_satisfaction:
                 bool_actions = _jax_unstack_bool_from_softmax(actions[BOOL_KEY])
                 actions.update(bool_actions)
@@ -1586,7 +1606,7 @@ class JaxRDDLPolicy(JaxPlan):
                 if var in rddl.action_fluents:
                     if not shapes[var]:
                         value = jnp.squeeze(value)
-                    value = jnp.clip(value, *bounds[var])
+                    value = _jax_clip_inward(value, *bounds[var])
                     value = jnp.asarray(value, dtype=compiled.REAL)
                 new_fls[var] = value
             return new_fls, 0.
