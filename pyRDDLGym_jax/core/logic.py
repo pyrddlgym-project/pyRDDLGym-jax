@@ -464,15 +464,21 @@ class SoftmaxArgmax(JaxRDDLCompilerWithGrad):
     '''Argmin/argmax operations approximated using softmax functions.'''
 
     def __init__(self, *args, argmax_weight: float=10., 
-                 use_argmax_ste: bool=True, **kwargs) -> None:
+                 use_argmax_ste: bool=True, 
+                 use_argmax_scaling: bool=False, argmax_scaling_decay: float=0.99,
+                 **kwargs) -> None:
         super(SoftmaxArgmax, self).__init__(*args, **kwargs)
         self.argmax_weight = float(argmax_weight)
         self.use_argmax_ste = use_argmax_ste
+        self.use_argmax_scaling = use_argmax_scaling
+        self.argmax_scaling_decay = float(argmax_scaling_decay)
     
     def get_kwargs(self) -> Dict[str, Any]:
         kwargs = super().get_kwargs()
         kwargs['argmax_weight'] = self.argmax_weight
         kwargs['use_argmax_ste'] = self.use_argmax_ste
+        kwargs['use_argmax_scaling'] = self.use_argmax_scaling
+        kwargs['argmax_scaling_decay'] = self.argmax_scaling_decay
         return kwargs
 
     @staticmethod
@@ -480,18 +486,45 @@ class SoftmaxArgmax(JaxRDDLCompilerWithGrad):
         literals = enumerate_literals(jnp.shape(x), axis=axis, dtype=dtype)
         return stable_softmax_weight_sum(w * x, literals, axis=axis)
 
+    def _argmax_params(self, expr):
+        params = {'argmax_weight': self.argmax_weight}
+        if self.use_argmax_scaling:
+            scope = self.traced.cached_objects_in_scope(expr)
+            shape = tuple(self.rddl.object_counts(ptype for (_, ptype) in scope))
+            params['argmax_scaling_m2'] = np.zeros(shape, dtype=self.REAL)
+            params['argmax_scaling_count'] = 0.
+        return params
+
+    # divides the values by a running (bias-corrected EMA) estimate of their spread
+    # along the argmax axis, kept separately for each grounding of the expression, 
+    # so the argmax weight is invariant to the units of the compared quantities
+    def _argmax_scaled(self, id_, x, axis, params):
+        if not self.use_argmax_scaling:
+            return x, params
+        decay = self.argmax_scaling_decay
+        node = params[id_]
+        var = jnp.var(jax.lax.stop_gradient(x), axis=axis)
+        var = jnp.broadcast_to(var, jnp.shape(node['argmax_scaling_m2']))
+        m2 = decay * node['argmax_scaling_m2'] + (1. - decay) * var
+        count = node['argmax_scaling_count'] + 1.
+        rms = jnp.sqrt(m2 / (1. - decay ** count))
+        node = {**node, 'argmax_scaling_m2': m2, 'argmax_scaling_count': count}
+        params = {**params, id_: node}
+        return x / jnp.expand_dims(jnp.maximum(rms, 1e-6), axis), params
+
     def _jax_argmax(self, expr, aux):
         if not self.traced.cached_is_fluent(expr):
             return JaxRDDLCompilerWithGrad._jax_argmax(self, expr, aux)
         id_ = expr.id
-        aux['params'][id_] = {'argmax_weight': self.argmax_weight}
+        aux['params'][id_] = self._argmax_params(expr)
         aux['overriden'][id_] = __class__.__name__
         arg = expr.args[-1]
         _, axis = self.traced.cached_sim_info(expr)   
         jax_expr = self._jax(arg, aux) 
         def argmax_op(x, params):
             w = params[id_]['argmax_weight']
-            sample = self.soft_argmax(x, w=w, axis=axis, dtype=self.INT)
+            scaled, params = self._argmax_scaled(id_, x, axis, params)
+            sample = self.soft_argmax(scaled, w=w, axis=axis, dtype=self.INT)
             self._jax_sample_callback(id_, 'argmax', sample, (x,))
             if self.use_argmax_ste:
                 hard_sample = jnp.argmax(x, axis=axis)
@@ -503,14 +536,15 @@ class SoftmaxArgmax(JaxRDDLCompilerWithGrad):
         if not self.traced.cached_is_fluent(expr):
             return JaxRDDLCompilerWithGrad._jax_argmin(self, expr, aux)
         id_ = expr.id
-        aux['params'][id_] = {'argmax_weight': self.argmax_weight}
+        aux['params'][id_] = self._argmax_params(expr)
         aux['overriden'][id_] = __class__.__name__
         arg = expr.args[-1]
         _, axis = self.traced.cached_sim_info(expr)   
         jax_expr = self._jax(arg, aux) 
         def argmin_op(x, params):
             w = params[id_]['argmax_weight']
-            sample = self.soft_argmax(-x, w=w, axis=axis, dtype=self.INT)
+            scaled, params = self._argmax_scaled(id_, x, axis, params)
+            sample = self.soft_argmax(-scaled, w=w, axis=axis, dtype=self.INT)
             self._jax_sample_callback(id_, 'argmin', sample, (x,))
             if self.use_argmax_ste:
                 hard_sample = jnp.argmax(-x, axis=axis)
