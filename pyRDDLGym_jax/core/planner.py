@@ -338,6 +338,80 @@ class StaticNormalizer(Preprocessor):
         self._transform = jax.jit(_jax_wrapped_normalizer_transform)
 
 
+class RunningStandardizer(Preprocessor):
+    '''Standardize values by a running (bias-corrected EMA) estimate of the mean and
+    standard deviation of each fluent, computed from the training rollouts.'''
+
+    def __init__(self, decay: float=0.99, epsilon: float=1e-8,
+                 clip: Optional[float]=20.) -> None:
+        '''Creates a new running standardizer.
+
+        :param decay: decay factor of the running mean and variance per update
+        :param epsilon: added to the variance for numerical stability
+        :param clip: optional bound on the absolute value of the standardized fluents
+        '''
+        super(RunningStandardizer, self).__init__()
+        self.decay = decay
+        self.epsilon = epsilon
+        self.clip = clip
+
+    def compile(self, compiled: JaxRDDLCompilerWithGrad) -> None:
+
+        # adjust for partial observability
+        rddl = compiled.rddl
+        if rddl.observ_fluents:
+            observed_vars = rddl.observ_fluents
+        else:
+            observed_vars = rddl.state_fluents
+
+        # ignore boolean fluents
+        shapes = {var: np.shape(compiled.init_values[var])
+                  for var in observed_vars if rddl.variable_ranges[var] != 'bool'}
+        decay, epsilon, clip = self.decay, self.epsilon, self.clip
+
+        # running first and second moments start at zero
+        def _jax_wrapped_standardizer_init():
+            return {var: {'mean': jnp.zeros(shape, dtype=compiled.REAL),
+                          'm2': jnp.zeros(shape, dtype=compiled.REAL),
+                          'count': jnp.zeros((), dtype=compiled.REAL)}
+                    for (var, shape) in shapes.items()}
+        self._initializer = jax.jit(_jax_wrapped_standardizer_init)
+
+        # update the moments with the fluents of the training rollouts, averaging over
+        # all leading (e.g. batch and time) dimensions
+        def _jax_wrapped_standardizer_update(fls, stats):
+            new_stats = {}
+            for (var, stat) in stats.items():
+                values = jnp.asarray(fls[var], dtype=compiled.REAL)
+                axes = tuple(range(jnp.ndim(values) - len(shapes[var])))
+                new_stats[var] = {
+                    'mean': decay * stat['mean'] + (1. - decay) * jnp.mean(values, axis=axes),
+                    'm2': decay * stat['m2'] + (1. - decay) * jnp.mean(
+                        jnp.square(values), axis=axes),
+                    'count': stat['count'] + 1.
+                }
+            return new_stats
+        self._update = jax.jit(_jax_wrapped_standardizer_update)
+
+        # apply standardization once at least one update has been made
+        def _jax_wrapped_standardizer_transform(fls, stats):
+            new_fls = dict(fls)
+            for (var, stat) in stats.items():
+                values = fls[var]
+                correction = jnp.maximum(1. - decay ** stat['count'], epsilon)
+                mean = stat['mean'] / correction
+                var_ = jnp.maximum(stat['m2'] / correction - jnp.square(mean), 0.)
+                new_dims = jnp.ndim(values) - jnp.ndim(mean)
+                mean = mean[(jnp.newaxis,) * new_dims + (...,)]
+                var_ = var_[(jnp.newaxis,) * new_dims + (...,)]
+                standardized = (values - mean) / jnp.sqrt(var_ + epsilon)
+                if clip is not None:
+                    standardized = jnp.clip(standardized, -clip, clip)
+                new_fls[var] = jnp.where(stat['count'] > 0, standardized, values)
+            return new_fls
+        self._transform = jax.jit(_jax_wrapped_standardizer_transform)
+
+
 # ***********************************************************************
 # JAX BASE PLAN TEMPLATE
 #
@@ -2711,11 +2785,12 @@ class JaxBackpropPlanner:
     def _jax_compile_train_update(self):
         self.initialize = self._jax_init_optimizer()
         self.single_train_loss = self._jax_loss(
-            self.train_rollouts, use_symlog=self.use_symlog_reward)
+            self.train_rollouts, self.compiled, use_symlog=self.use_symlog_reward)
         self.update = self._jax_update(self.single_train_loss)
     
     def _jax_compile_test_loss(self):
-        self.single_test_loss = self._jax_loss(self.test_rollouts, use_symlog=False)
+        self.single_test_loss = self._jax_loss(
+            self.test_rollouts, self.test_compiled, use_symlog=False)
         vmap_axes = (JaxRDDLSimState(model_params=0), JaxPlannerState(policy_params=0))
         self.test_loss = jax.jit(jax.vmap(self.single_test_loss, in_axes=vmap_axes))
 
@@ -2786,7 +2861,7 @@ class JaxBackpropPlanner:
             return returns
         return _jax_wrapped_returns
         
-    def _jax_loss(self, rollouts, use_symlog=False): 
+    def _jax_loss(self, rollouts, compiled, use_symlog=False):
         utility_fn = self.utility    
         utility_kwargs = self.utility_kwargs 
         _jax_wrapped_returns = self._jax_return(use_symlog)
@@ -2806,6 +2881,9 @@ class JaxBackpropPlanner:
             
             # generate sample rollouts
             log, model_params = rollouts(sim_state, planner_state)
+
+            # update the model parameters from statistics collected in the rollouts
+            model_params = compiled.update_model_params(model_params, log['model_stats'])
             
             # evaluate optional critic network at termination of rollouts
             batch_size = jnp.shape(log['reward'])[0]

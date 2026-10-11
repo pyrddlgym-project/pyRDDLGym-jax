@@ -191,6 +191,31 @@ class JaxRDDLCompilerWithGrad(JaxRDDLCompiler):
         
         return transition_fn
 
+    @staticmethod
+    def _running_rms(node, prefix, decay):
+        correction = jnp.maximum(1. - decay ** node[f'{prefix}_count'], 1e-12)
+        return jnp.sqrt(node[f'{prefix}_m2'] / correction)
+
+    @staticmethod
+    def _update_running_rms(model_params, model_stats, prefix, decay):
+        new_params = dict(model_params)
+        for (id_, stats) in model_stats.items():
+            stat = stats.get(f'{prefix}_stat', None)
+            if stat is None:
+                continue
+            node = model_params[id_]
+            m2 = node[f'{prefix}_m2']
+            axes = tuple(range(jnp.ndim(stat) - jnp.ndim(m2)))
+            finite = jnp.isfinite(stat)
+            count = jnp.sum(finite, axis=axes)
+            mean = jnp.sum(jnp.where(finite, stat, 0.), axis=axes) / jnp.maximum(count, 1)
+            new_params[id_] = {
+                **node,
+                f'{prefix}_m2': jnp.where(count > 0, decay * m2 + (1. - decay) * mean, m2),
+                f'{prefix}_count': node[f'{prefix}_count'] + 1.
+            }
+        return new_params
+
     def _sample_callback(self, expr_id, expr_type, sample, args):
         payload = {
             'expr_id': int(expr_id),
@@ -337,22 +362,28 @@ class SigmoidRelational(JaxRDDLCompilerWithGrad):
             params['sigmoid_scaling_count'] = 0.
         return params
     
+    def update_model_params(self, model_params: Dict[str, Any],
+                            model_stats: Dict[str, Any]) -> Dict[str, Any]:
+        model_params = super().update_model_params(model_params, model_stats)
+        if self.use_sigmoid_scaling:
+            model_params = self._update_running_rms(
+                model_params, model_stats, 'sigmoid_scaling', self.sigmoid_scaling_decay)
+        return model_params
+
     # divides the sigmoid argument by a running (bias-corrected EMA) estimate of its
-    # root-mean-square, kept separately for each grounding of the expression, so the 
-    # sigmoid weight is invariant to the units of each compared quantity
+    # root-mean-square, kept separately for each grounding of the expression, so the
+    # sigmoid weight is invariant to the units of each compared quantity: the estimate
+    # is fixed during rollouts and updated between them (see update_model_params)
     def _sigmoid_scaled(self, id_, x, params):
         if not self.use_sigmoid_scaling:
             return x, params
-        decay = self.sigmoid_scaling_decay
         node = params[id_]
         sq = jnp.square(jax.lax.stop_gradient(x))
         sq = jnp.broadcast_to(sq, jnp.shape(node['sigmoid_scaling_m2']))
-        m2 = decay * node['sigmoid_scaling_m2'] + (1. - decay) * sq
-        count = node['sigmoid_scaling_count'] + 1.
-        rms = jnp.sqrt(m2 / (1. - decay ** count))
-        node = {**node, 'sigmoid_scaling_m2': m2, 'sigmoid_scaling_count': count}
-        params = {**params, id_: node}
-        return x / jnp.maximum(rms, 1e-6), params
+        params = {**params, id_: {**node, 'sigmoid_scaling_stat': sq}}
+        rms = self._running_rms(node, 'sigmoid_scaling', self.sigmoid_scaling_decay)
+        scaled = jnp.where(node['sigmoid_scaling_count'] > 0, x / jnp.maximum(rms, 1e-6), x)
+        return scaled, params
 
     def _jax_greater(self, expr, aux):
         if not self.traced.cached_is_fluent(expr):
@@ -495,22 +526,29 @@ class SoftmaxArgmax(JaxRDDLCompilerWithGrad):
             params['argmax_scaling_count'] = 0.
         return params
 
+    def update_model_params(self, model_params: Dict[str, Any],
+                            model_stats: Dict[str, Any]) -> Dict[str, Any]:
+        model_params = super().update_model_params(model_params, model_stats)
+        if self.use_argmax_scaling:
+            model_params = self._update_running_rms(
+                model_params, model_stats, 'argmax_scaling', self.argmax_scaling_decay)
+        return model_params
+
     # divides the values by a running (bias-corrected EMA) estimate of their spread
-    # along the argmax axis, kept separately for each grounding of the expression, 
-    # so the argmax weight is invariant to the units of the compared quantities
+    # along the argmax axis, kept separately for each grounding of the expression,
+    # so the argmax weight is invariant to the units of the compared quantities: the
+    # estimate is fixed during rollouts and updated between them (see update_model_params)
     def _argmax_scaled(self, id_, x, axis, params):
         if not self.use_argmax_scaling:
             return x, params
-        decay = self.argmax_scaling_decay
         node = params[id_]
         var = jnp.var(jax.lax.stop_gradient(x), axis=axis)
         var = jnp.broadcast_to(var, jnp.shape(node['argmax_scaling_m2']))
-        m2 = decay * node['argmax_scaling_m2'] + (1. - decay) * var
-        count = node['argmax_scaling_count'] + 1.
-        rms = jnp.sqrt(m2 / (1. - decay ** count))
-        node = {**node, 'argmax_scaling_m2': m2, 'argmax_scaling_count': count}
-        params = {**params, id_: node}
-        return x / jnp.expand_dims(jnp.maximum(rms, 1e-6), axis), params
+        params = {**params, id_: {**node, 'argmax_scaling_stat': var}}
+        rms = self._running_rms(node, 'argmax_scaling', self.argmax_scaling_decay)
+        rms = jnp.expand_dims(jnp.maximum(rms, 1e-6), axis)
+        scaled = jnp.where(node['argmax_scaling_count'] > 0, x / rms, x)
+        return scaled, params
 
     def _jax_argmax(self, expr, aux):
         if not self.traced.cached_is_fluent(expr):
