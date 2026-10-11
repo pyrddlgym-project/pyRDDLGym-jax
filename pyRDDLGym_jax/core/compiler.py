@@ -1056,7 +1056,7 @@ class JaxRDDLCompiler:
                     new_slices = []
                     for jax_expr in jax_nested_expr:
                         new_slice, key, err, params = jax_expr(fls, nfls, params, key)
-                        new_slice = jnp.asarray(new_slice, dtype=self.INT)
+                        new_slice = jnp.asarray(jnp.round(new_slice), dtype=self.INT)
                         new_slices.append(new_slice)
                         error = error | err
                     sample = sample[tuple(new_slices)]
