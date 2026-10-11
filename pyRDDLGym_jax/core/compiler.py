@@ -542,22 +542,46 @@ class JaxRDDLCompiler:
                 'termination': terminated,
                 'inequalities': inequalities,
                 'equalities': equalities
-            }                
-            sim_state = sim_state.replace(key=key, fls=fls, model_params=params)
+            }
+
+            # model parameters are read-only within a step: statistics that operations
+            # add to them (i.e. keys not in the input) are moved to the log instead, and
+            # can be used to update the model parameters between rollouts
+            model_stats = {}
+            for (id_, node) in params.items():
+                input_node = sim_state.model_params.get(id_, {})
+                if isinstance(node, dict):
+                    node_stats = {name: value for (name, value) in node.items()
+                                  if name not in input_node}
+                    if node_stats:
+                        model_stats[id_] = node_stats
+            log['model_stats'] = model_stats
+            sim_state = sim_state.replace(key=key, fls=fls)
             return sim_state, log
         
         return _jax_wrapped_single_step        
     
+    def update_model_params(self, model_params: Dict[str, Any],
+                            model_stats: Dict[str, Any]) -> Dict[str, Any]:
+        '''Updates the model parameters from the statistics that operations collected
+        in the log of the rollouts (e.g. running estimates used to scale relaxations).
+
+        :param model_params: the model parameters used in the rollouts
+        :param model_stats: the statistics collected in the rollouts
+        '''
+        return model_params
+
     def _compile_policy_step(self, policy, transition_fn):
         def _jax_wrapped_policy_step(sim_state, planner_state):
             key, subkey = random.split(sim_state.key)
             actions, entropy = policy(sim_state.replace(key=key), planner_state)
             sim_state, log = transition_fn(sim_state.replace(key=subkey), actions)
             log['entropy'] = entropy
-            return sim_state.fls, sim_state.model_params, log
+            return sim_state.fls, log
         return _jax_wrapped_policy_step
 
-    def _compile_batched_policy_step(self, policy_step_fn, n_batch, model_params_reduction):
+    # model parameters are read-only during rollouts, so they are shared by the batch
+    def _compile_batched_policy_step(self, policy_step_fn, n_batch):
         def _jax_wrapped_batched_policy_step(carry, step):
             sim_state, planner_state = carry
 
@@ -573,12 +597,10 @@ class JaxRDDLCompiler:
             keys = random.split(sim_state.key, num=1 + n_batch)
             sim_state = sim_state.replace(key=keys[1:], step=step)
             vmap_axes = (JaxRDDLSimState(key=0, fls=0, fls_hist=1), None)
-            fls, params, log = jax.vmap(
-                policy_step_fn, in_axes=vmap_axes)(sim_state, planner_state)
-            params = jax.tree_util.tree_map(model_params_reduction, params)
+            fls, log = jax.vmap(policy_step_fn, in_axes=vmap_axes)(sim_state, planner_state)
 
-            # update the sim state with the new fluents and model parameters
-            sim_state = sim_state.replace(key=keys[0], fls=fls, model_params=params)
+            # update the sim state with the new fluents
+            sim_state = sim_state.replace(key=keys[0], fls=fls)
 
             # update history with action the policy took at the current step
             if sim_state.fls_hist:
@@ -625,7 +647,6 @@ class JaxRDDLCompiler:
                          check_constraints: bool=False,
                          constraint_func: bool=False, 
                          cache_path_info: bool=False,
-                         model_params_reduction: Callable=lambda x: x[0],
                          aux_constr: Dict[str, Any]={}) -> Callable:
         '''Compiles the current RDDL model into a JAX transition function that 
         samples trajectories with a fixed horizon from a policy.
@@ -654,14 +675,12 @@ class JaxRDDLCompiler:
         :param constraint_func: produces the h(s, a) constraint function
         in addition to the usual outputs
         :param cache_path_info: whether to save full path traces as part of the log
-        :param model_params_reduction: how to aggregate updated model_params across runs
-        in the batch (defaults to selecting the first element's parameters in the batch)
         :param aux_constr: auxiliary info to pass when compiling constraint_func
         '''
         jax_fn = self.compile_transition(
             check_constraints, constraint_func, cache_path_info, aux_constr)
         jax_fn = self._compile_policy_step(policy, jax_fn)
-        jax_fn = self._compile_batched_policy_step(jax_fn, n_batch, model_params_reduction)
+        jax_fn = self._compile_batched_policy_step(jax_fn, n_batch)
         jax_fn = self._compile_unrolled_policy_step(jax_fn, n_steps, history_dependent)
         return jax_fn
     
