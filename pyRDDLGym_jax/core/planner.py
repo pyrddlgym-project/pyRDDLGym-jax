@@ -2907,7 +2907,16 @@ class JaxBackpropPlanner:
                     raise ValueError('Reward mask size must match reward dimension.')
                 rewards = rewards * mask[jnp.newaxis, ...]
                 entropy = entropy * mask[jnp.newaxis, ...]
-            
+
+            # rewards only count until the episode terminates: termination is checked
+            # on the next state, so the reward of the terminating step still counts
+            terminated = jnp.asarray(log['termination'], dtype=rewards.dtype)
+            not_terminated = jnp.cumprod(1. - terminated, axis=1)
+            alive = jnp.concatenate(
+                [jnp.ones_like(not_terminated[:, :1]), not_terminated[:, :-1]], axis=1)
+            rewards = rewards * alive
+            critic_values = critic_values * not_terminated[:, -1]
+
             # policy max entropy loss
             ent = self.start_entropy_coeff * jnp.power(
                 entropy_coeff_decay, planner_state.progress)

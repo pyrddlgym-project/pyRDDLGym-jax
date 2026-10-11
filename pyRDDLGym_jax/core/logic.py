@@ -262,9 +262,25 @@ class JaxRDDLCompilerWithGrad(JaxRDDLCompiler):
         if self.print_warnings and self.cpfs_without_grad:
             print(termcolor.colored(
                 f'[INFO] Gradient disabled for CPFs {self.cpfs_without_grad}.', 'dark_grey'))
- 
+
         return jax_cpfs
-    
+
+    # terminations are kept real-valued and combined with a soft or, so that the
+    # planner can differentiate through the probability of the episode ending
+    def _compile_terminations(self, aux):
+        return [self._jax(expr, aux, dtype=self.REAL) for expr in self.rddl.terminations]
+
+    def _jax_terminations(self):
+        terminations = self.terminations
+        def _jax_wrapped_terminations(key, errors, fls, nfls, params):
+            not_terminated = jnp.array(1., dtype=self.REAL)
+            for terminal in terminations:
+                sample, key, err, params = terminal(fls, nfls, params, key)
+                not_terminated = not_terminated * (1. - sample)
+                errors = errors | err
+            return 1. - not_terminated, key, errors, params
+        return _jax_wrapped_terminations
+
     def _compile_policy_cpfs(self, aux):
         
         # cpfs will all be cast to float
