@@ -196,7 +196,8 @@ class JaxRDDLCompiler:
         to the log file
         :param heading: the heading to print before compilation information
         :param extra_aux: extra info to save during compilations
-        :param compile_constraints: whether to compile constraints
+        :param compile_constraints: whether to compile invariants and preconditions
+        (terminations are part of the dynamics and are always compiled)
         :param compile_policy_block: whether to compile the policy block
         '''
         if extra_aux is None:
@@ -207,10 +208,10 @@ class JaxRDDLCompiler:
         if compile_constraints:
             self.invariants = self._compile_constraints(self.rddl.invariants, self.model_aux)
             self.preconditions = self._compile_constraints(self.rddl.preconditions, self.model_aux)
-            self.terminations = self._compile_constraints(self.rddl.terminations, self.model_aux)
         else:
-            self.invariants, self.preconditions, self.terminations = [], [], []
-        
+            self.invariants, self.preconditions = [], []
+        self.terminations = self._compile_terminations(self.model_aux)
+
         self.cpfs = self._compile_cpfs(self.model_aux)
         self.reward = self._compile_reward(self.model_aux)
 
@@ -249,7 +250,10 @@ class JaxRDDLCompiler:
     
     def _compile_constraints(self, constraints, aux):
         return [self._jax(expr, aux, dtype=jnp.bool_) for expr in constraints]
-        
+
+    def _compile_terminations(self, aux):
+        return self._compile_constraints(self.rddl.terminations, aux)
+
     def _compile_cpfs(self, aux):
         jax_cpfs = {}
         for cpfs in self.levels.values():
@@ -449,9 +453,9 @@ class JaxRDDLCompiler:
         constraint satisfaction. A list is returned containing values for all
         non-box inequality constraints.
         
-        :param check_constraints: whether state, action and termination 
-        conditions should be checked on each time step: this info is stored in the
-        returned log and does not raise an exception
+        :param check_constraints: whether state invariants and action preconditions
+        should be checked on each time step: this info is stored in the returned log
+        and does not raise an exception (termination is always evaluated)
         :param constraint_func: produces the h(s, a) function described above
         in addition to the usual outputs
         :param cache_path_info: whether to save full path traces as part of the log
@@ -468,9 +472,11 @@ class JaxRDDLCompiler:
         if check_constraints:
             precond_fn = self._jax_preconditions()
             invariant_fn = self._jax_invariants()
-            terminal_fn = self._jax_terminations()
         else:
-            precond_fn = invariant_fn = terminal_fn = None
+            precond_fn = invariant_fn = None
+        
+        # termination is part of the dynamics, so it is always evaluated
+        terminal_fn = self._jax_terminations()
         
         # compile optional inequalities
         if constraint_func:
@@ -527,10 +533,9 @@ class JaxRDDLCompiler:
             # check the state invariants and termination
             if check_constraints:
                 invariant, key, errors, params = invariant_fn(key, errors, fls, nfls, params)
-                terminated, key, errors, params = terminal_fn(key, errors, fls, nfls, params)
             else:
                 invariant = jnp.array(True, dtype=jnp.bool_)
-                terminated = jnp.array(False, dtype=jnp.bool_)
+            terminated, key, errors, params = terminal_fn(key, errors, fls, nfls, params)
                
             # prepare the return value
             log = {
@@ -669,9 +674,9 @@ class JaxRDDLCompiler:
         :param n_steps: the rollout horizon
         :param n_batch: how many rollouts each batch performs
         :param history_dependent: whether the policy is fed a history of past fluent values
-        :param check_constraints: whether state, action and termination 
-        conditions should be checked on each time step: this info is stored in the
-        returned log and does not raise an exception
+        :param check_constraints: whether state invariants and action preconditions
+        should be checked on each time step: this info is stored in the returned log
+        and does not raise an exception (termination is always evaluated)
         :param constraint_func: produces the h(s, a) constraint function
         in addition to the usual outputs
         :param cache_path_info: whether to save full path traces as part of the log
