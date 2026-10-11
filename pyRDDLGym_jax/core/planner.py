@@ -630,6 +630,8 @@ def _jax_clip_inward_fwd(x, lower, upper):
 
 def _jax_clip_inward_bwd(res, grad):
     x, lower, upper = res
+    lower = -jnp.inf if lower is None else lower
+    upper = jnp.inf if upper is None else upper
     keep = ((x >= lower) & (x <= upper)) | ((x > upper) & (grad > 0)) | ((x < lower) & (grad < 0))
     return jnp.where(keep, grad, 0.), None, None
 
@@ -830,8 +832,9 @@ class JaxStraightLinePlan(JaxPlan):
                 else:
                     if self._stochastic and self._wrap_sigmoid:
                         prob = _jax_bool_param_to_action(var, logits, hyperparams)
-                        entropy = entropy - jnp.sum(
-                            prob * safe_log(prob) + (1. - prob) * safe_log(1. - prob))
+                        z = hyperparams[var] * logits
+                        entropy = entropy + jnp.sum(
+                            prob * jax.nn.softplus(-z) + (1. - prob) * jax.nn.softplus(z))
                         key, subkey = random.split(key)
                         noise = random.logistic(
                             subkey, shape=jnp.shape(logits), dtype=compiled.REAL)
@@ -1394,9 +1397,10 @@ class JaxDeepReactivePolicy(JaxPlan):
                             
                             # stochastic sampling
                             if stochastic:
-                                prob = jax.nn.sigmoid(hyperparams[SIGMOID_KEY] * logits)
-                                entropy = entropy - jnp.sum(
-                                    prob * safe_log(prob) + (1. - prob) * safe_log(1. - prob))
+                                z = hyperparams[SIGMOID_KEY] * logits
+                                prob = jax.nn.sigmoid(z)
+                                entropy = entropy + jnp.sum(
+                                    prob * jax.nn.softplus(-z) + (1. - prob) * jax.nn.softplus(z))
                                 key, subkey = random.split(key)
                                 noise = random.logistic(
                                     subkey, shape=jnp.shape(logits), dtype=compiled.REAL)

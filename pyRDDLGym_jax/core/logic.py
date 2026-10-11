@@ -1096,7 +1096,8 @@ class SoftmaxSwitch(JaxRDDLCompilerWithGrad):
 
             # straight through estimator
             if self.use_switch_ste:
-                sample_pred_hard = jnp.asarray(sample_pred[jnp.newaxis, ...], dtype=self.INT)
+                sample_pred_hard = jnp.asarray(
+                    jnp.round(sample_pred[jnp.newaxis, ...]), dtype=self.INT)
                 hard_sample = jnp.take_along_axis(sample_cases, sample_pred_hard, axis=0)
                 assert jnp.shape(hard_sample)[0] == 1
                 hard_sample = hard_sample[0, ...]
@@ -1277,7 +1278,7 @@ class GumbelSigmoidBernoulli(JaxRDDLCompilerWithGrad):
             prob, key, err, params = jax_prob(fls, nfls, params, key)
             key, subkey = random.split(key)
             noise = random.logistic(key=subkey, shape=jnp.shape(prob), dtype=self.REAL)
-            logit = scipy.special.logit(jnp.clip(prob, eps, 1. - eps)) + noise          
+            logit = safe_log(prob, eps) - safe_log(1. - prob, eps) + noise
             sample = jax.nn.sigmoid(w * logit)
             self._jax_sample_callback(id_, 'bernoulli', sample, (prob,))
             if self.use_ste_bernoulli:
