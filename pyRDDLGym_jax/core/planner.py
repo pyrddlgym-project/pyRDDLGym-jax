@@ -33,6 +33,14 @@
 # heavy tails for natural evolution strategies." In Proceedings of the 13th Annual 
 # Conference on Genetic and Evolutionary Computation, pp. 845-852. 2011.
 #
+# [8] Loshchilov, Ilya, Tobias Glasmachers, and Hans-Georg Beyer. "Large scale black-box
+# optimization by limited-memory matrix adaptation." IEEE Transactions on Evolutionary
+# Computation 23, no. 2 (2019): 353-358.
+#
+# [9] Akimoto, Youhei, and Nikolaus Hansen. "Projection-based restricted covariance
+# matrix adaptation for high dimension." In Proceedings of the Genetic and Evolutionary
+# Computation Conference 2016, pp. 197-204. 2016.
+#
 # ***********************************************************************
 
 
@@ -1782,6 +1790,8 @@ class RollingMean:
         if len(memory) == self._window_size:
             self._total = self._total - memory.popleft()
         memory.append(x)
+        if not np.all(np.isfinite(self._total)):
+            self._total = np.sum(np.stack(memory), axis=0)
         return self._total / len(memory)
 
 
@@ -1853,9 +1863,10 @@ class NoImprovementStoppingRule(JaxPlannerStoppingRule):
 # ALL VERSIONS OF JAX PLANNER
 # 
 # - base class of all planners (compilation, optimization loop and actions)
-# - parameter exploring policy gradients (PGPE)
-# - separable natural evolution strategies (SNES)
 # - gradient descent through the relaxed model
+# - parameter exploring policy gradients (PGPE)
+# - limited-memory matrix adaptation evolution strategy (LM-MA-ES), which includes
+#   separable natural evolution strategies (SNES)
 # 
 # ***********************************************************************
 
@@ -1910,6 +1921,13 @@ def _jax_zero_tree(tree: Pytree) -> bool:
     leaves, _ = jax.tree_util.tree_flatten(
         jax.tree_util.tree_map(partial(jnp.allclose, b=0), tree))
     return jnp.all(jnp.asarray(leaves))
+
+
+@jax.jit
+def _jax_invalidate_loss(loss: jnp.ndarray, policy_params: Pytree) -> jnp.ndarray:
+    finite = [jnp.all(jnp.isfinite(leaf), axis=tuple(range(1, jnp.ndim(leaf))))
+              for leaf in jax.tree_util.tree_leaves(policy_params)]
+    return jnp.where(jnp.all(jnp.stack(finite), axis=0), loss, jnp.inf)
     
 
 class JaxPlanner(metaclass=ABCMeta):
@@ -2698,7 +2716,7 @@ class JaxPlanner(metaclass=ABCMeta):
                 test_sim_state, planner_state)
             test_sim_state = test_sim_state.replace(model_params=model_params_test)
             train_loss = np.asarray(train_loss)
-            test_loss = np.asarray(test_loss)
+            test_loss = np.asarray(_jax_invalidate_loss(test_loss, planner_state.policy_params))
             test_loss_smooth = rolling_test_loss.update(test_loss)
 
             # ==================================================================
@@ -2722,7 +2740,7 @@ class JaxPlanner(metaclass=ABCMeta):
                 # evaluate with the state of this planner to reuse the compiled test loss
                 aux_loss, _ = self.test_loss(
                     test_sim_state, planner_state.replace(policy_params=aux_state.policy_params))
-                aux_loss = np.asarray(aux_loss)
+                aux_loss = np.asarray(_jax_invalidate_loss(aux_loss, aux_state.policy_params))
                 aux_loss_smooth = rolling_aux_loss.update(aux_loss)
                 aux_return = -aux_loss_smooth
 
@@ -3486,50 +3504,79 @@ class JaxPGPEPlanner(JaxPlanner):
         self.update = _jax_wrapped_update
 
 
-class JaxSNESPlanner(JaxPlanner):
-    '''Separable natural evolution strategies (SNES) [7], that optimizes the policy on
-    the exact model by searching with a Gaussian N(mu, diag(sigma^2)) over the policy
-    parameters: mu and log sigma follow the natural gradient of the expected rank-based
-    utility of the sampled parameters, which makes the update invariant to monotone
-    transformations of the return. Samples are mirrored and share the random numbers of
-    the rollouts.'''
+class JaxLMMAESPlanner(JaxPlanner):
+    '''Limited-memory matrix adaptation evolution strategy (LM-MA-ES) [8], that
+    optimizes the policy on the exact model by searching with a Gaussian over the policy
+    parameters, whose covariance is the identity transformed by a small number of
+    evolution paths: this learns correlations between parameters at a cost linear in
+    the number of parameters. Samples share the random numbers of the rollouts.
+
+    Optionally, the covariance is scaled by a diagonal matrix D as in D (I + V V^T) D [9],
+    whose log is adapted by the natural gradient of the expected rank-based utility as in
+    separable natural evolution strategies (SNES) [7]. SNES is recovered with
+    num_directions=0, step_size_adaptation=False, diagonal_scaling=True,
+    mirrored_sampling=True and weights='utilities'.'''
 
     def __init__(self, rddl: Optional[RDDLLiftedModel]=None,
                  plan: Optional[JaxPlan]=None,
                  population_size: Optional[int]=None,
+                 num_directions: Optional[int]=None,
                  init_sigma: float=1.0,
-                 learning_rate_mu: float=1.0,
-                 learning_rate_sigma: Optional[float]=None,
+                 step_size_adaptation: bool=True,
+                 diagonal_scaling: bool=False,
+                 learning_rate_diagonal: Optional[float]=None,
+                 mirrored_sampling: bool=False,
+                 weights: str='truncation',
                  steps_per_update: int=1,
                  **planner_kwargs) -> None:
-        '''Creates a new SNES planner.
+        '''Creates a new LM-MA-ES planner.
 
         :param rddl: the RDDL domain to optimize: None if used as an auxiliary planner
         :param plan: the policy/plan representation to optimize
         :param population_size: how many policy parameters to sample per optimization
-        step (rounded up to an even number for mirrored sampling): None uses the
-        default 4 + floor(3 ln n) for n policy parameters
-        :param init_sigma: initial standard deviation of the Gaussian
-        :param learning_rate_mu: learning rate of the mean
-        :param learning_rate_sigma: learning rate of the log standard deviation: None
-        uses the default (3 + ln n) / (5 sqrt(n)) for n policy parameters
+        step: None uses the default 4 + floor(3 ln n) for n policy parameters (rounded
+        up to an even number for mirrored sampling)
+        :param num_directions: how many evolution paths define the covariance (0 for a
+        diagonal covariance): None uses the default 4 + floor(3 ln n) for n policy
+        parameters
+        :param init_sigma: initial step size of the search
+        :param step_size_adaptation: whether to adapt the step size from the length of
+        its evolution path, otherwise it remains init_sigma
+        :param diagonal_scaling: whether to adapt a diagonal scaling of the covariance
+        :param learning_rate_diagonal: learning rate of the log diagonal scaling: None
+        uses the default (3 + ln n) / (5 sqrt(n)) of SNES for n policy parameters
+        :param mirrored_sampling: whether to sample mirrored pairs of parameters
+        :param weights: recombination weights of the samples sorted from best to worst,
+        either 'truncation' for the log-decreasing weights of the best half of the
+        samples, or 'utilities' for the rank-based utilities of all samples with a
+        baseline as in SNES
         :param steps_per_update: how many optimization steps are performed per planner
         update (useful for partially jit compiling the update loop)
         :param **planner_kwargs: arguments of the planning problem (see JaxPlanner)
         '''
+        if weights not in ('truncation', 'utilities'):
+            raise ValueError(f'Invalid weights <{weights}>, must be truncation or utilities.')
         self.population_size = population_size
+        self.num_directions = num_directions
         self.init_sigma = init_sigma
-        self.learning_rate_mu = learning_rate_mu
-        self.learning_rate_sigma = learning_rate_sigma
+        self.step_size_adaptation = step_size_adaptation
+        self.diagonal_scaling = diagonal_scaling
+        self.learning_rate_diagonal = learning_rate_diagonal
+        self.mirrored_sampling = mirrored_sampling
+        self.weights = weights
         self.steps_per_update = steps_per_update
-        super(JaxSNESPlanner, self).__init__(rddl=rddl, plan=plan, **planner_kwargs)
+        super(JaxLMMAESPlanner, self).__init__(rddl=rddl, plan=plan, **planner_kwargs)
 
     def summarize_optimizer(self) -> str:
-        return (f'[INFO] SNES hyper-parameters:\n'
+        return (f'[INFO] LM-MA-ES hyper-parameters:\n'
                 f'    population_size    ={self.population_size}\n'
+                f'    num_directions     ={self.num_directions}\n'
                 f'    init_sigma         ={self.init_sigma}\n'
-                f'    learning_rate_mu   ={self.learning_rate_mu}\n'
-                f'    learning_rate_sigma={self.learning_rate_sigma}\n'
+                f'    step_size_adapt    ={self.step_size_adaptation}\n'
+                f'    diagonal_scaling   ={self.diagonal_scaling}\n'
+                f'    learning_rate_diag ={self.learning_rate_diagonal}\n'
+                f'    mirrored_sampling  ={self.mirrored_sampling}\n'
+                f'    weights            ={self.weights}\n'
                 f'    steps_per_update   ={self.steps_per_update}\n')
 
     def _jax_compile_optimizer(self) -> None:
@@ -3539,25 +3586,59 @@ class JaxSNESPlanner(JaxPlanner):
         parallel_updates = self.parallel_updates
         init_policy = self.init_policy
         sigma0 = self.init_sigma
-        lr_mu = self.learning_rate_mu
+        use_step_size = self.step_size_adaptation
+        use_diagonal = self.diagonal_scaling
+        mirrored = self.mirrored_sampling
 
-        # population size and learning rate of sigma depend on the number of parameters
+        # the search operates on the policy parameters flattened to a vector
         sim_state = self.compiled.init_sim_state(
             random.PRNGKey(0), None, self.batch_size_train, print_warnings=False)
         param_shapes, _ = jax.eval_shape(self.plan.initializer, sim_state)
-        n = sum(int(np.prod(leaf.shape)) for leaf in jax.tree_util.tree_leaves(param_shapes))
-        n = max(n, 1)
+        param_template = jax.tree_util.tree_map(
+            lambda leaf: jnp.zeros(leaf.shape, dtype=leaf.dtype), param_shapes)
+        _, unravel = jax.flatten_util.ravel_pytree(param_template)
+        ravel = lambda params: jax.flatten_util.ravel_pytree(params)[0]
+        n = max(sum(int(np.prod(leaf.shape))
+                    for leaf in jax.tree_util.tree_leaves(param_shapes)), 1)
+
+        # default hyper-parameters of LM-MA-ES depend on the number of parameters
         population_size = self.population_size
         if population_size is None:
             population_size = 4 + int(3 * np.log(n))
-        num_mirrored = (population_size + 1) // 2
-        population_size = 2 * num_mirrored
-        lr_sigma = self.learning_rate_sigma
-        if lr_sigma is None:
-            lr_sigma = (3 + np.log(n)) / (5 * np.sqrt(n))
+        if mirrored:
+            population_size = 2 * ((population_size + 1) // 2)
+        num_directions = self.num_directions
+        if num_directions is None:
+            num_directions = 4 + int(3 * np.log(n))
 
-        # rank-based utilities of the samples sorted from best to worst
+        # recombination weights of the samples sorted from best to worst
         ranks = np.arange(1, population_size + 1)
+        if self.weights == 'truncation':
+            num_parents = max(population_size // 2, 1)
+            weights = np.maximum(0., np.log(num_parents + 0.5) - np.log(ranks))
+            weights[num_parents:] = 0.
+            weights = weights / np.sum(weights)
+        else:
+            weights = np.maximum(0., np.log(population_size / 2 + 1) - np.log(ranks))
+            weights = weights / np.sum(weights) - 1. / population_size
+        mu_eff = 1. / np.sum(np.square(weights))
+
+        # learning rates of the step size and of the directions
+        c_sigma = 2. * population_size / n
+        powers = np.arange(num_directions)
+        c_d = 1. / (np.power(1.5, powers) * n)
+        c_c = population_size / (np.power(4., powers) * n)
+        path_scale_sigma = np.sqrt(mu_eff * c_sigma * (2. - c_sigma))
+        path_scale_c = np.sqrt(mu_eff * c_c * (2. - c_c))
+        weights = jnp.asarray(weights, dtype=real_dtype)
+        c_d = jnp.asarray(c_d, dtype=real_dtype)
+        c_c = jnp.asarray(c_c, dtype=real_dtype)
+        path_scale_c = jnp.asarray(path_scale_c, dtype=real_dtype)
+
+        # rank-based utilities of the samples for the diagonal scaling as in SNES
+        lr_diagonal = self.learning_rate_diagonal
+        if lr_diagonal is None:
+            lr_diagonal = (3 + np.log(n)) / (5 * np.sqrt(n))
         utilities = np.maximum(0., np.log(population_size / 2 + 1) - np.log(ranks))
         utilities = utilities / np.sum(utilities) - 1. / population_size
         utilities = jnp.asarray(utilities, dtype=real_dtype)
@@ -3567,92 +3648,141 @@ class JaxSNESPlanner(JaxPlanner):
         #
         # ***********************************************************************
 
-        # the policy parameters are the mean of the Gaussian and the optimizer state
-        # holds its standard deviation
-        def _jax_wrapped_batched_snes_init(sim_state, planner_state, init_policy_params=True):
+        # the policy parameters are the mean of the search, and the optimizer state
+        # holds the step size, its evolution path and the directions of the covariance
+        # (and the diagonal scaling)
+        def _jax_wrapped_batched_lmmaes_init(sim_state, planner_state,
+                                             init_policy_params=True):
             if init_policy_params:
                 params, hyperparams = init_policy(sim_state)
                 planner_state = planner_state.replace(
                     policy_params=params, hyperparams=hyperparams)
-            sigma = jax.tree_util.tree_map(
-                partial(jnp.full_like, fill_value=sigma0, dtype=real_dtype),
-                planner_state.policy_params)
-            return planner_state.replace(opt_state={'sigma': sigma})
+            opt_state = {
+                'sigma': jnp.full((parallel_updates,), sigma0, dtype=real_dtype),
+                'path': jnp.zeros((parallel_updates, n), dtype=real_dtype),
+                'directions': jnp.zeros(
+                    (parallel_updates, num_directions, n), dtype=real_dtype),
+                'iteration': jnp.zeros((parallel_updates,), dtype=jnp.int32)
+            }
+            if use_diagonal:
+                opt_state['diagonal'] = jnp.ones((parallel_updates, n), dtype=real_dtype)
+            return planner_state.replace(opt_state=opt_state)
         self.initialize = jax.jit(
-            _jax_wrapped_batched_snes_init, static_argnames=['init_policy_params'])
+            _jax_wrapped_batched_lmmaes_init, static_argnames=['init_policy_params'])
 
         # ***********************************************************************
         # PARAMETER UPDATE
         #
         # ***********************************************************************
 
-        # mirrored samples y ~ N(0, I) of the standardized parameters
-        def _jax_wrapped_sample(key, mu):
-            treedef = jax.tree_util.tree_structure(mu)
-            keys = random.split(key, num=treedef.num_leaves)
-            keys = jax.tree_util.tree_unflatten(treedef=treedef, leaves=keys)
-            y = jax.tree_util.tree_map(
-                lambda k, leaf: random.normal(
-                    k, shape=(num_mirrored,) + jnp.shape(leaf), dtype=real_dtype),
-                keys, mu)
-            return jax.tree_util.tree_map(lambda leaf: jnp.concatenate([leaf, -leaf]), y)
+        # transforms samples z ~ N(0, I) by the directions learned so far: each factor
+        # (1 - c) I + c v v^T of the transformation M is symmetric
+        def _jax_wrapped_transform(z, directions, iteration):
+            if num_directions == 0:
+                return z
+            def _jax_wrapped_apply_direction(j, d):
+                v = directions[j]
+                d_new = (1. - c_d[j]) * d + c_d[j] * jnp.outer(d @ v, v)
+                return jnp.where(j < iteration, d_new, d)
+            return jax.lax.fori_loop(0, num_directions, _jax_wrapped_apply_direction, z)
 
-        def _jax_wrapped_snes_update(sim_state, planner_state):
+        # applies the inverse transpose of M to z, inverting each factor in closed form
+        def _jax_wrapped_inverse_transpose(z, directions, iteration):
+            if num_directions == 0:
+                return z
+            def _jax_wrapped_invert_direction(j, e):
+                v, c = directions[j], c_d[j]
+                denom = (1. - c) + c * jnp.sum(jnp.square(v))
+                e_new = (e - c * jnp.outer(e @ v, v) / denom) / (1. - c)
+                return jnp.where(j < iteration, e_new, e)
+            return jax.lax.fori_loop(0, num_directions, _jax_wrapped_invert_direction, z)
+
+        # samples z ~ N(0, I) and the transformed samples d = M z (optionally mirrored)
+        def _jax_wrapped_sample(key, opt_state):
+            num_samples = population_size // 2 if mirrored else population_size
+            z = random.normal(key, shape=(num_samples, n), dtype=real_dtype)
+            d = _jax_wrapped_transform(z, opt_state['directions'], opt_state['iteration'])
+            if mirrored:
+                z, d = jnp.concatenate([z, -z]), jnp.concatenate([d, -d])
+            return z, d
+
+        def _jax_wrapped_lmmaes_update(sim_state, planner_state):
 
             # do a single update step
-            def _jax_wrapped_snes_update_step(_, carry):
-                key, mu, sigma, *_ = carry
+            def _jax_wrapped_lmmaes_update_step(_, carry):
+                key, mu, opt_state, *_ = carry
+                sigma = opt_state['sigma']
+                diagonal = opt_state['diagonal'] if use_diagonal else 1.
                 key, sample_key, rollout_key = random.split(key, num=3)
 
                 # evaluate samples with common random numbers in the rollouts
-                y = _jax_wrapped_sample(sample_key, mu)
-                samples = jax.tree_util.tree_map(
-                    lambda m, s, yy: m + s * yy, mu, sigma, y)
+                mu_flat = ravel(mu)
+                z, d = _jax_wrapped_sample(sample_key, opt_state)
                 _sim_state = sim_state.replace(key=rollout_key)
                 losses = jax.vmap(
-                    lambda p: loss_fn(_sim_state, planner_state.replace(policy_params=p))[0]
-                )(samples)
+                    lambda dd: loss_fn(_sim_state, planner_state.replace(
+                        policy_params=unravel(mu_flat + sigma * diagonal * dd)))[0]
+                )(d)
 
-                # assign utilities by rank, with invalid returns ranked last
-                ranked_losses = jnp.where(jnp.isfinite(losses), losses, jnp.inf)
-                u = jnp.zeros_like(utilities).at[jnp.argsort(ranked_losses)].set(utilities)
+                # recombine the samples sorted from best to worst, with invalid returns
+                # ranked last
+                order = jnp.argsort(jnp.where(jnp.isfinite(losses), losses, jnp.inf))
+                z_sorted, d_sorted = z[order], d[order]
+                z_mean = weights @ z_sorted
+                d_mean = weights @ d_sorted
 
-                # natural gradient steps for mean and log standard deviation
-                step = jax.tree_util.tree_map(
-                    lambda s, yy: s * jnp.tensordot(u, yy, axes=1), sigma, y)
-                mu = jax.tree_util.tree_map(lambda m, d: m + lr_mu * d, mu, step)
-                sigma = jax.tree_util.tree_map(
-                    lambda s, yy: s * jnp.exp(
-                        0.5 * lr_sigma * jnp.tensordot(u, jnp.square(yy) - 1., axes=1)),
-                    sigma, y)
+                # update the mean, the evolution paths of the step size and covariance
+                step = sigma * diagonal * d_mean
+                mu = unravel(mu_flat + step)
+                new_opt_state = dict(opt_state)
+                if num_directions > 0:
+                    new_opt_state['directions'] = (
+                        (1. - c_c)[:, None] * opt_state['directions'] +
+                        path_scale_c[:, None] * z_mean[None, :])
+                    new_opt_state['iteration'] = opt_state['iteration'] + 1
+                if use_step_size:
+                    path = (1. - c_sigma) * opt_state['path'] + path_scale_sigma * z_mean
+                    new_opt_state['path'] = path
+                    new_opt_state['sigma'] = sigma * jnp.exp(
+                        0.5 * c_sigma * (jnp.sum(jnp.square(path)) / n - 1.))
+
+                # natural gradient step of the log diagonal scaling: the score of the
+                # log scaling of each parameter is d * (M^-T z) - 1
+                if use_diagonal:
+                    e_sorted = _jax_wrapped_inverse_transpose(
+                        z_sorted, opt_state['directions'], opt_state['iteration'])
+                    score = d_sorted * e_sorted - 1.
+                    new_opt_state['diagonal'] = diagonal * jnp.exp(
+                        0.5 * lr_diagonal * (utilities @ score))
                 mu, converged = projection(planner_state.replace(policy_params=mu))
-                grad = jax.tree_util.tree_map(jnp.negative, step)
-                return (key, mu, sigma, converged, jnp.mean(losses), grad)
+                return (key, mu, new_opt_state, converged, jnp.mean(losses),
+                        unravel(-step))
 
             # do an unrolled update
-            mu, sigma = planner_state.policy_params, planner_state.opt_state['sigma']
-            carry = (sim_state.key, mu, sigma, True, jnp.zeros((), dtype=real_dtype),
+            mu = planner_state.policy_params
+            carry = (sim_state.key, mu, planner_state.opt_state, True,
+                     jnp.zeros((), dtype=real_dtype),
                      jax.tree_util.tree_map(jnp.zeros_like, mu))
-            _, mu, sigma, converged, loss, grad = jax.lax.fori_loop(
+            _, mu, opt_state, converged, loss, grad = jax.lax.fori_loop(
                 lower=0, upper=self.steps_per_update,
-                body_fun=_jax_wrapped_snes_update_step,
+                body_fun=_jax_wrapped_lmmaes_update_step,
                 init_val=carry
             )
-            return mu, {'sigma': sigma}, converged, loss, grad
+            return mu, opt_state, converged, loss, grad
 
         # for parallel policy update
-        def _jax_wrapped_batched_snes_updates(sim_state, planner_state):
+        def _jax_wrapped_batched_lmmaes_updates(sim_state, planner_state):
             keys = random.split(sim_state.key, num=1 + parallel_updates)
             sim_state = sim_state.replace(key=keys[1:])
             vmap_axes = (JaxRDDLSimState(key=0, model_params=0),
                          JaxPlannerState(policy_params=0, opt_state=0))
             params, opt_state, converged, loss, grad = jax.vmap(
-                _jax_wrapped_snes_update, in_axes=vmap_axes)(sim_state, planner_state)
+                _jax_wrapped_lmmaes_update, in_axes=vmap_axes)(sim_state, planner_state)
             planner_state = planner_state.replace(policy_params=params, opt_state=opt_state)
             sim_state = sim_state.replace(key=keys[0])
             zero_grads = jax.vmap(_jax_zero_tree)(grad)
             return sim_state, planner_state, loss, converged, grad, zero_grads
-        update_fn = jax.jit(_jax_wrapped_batched_snes_updates)
+        update_fn = jax.jit(_jax_wrapped_batched_lmmaes_updates)
 
         # the exact model is optimized, which advances the test simulation state: the
         # key of the train simulation state is advanced with it
@@ -3670,7 +3800,7 @@ class JaxBackpropPlanner(JaxPlanner):
     '''A class for optimizing an action sequence in the given RDDL MDP using 
     gradient descent through the relaxed model.'''
 
-    _DEFAULT_AUXILIARY = JaxSNESPlanner()
+    _DEFAULT_AUXILIARY = JaxLMMAESPlanner()
 
     def __init__(self, rddl: Optional[RDDLLiftedModel]=None,
                  plan: Optional[JaxPlan]=None,
