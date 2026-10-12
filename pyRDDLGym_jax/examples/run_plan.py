@@ -22,7 +22,7 @@ import pyRDDLGym
 from pyRDDLGym.core.debug.exception import raise_warning
 
 from pyRDDLGym_jax.core.planner import (
-    load_config, JaxBackpropPlanner, JaxOfflineController, JaxOnlineController
+    load_config, create_planner, JaxOfflineController, JaxOnlineController
 )
 
     
@@ -50,7 +50,7 @@ def main(domain: str, instance: str, method: str, episodes: int=1) -> None:
         planner_args['dashboard'].launch()
     
     # create the planning algorithm
-    planner = JaxBackpropPlanner(
+    planner = create_planner(
         rddl=env.model, dashboard_viz=env._visualizer, **planner_args)
     
     # evaluate the controller   

@@ -18,7 +18,7 @@ from scipy.optimize import minimize
 import pyRDDLGym
 from pyRDDLGym.core.debug.exception import raise_warning
 
-from pyRDDLGym_jax.core.planner import load_config, JaxBackpropPlanner, JaxOfflineController
+from pyRDDLGym_jax.core.planner import load_config, create_planner, JaxOfflineController
 
     
 def main(domain, instance, method, episodes=1):
@@ -36,7 +36,7 @@ def main(domain, instance, method, episodes=1):
     planner_args, _, train_args = load_config(config_path)
 
     # create the planning algorithm
-    planner = JaxBackpropPlanner(rddl=env.model, **planner_args)
+    planner = create_planner(rddl=env.model, **planner_args)
     
     # find the optimal plan
     loss_fn, grad_fn, guess, unravel_fn = planner.as_optimization_problem()
