@@ -35,10 +35,11 @@ from pyRDDLGym.core.debug.exception import raise_warning
 from pyRDDLGym.core.env import RDDLEnv
 
 from pyRDDLGym_jax.core.planner import (
-    JaxBackpropPlanner,
+    JaxPlanner,
     JaxOfflineController,
     JaxOnlineController,
-    load_config_from_string
+    load_config_from_string,
+    create_planner
 )
 
 # try to load the dash board
@@ -220,7 +221,7 @@ class JaxParameterTuning:
     def build_best_controller(self) -> Union[JaxOfflineController, JaxOnlineController]:
         '''Creates the concrete controller instance with the best hyper-parameters.'''
         planner_args, _, train_args = load_config_from_string(self.best_config)
-        planner = JaxBackpropPlanner(rddl=self.env.model, **planner_args)
+        planner = create_planner(rddl=self.env.model, **planner_args)
         class_ = JaxOnlineController if self.online else JaxOfflineController
         controller = class_(planner, **train_args)
         return controller
@@ -374,7 +375,7 @@ class JaxParameterTuning:
         env = RDDLEnv(domain, instance, vectorized=True, enforce_action_constraints=False)
     
         # run planning algorithm
-        planner = JaxBackpropPlanner(rddl=env.model, **planner_args)
+        planner = create_planner(rddl=env.model, **planner_args)
         planner.dashboard = None
         if online:
             average_reward = JaxParameterTuning.online_trials(
@@ -408,7 +409,7 @@ class JaxParameterTuning:
         '''
         
         if self.verbose:
-            print(JaxBackpropPlanner.summarize_system())
+            print(JaxPlanner.summarize_system())
         if print_hyperparams:
             print(self.summarize_hyperparameters())
         

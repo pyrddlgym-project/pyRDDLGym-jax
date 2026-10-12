@@ -44,7 +44,7 @@ from pyRDDLGym.core.debug.decompiler import RDDLDecompiler
 
 from pyRDDLGym_jax import __version__
 if TYPE_CHECKING:
-    from pyRDDLGym_jax.core.planner import JaxBackpropPlanner
+    from pyRDDLGym_jax.core.planner import JaxPlanner
     
     
 POLICY_DIST_HEIGHT = 400
@@ -93,7 +93,7 @@ class JaxPlannerDashboard:
         self.xticks = {}
         self.test_return = {}
         self.train_return = {}
-        self.pgpe_return = {}
+        self.auxiliary_return = {}
         self.basic_time_curve_last_progress = {}
         self.return_dist = {}
         self.return_dist_ticks = {}
@@ -355,7 +355,7 @@ class JaxPlannerDashboard:
                                     dbc.Col(Graph(id='test-return-graph'), width=6),
                                 ]),
                                 dbc.Row([                           
-                                    dbc.Col(Graph(id='pgpe-return-graph'), width=6)
+                                    dbc.Col(Graph(id='auxiliary-return-graph'), width=6)
                                 ]),
                                 dbc.Row([                           
                                     Graph(id='dist-return-graph')
@@ -739,24 +739,24 @@ class JaxPlannerDashboard:
             return fig
         
         @app.callback(
-            Output('pgpe-return-graph', 'figure'),
+            Output('auxiliary-return-graph', 'figure'),
             [Input('interval', 'n_intervals'),
              Input('trigger-experiment-check', 'children'),
              Input('tabs-main', 'active_tab')]
         )
-        def update_pgpe_return_graph(n, trigger, active_tab):
+        def update_auxiliary_return_graph(n, trigger, active_tab):
             if active_tab != 'tab-performance': return dash.no_update
             fig = go.Figure()
             for (row, checked) in self.checked.copy().items():
                 if checked:
                     fig.add_trace(go.Scatter(
-                        x=self.xticks[row], y=self.pgpe_return[row],
+                        x=self.xticks[row], y=self.auxiliary_return[row],
                         name=f'id={row}',
                         mode='lines+markers',
                         marker=dict(size=3), line=dict(width=2)
                     ))
             fig.update_layout(
-                title=dict(text="PGPE Return"),
+                title=dict(text="Auxiliary Planner Return"),
                 xaxis=dict(title=dict(text="Training Iteration")),
                 yaxis=dict(title=dict(text="Cumulative Reward")),
                 font=dict(size=PLOT_AXES_FONT_SIZE),
@@ -1390,7 +1390,7 @@ class JaxPlannerDashboard:
         dash_thread.start()
     
     @staticmethod
-    def get_planner_info(planner: 'JaxBackpropPlanner') -> Dict[str, Any]:
+    def get_planner_info(planner: 'JaxPlanner') -> Dict[str, Any]:
         '''Some additional info directly from the planner that is required by
         the dashboard.'''        
         return {
@@ -1428,7 +1428,7 @@ class JaxPlannerDashboard:
         self.xticks[experiment_id] = []
         self.train_return[experiment_id] = []
         self.test_return[experiment_id] = []
-        self.pgpe_return[experiment_id] = []
+        self.auxiliary_return[experiment_id] = []
         self.basic_time_curve_last_progress[experiment_id] = 0
         self.return_dist_ticks[experiment_id] = []
         self.return_dist_last_progress[experiment_id] = 0
@@ -1482,7 +1482,9 @@ class JaxPlannerDashboard:
             self.xticks[experiment_id].append(iteration)
             self.train_return[experiment_id].append(np.min(callback['train_return']))  
             self.test_return[experiment_id].append(np.min(callback['best_return']))
-            self.pgpe_return[experiment_id].append(np.min(callback['pgpe_return']))
+            aux_return = callback['auxiliary_return']
+            self.auxiliary_return[experiment_id].append(
+                np.nan if aux_return is None else np.min(aux_return))
             for (key, values) in walk_params(callback['model_params']):
                 value = np.mean(values, axis=0)
                 self.relaxed_exprs_values[experiment_id].setdefault(key, []).append(value)
