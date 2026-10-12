@@ -579,9 +579,8 @@ class JaxRDDLCompiler:
     def _compile_policy_step(self, policy, transition_fn):
         def _jax_wrapped_policy_step(sim_state, planner_state):
             key, subkey = random.split(sim_state.key)
-            actions, entropy = policy(sim_state.replace(key=key), planner_state)
+            actions = policy(sim_state.replace(key=key), planner_state)
             sim_state, log = transition_fn(sim_state.replace(key=subkey), actions)
-            log['entropy'] = entropy
             return sim_state.fls, log
         return _jax_wrapped_policy_step
 
