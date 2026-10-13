@@ -103,7 +103,8 @@ To run JaxPlan from within a Python application, refer to the following example:
 
 ```python
 import pyRDDLGym
-from pyRDDLGym_jax.core.planner import JaxBackpropPlanner, JaxOfflineController
+from pyRDDLGym_jax.core.controller import JaxOfflineController
+from pyRDDLGym_jax.core.planner import JaxBackpropPlanner
 
 # set up the environment (note the vectorized option must be True)
 env = pyRDDLGym.make("domain", "instance", vectorized=True)
@@ -162,7 +163,7 @@ The configuration file must then be passed to the planner during initialization.
 For example, the [previous script here](#running-from-another-python-application) can be modified to set parameters from a config file:
 
 ```python
-from pyRDDLGym_jax.core.planner import load_config
+from pyRDDLGym_jax.core.config import load_config
 
 # load the config file with planner settings
 planner_args, _, train_args = load_config("/path/to/config.cfg")

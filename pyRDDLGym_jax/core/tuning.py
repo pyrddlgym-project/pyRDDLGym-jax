@@ -34,13 +34,9 @@ import numpy as np
 from pyRDDLGym.core.debug.exception import raise_warning
 from pyRDDLGym.core.env import RDDLEnv
 
-from pyRDDLGym_jax.core.planner import (
-    JaxPlanner,
-    JaxOfflineController,
-    JaxOnlineController,
-    load_config_from_string,
-    create_planner
-)
+from pyRDDLGym_jax.core.config import load_config_from_string
+from pyRDDLGym_jax.core.controller import JaxOfflineController, JaxOnlineController
+from pyRDDLGym_jax.core.planner import JaxPlanner, create_planner
 
 # try to load the dash board
 try:
