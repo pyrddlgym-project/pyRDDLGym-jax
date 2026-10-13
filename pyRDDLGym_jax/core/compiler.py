@@ -51,17 +51,6 @@ except Exception:
     tfp = None
 
 
-@flax.struct.dataclass
-class JaxRDDLSimState:
-    '''The state of a Jax RDDL simulator.'''
-    key: jax.random.PRNGKey=None
-    step: int=None
-    fls: Dict=None
-    fls_hist: Dict=None
-    nfls: Dict=None
-    model_params: Any=None
-
-
 @jax.custom_jvp
 def safe_log(x, eps=1e-12):
     return jnp.where(x > 0, jnp.log(jnp.where(x > 0, x, 1.0)), -jnp.inf)
@@ -73,6 +62,17 @@ def safe_log_jvp(primals, tangents):
     val = safe_log(x, eps)
     grad = jnp.divide(x_dot, x + eps)
     return val, grad
+
+
+@flax.struct.dataclass
+class JaxRDDLSimState:
+    '''The state of a Jax RDDL simulator.'''
+    key: jax.random.PRNGKey=None
+    step: int=None
+    fls: Dict=None
+    fls_hist: Dict=None
+    nfls: Dict=None
+    model_params: Any=None
 
 
 class JaxRDDLCompiler:

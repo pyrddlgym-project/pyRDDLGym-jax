@@ -18,7 +18,9 @@ from scipy.optimize import minimize
 import pyRDDLGym
 from pyRDDLGym.core.debug.exception import raise_warning
 
-from pyRDDLGym_jax.core.planner import load_config, create_planner, JaxOfflineController
+from pyRDDLGym_jax.core.config import load_config
+from pyRDDLGym_jax.core.controller import JaxOfflineController
+from pyRDDLGym_jax.core.planner import create_planner
 
     
 def main(domain, instance, method, episodes=1):

@@ -21,9 +21,9 @@ import sys
 import pyRDDLGym
 from pyRDDLGym.core.debug.exception import raise_warning
 
-from pyRDDLGym_jax.core.planner import (
-    load_config, create_planner, JaxOfflineController, JaxOnlineController
-)
+from pyRDDLGym_jax.core.config import load_config
+from pyRDDLGym_jax.core.controller import JaxOfflineController, JaxOnlineController
+from pyRDDLGym_jax.core.planner import create_planner
 
     
 def main(domain: str, instance: str, method: str, episodes: int=1) -> None:
