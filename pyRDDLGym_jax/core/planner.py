@@ -41,6 +41,10 @@
 # matrix adaptation for high dimension." In Proceedings of the Genetic and Evolutionary
 # Computation Conference 2016, pp. 197-204. 2016.
 #
+# [10] Wang, Hao, Michael Emmerich, and Thomas Back. "Mirrored orthogonal sampling for
+# covariance matrix adaptation evolution strategies." Evolutionary Computation 27,
+# no. 4 (2019): 699-725.
+#
 # ***********************************************************************
 
 
@@ -1939,13 +1943,14 @@ class JaxLMMAESPlanner(JaxPlanner):
     optimizes the policy on the exact model by searching with a Gaussian over the policy
     parameters, whose covariance is the identity transformed by a small number of
     evolution paths: this learns correlations between parameters at a cost linear in
-    the number of parameters. Samples share the random numbers of the rollouts.
+    the number of parameters. Samples are orthogonal [10] and share the random numbers
+    of the rollouts.
 
     Optionally, the covariance is scaled by a diagonal matrix D as in D (I + V V^T) D [9],
     whose log is adapted by the natural gradient of the expected rank-based utility as in
     separable natural evolution strategies (SNES) [7]. SNES is recovered with
     num_directions=0, step_size_adaptation=False, diagonal_scaling=True,
-    mirrored_sampling=True and weights='utilities'.'''
+    mirrored_sampling=True, orthogonal_sampling=False and weights='utilities'.'''
 
     def __init__(self, rddl: Optional[RDDLLiftedModel]=None,
                  plan: Optional[JaxPlan]=None,
@@ -1956,6 +1961,7 @@ class JaxLMMAESPlanner(JaxPlanner):
                  diagonal_scaling: bool=False,
                  learning_rate_diagonal: Optional[float]=None,
                  mirrored_sampling: bool=False,
+                 orthogonal_sampling: bool=True,
                  weights: str='truncation',
                  steps_per_update: int=1,
                  **planner_kwargs) -> None:
@@ -1976,6 +1982,8 @@ class JaxLMMAESPlanner(JaxPlanner):
         :param learning_rate_diagonal: learning rate of the log diagonal scaling: None
         uses the default (3 + ln n) / (5 sqrt(n)) of SNES for n policy parameters
         :param mirrored_sampling: whether to sample mirrored pairs of parameters
+        :param orthogonal_sampling: whether to sample orthogonal parameters (in blocks
+        of the number of parameters), each with the length of a Gaussian sample
         :param weights: recombination weights of the samples sorted from best to worst,
         either 'truncation' for the log-decreasing weights of the best half of the
         samples, or 'utilities' for the rank-based utilities of all samples with a
@@ -1993,6 +2001,7 @@ class JaxLMMAESPlanner(JaxPlanner):
         self.diagonal_scaling = diagonal_scaling
         self.learning_rate_diagonal = learning_rate_diagonal
         self.mirrored_sampling = mirrored_sampling
+        self.orthogonal_sampling = orthogonal_sampling
         self.weights = weights
         self.steps_per_update = steps_per_update
         super(JaxLMMAESPlanner, self).__init__(rddl=rddl, plan=plan, **planner_kwargs)
@@ -2006,6 +2015,7 @@ class JaxLMMAESPlanner(JaxPlanner):
                 f'    diagonal_scaling   ={self.diagonal_scaling}\n'
                 f'    learning_rate_diag ={self.learning_rate_diagonal}\n'
                 f'    mirrored_sampling  ={self.mirrored_sampling}\n'
+                f'    orthogonal_samples ={self.orthogonal_sampling}\n'
                 f'    weights            ={self.weights}\n'
                 f'    steps_per_update   ={self.steps_per_update}\n')
 
@@ -2019,6 +2029,7 @@ class JaxLMMAESPlanner(JaxPlanner):
         use_step_size = self.step_size_adaptation
         use_diagonal = self.diagonal_scaling
         mirrored = self.mirrored_sampling
+        orthogonal = self.orthogonal_sampling
 
         # the search operates on the policy parameters flattened to a vector
         sim_state = self.compiled.init_sim_state(
@@ -2127,10 +2138,25 @@ class JaxLMMAESPlanner(JaxPlanner):
                 return jnp.where(j < iteration, e_new, e)
             return jax.lax.fori_loop(0, num_directions, _jax_wrapped_invert_direction, z)
 
+        # samples z ~ N(0, I) made orthogonal in blocks of at most n: each sample keeps
+        # its length, which is independent of its direction
+        def _jax_wrapped_orthogonal_normal(key, num_samples):
+            block = min(num_samples, n)
+            num_blocks = -(-num_samples // block)
+            g = random.normal(key, shape=(num_blocks, block, n), dtype=real_dtype)
+            q, r = jnp.linalg.qr(jnp.swapaxes(g, 1, 2))
+            signs = jnp.sign(jnp.diagonal(r, axis1=1, axis2=2))
+            q = jnp.swapaxes(q, 1, 2) * signs[..., None]
+            z = q * jnp.linalg.norm(g, axis=2, keepdims=True)
+            return jnp.reshape(z, (-1, n))[:num_samples]
+
         # samples z ~ N(0, I) and the transformed samples d = M z (optionally mirrored)
         def _jax_wrapped_sample(key, opt_state):
             num_samples = population_size // 2 if mirrored else population_size
-            z = random.normal(key, shape=(num_samples, n), dtype=real_dtype)
+            if orthogonal:
+                z = _jax_wrapped_orthogonal_normal(key, num_samples)
+            else:
+                z = random.normal(key, shape=(num_samples, n), dtype=real_dtype)
             d = _jax_wrapped_transform(z, opt_state['directions'], opt_state['iteration'])
             if mirrored:
                 z, d = jnp.concatenate([z, -z]), jnp.concatenate([d, -d])
