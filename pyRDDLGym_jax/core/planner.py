@@ -1793,19 +1793,21 @@ class JaxPGPEPlanner(JaxPlanner):
 
             # evaluate the returns for the sampled policy parameters
             sim_state = sim_state.replace(key=subkey)
-            r1 = -loss_fn(sim_state, planner_state.replace(policy_params=p1))[0]
-            r2 = -loss_fn(sim_state, planner_state.replace(policy_params=p2))[0]
-            r_max = jnp.maximum(r_max, r1)
-            r_max = jnp.maximum(r_max, r2)            
+            samples = (p1, p2, p3, p4) if super_symmetric else (p1, p2)
+            samples = jax.tree_util.tree_map(lambda *leaves: jnp.stack(leaves), *samples)
+            returns = -jax.vmap(lambda params: loss_fn(
+                sim_state, planner_state.replace(policy_params=params))[0])(samples)
+            loss = -jnp.mean(returns)
 
-            # super symmetric sampling requires two more trajectories and their returns
+            # the samples give no gradient if any of their returns is invalid
+            valid = jnp.all(jnp.isfinite(returns))
+            returns = jnp.where(valid, returns, 0.)
+            r_max = jnp.where(valid, jnp.maximum(r_max, jnp.max(returns)), r_max)
             if super_symmetric:
-                r3 = -loss_fn(sim_state, planner_state.replace(policy_params=p3))[0]
-                r4 = -loss_fn(sim_state, planner_state.replace(policy_params=p4))[0]
-                r_max = jnp.maximum(r_max, r3)
-                r_max = jnp.maximum(r_max, r4)       
+                r1, r2, r3, r4 = returns
             else:
-                r3, r4 = r1, r2     
+                r1, r2 = returns
+                r3, r4 = r1, r2
 
             # calculate gradients
             grad_mu = jax.tree_util.tree_map(
@@ -1816,7 +1818,6 @@ class JaxPGPEPlanner(JaxPlanner):
                 partial(_jax_wrapped_sigma_grad, r1=r1, r2=r2, r3=r3, r4=r4, m=r_max, ent=ent), 
                 epsilon, epsilon_star, sigma
             )
-            loss = -(r1 + r2 + r3 + r4) / 4
             return grad_mu, grad_sigma, r_max, loss
 
         # calculate the policy gradients with batching on the first dimension
@@ -1960,7 +1961,7 @@ class JaxLMMAESPlanner(JaxPlanner):
                  step_size_adaptation: bool=True,
                  diagonal_scaling: bool=False,
                  learning_rate_diagonal: Optional[float]=None,
-                 mirrored_sampling: bool=False,
+                 mirrored_sampling: bool=True,
                  orthogonal_sampling: bool=True,
                  weights: str='truncation',
                  steps_per_update: int=1,

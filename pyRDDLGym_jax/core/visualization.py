@@ -1511,11 +1511,15 @@ class JaxPlannerDashboard:
             action_output[action] = action_values.reshape(action_values.shape[:2] + (-1,))
         self.action_output[experiment_id] = action_output
         
-        # data for state heatmaps
+        # data for state heatmaps: planners that optimize the exact model do not log
+        # train rollouts, so their test rollouts are shown in place of them
+        train_log = callback['train_log']
+        if 'fluents' not in train_log:
+            train_log = callback['test_log']
         train_state_output = {}
         test_state_output = {}
         for state in rddl.state_fluents:
-            state_values = np.asarray(callback['train_log']['fluents'][state][0])
+            state_values = np.asarray(train_log['fluents'][state][0])
             train_state_output[state] = state_values.reshape(state_values.shape[:2] + (-1,))
             state_values = np.asarray(callback['test_log']['fluents'][state][0])
             test_state_output[state] = state_values.reshape(state_values.shape[:2] + (-1,))
@@ -1523,10 +1527,10 @@ class JaxPlannerDashboard:
         self.test_state_output[experiment_id] = test_state_output
         
         # data for reward distributions
-        self.train_reward_dist[experiment_id] = np.mean(callback['train_log']['reward'], axis=0)
+        self.train_reward_dist[experiment_id] = np.mean(train_log['reward'], axis=0)
         self.test_reward_dist[experiment_id] = np.mean(callback['test_log']['reward'], axis=0)
         self.train_state_fluents[experiment_id] = {
-            name: np.asarray(callback['train_log']['fluents'][name][0])
+            name: np.asarray(train_log['fluents'][name][0])
             for name in rddl.state_fluents
         }
         # update experiment table info
