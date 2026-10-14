@@ -53,6 +53,7 @@ from collections import deque
 import copy
 from enum import Enum
 from functools import partial
+import inspect
 import sys
 import time
 from typing import Any, Callable, Dict, Generator, Optional, Tuple, Union
@@ -309,9 +310,15 @@ def _build_optax_optimizer(optimizer, optimizer_kwargs, clip_grad, noise_kwargs,
                            line_search_kwargs, ema_decay,
                            reduce_on_plateau_kwargs):
 
-    # set optimizer
+    # set optimizer: integer arguments (including defaults) are structural, such as the
+    # minimum dimension to factor in adafactor, and cannot be traced
     try:
-        optimizer = optax.inject_hyperparams(optimizer)(**optimizer_kwargs)
+        arguments = inspect.signature(optimizer).bind(**optimizer_kwargs)
+        arguments.apply_defaults()
+        static_args = [name for (name, value) in arguments.arguments.items()
+                       if isinstance(value, int) and not isinstance(value, bool)]
+        optimizer = optax.inject_hyperparams(
+            optimizer, static_args=static_args)(**optimizer_kwargs)
         injected = True
     except Exception as _:
         print(termcolor.colored(
@@ -1497,12 +1504,13 @@ class JaxPGPEPlanner(JaxPlanner):
                  steps_per_update: int=1,
                  init_sigma: float=1.0,
                  sigma_range: Tuple[float, float]=(1e-5, 1e5),
-                 scale_reward: bool=True,
+                 reward_shaping: Optional[str]='ranks',
                  min_reward_scale: float=1e-5,
                  super_symmetric: bool=True,
                  super_symmetric_accurate: bool=True,
                  project_samples: bool=False,
                  optimizer: Callable[..., optax.GradientTransformation]=optax.adam,
+                 optimizer_sigma: Optional[Callable[..., optax.GradientTransformation]]=None,
                  optimizer_kwargs_mu: Optional[Kwargs]=None,
                  optimizer_kwargs_sigma: Optional[Kwargs]=None,
                  clip_grad_mu: Optional[float]=None,
@@ -1522,14 +1530,18 @@ class JaxPGPEPlanner(JaxPlanner):
         update (useful for partially jit compiling the update loop)
         :param init_sigma: initial standard deviation of Gaussian
         :param sigma_range: bounds to constrain standard deviation
-        :param scale_reward: whether to apply reward scaling as in the paper
-        :param min_reward_scale: minimum reward scaling to avoid underflow
+        :param reward_shaping: how the returns of the sampled policy parameters are
+        shaped: 'scale' applies the reward scaling of the paper, 'ranks' replaces the
+        returns by their centered ranks in [-0.5, 0.5], and None uses the raw returns
+        :param min_reward_scale: minimum reward scaling to avoid underflow ('scale' only)
         :param super_symmetric: whether to use super-symmetric sampling as in the paper
         :param super_symmetric_accurate: whether to use the accurate formula for super-
         symmetric sampling or the simplified but biased formula
         :param project_samples: whether to use projected gradient on the sampled
         plan parameters (possibly introduces bias into the update rule)
         :param optimizer: a factory for an optax SGD algorithm
+        :param optimizer_sigma: a factory for an optax SGD algorithm of the standard
+        deviation (the same as the optimizer of the mean if None)
         :param optimizer_kwargs_mu: a dictionary of parameters to pass to the SGD
         factory for the mean optimizer
         :param optimizer_kwargs_sigma: a dictionary of parameters to pass to the SGD
@@ -1547,7 +1559,14 @@ class JaxPGPEPlanner(JaxPlanner):
         self.steps_per_update = steps_per_update
         self.init_sigma = init_sigma
         self.sigma_range = sigma_range
-        self.scale_reward = scale_reward
+        if reward_shaping not in ('scale', 'ranks', None):
+            raise ValueError(f'Invalid reward_shaping <{reward_shaping}>: must be '
+                             f'\'scale\', \'ranks\' or None.')
+        if reward_shaping == 'ranks' and not super_symmetric and batch_size == 1:
+            raise ValueError('reward_shaping=\'ranks\' requires super_symmetric=True or '
+                             'batch_size > 1: the ranks of two returns always sum to zero, '
+                             'so the standard deviation would receive no gradient.')
+        self.reward_shaping = reward_shaping
         self.min_reward_scale = min_reward_scale
         self.super_symmetric = super_symmetric
         self.super_symmetric_accurate = super_symmetric_accurate
@@ -1566,11 +1585,15 @@ class JaxPGPEPlanner(JaxPlanner):
         if optimizer_kwargs_sigma is None:
             optimizer_kwargs_sigma = {'learning_rate': 0.1}
         self.optimizer_kwargs_sigma = optimizer_kwargs_sigma
+        if optimizer_sigma is None:
+            optimizer_sigma = optimizer
         self.optimizer_name = optimizer
+        self.optimizer_sigma_name = optimizer_sigma
         mu_optimizer, inject_mu, _ = _build_optax_optimizer(
             optimizer, optimizer_kwargs_mu, clip_grad_mu, None, None, ema_decay, None)
         sigma_optimizer, inject_sigma, _ = _build_optax_optimizer(
-            optimizer, optimizer_kwargs_sigma, clip_grad_sigma, None, None, ema_decay, None)
+            optimizer_sigma, optimizer_kwargs_sigma, clip_grad_sigma, None, None, ema_decay,
+            None)
         self.optimizer = optax.multi_transform(
             {'mu': mu_optimizer, 'sigma': sigma_optimizer}, 
             param_labels={'mu': 'mu', 'sigma': 'sigma'}
@@ -1584,7 +1607,7 @@ class JaxPGPEPlanner(JaxPlanner):
         return (f'[INFO] PGPE hyper-parameters:\n'
                 f'    init_sigma         ={self.init_sigma}\n'
                 f'    sigma_range        ={self.sigma_range}\n'
-                f'    scale_reward       ={self.scale_reward}\n'
+                f'    reward_shaping     ={self.reward_shaping}\n'
                 f'    min_reward_scale   ={self.min_reward_scale}\n'
                 f'    super_symmetric    ={self.super_symmetric}\n'
                 f'        accurate       ={self.super_symmetric_accurate}\n'
@@ -1592,6 +1615,7 @@ class JaxPGPEPlanner(JaxPlanner):
                 f'    eps                ={self.eps}\n'
                 f'[INFO] PGPE optimizer hyper-parameters:\n'
                 f'    optimizer          ={self.optimizer_name}\n'
+                f'    optimizer_sigma    ={self.optimizer_sigma_name}\n'
                 f'    optimizer_kwargs:\n'
                 f'        mu   ={self.optimizer_kwargs_mu}\n'
                 f'        sigma={self.optimizer_kwargs_sigma}\n'
@@ -1613,7 +1637,8 @@ class JaxPGPEPlanner(JaxPlanner):
         init_policy = self.init_policy
         sigma0 = self.init_sigma
         sigma_lo, sigma_hi = self.sigma_range
-        scale_reward = self.scale_reward
+        centered_ranks = self.reward_shaping == 'ranks'
+        scale_reward = self.reward_shaping == 'scale'
         min_reward_scale = self.min_reward_scale
         super_symmetric = self.super_symmetric
         super_symmetric_accurate = self.super_symmetric_accurate
@@ -1782,66 +1807,76 @@ class JaxPGPEPlanner(JaxPlanner):
 
             return -(r_sigma * s + jnp.divide(ent, sigma))
             
-        # calculate the policy gradients
-        def _jax_wrapped_pgpe_grad(sim_state, planner_state, stats, r_max, ent):
-
-            # basic pgpe sampling
+        # sample policy parameters and evaluate their returns
+        def _jax_wrapped_pgpe_returns(sim_state, planner_state, stats):
             mu, sigma = stats['mu'], stats['sigma']
             key, subkey = random.split(sim_state.key)
             p1, p2, p3, p4, epsilon, epsilon_star = _jax_wrapped_sample_params(
                 key, mu, sigma, planner_state.hyperparams)
-
-            # evaluate the returns for the sampled policy parameters
             sim_state = sim_state.replace(key=subkey)
             samples = (p1, p2, p3, p4) if super_symmetric else (p1, p2)
             samples = jax.tree_util.tree_map(lambda *leaves: jnp.stack(leaves), *samples)
             returns = -jax.vmap(lambda params: loss_fn(
                 sim_state, planner_state.replace(policy_params=params))[0])(samples)
-            loss = -jnp.mean(returns)
+            return epsilon, epsilon_star, returns
 
-            # the samples give no gradient if any of their returns is invalid
-            valid = jnp.all(jnp.isfinite(returns))
-            returns = jnp.where(valid, returns, 0.)
-            r_max = jnp.where(valid, jnp.maximum(r_max, jnp.max(returns)), r_max)
+        # centered ranks of the returns in [-0.5, 0.5]
+        def _jax_wrapped_centered_ranks(returns):
+            flat = jnp.ravel(jnp.where(jnp.isfinite(returns), returns, -jnp.inf))
+            less = jnp.sum(flat[None, :] < flat[:, None], axis=1)
+            equal = jnp.sum(flat[None, :] == flat[:, None], axis=1)
+            ranks = (less + 0.5 * (equal - 1)) / (flat.size - 1) - 0.5
+            return jnp.reshape(ranks, jnp.shape(returns))
+
+        # calculate the policy gradients from the returns of the sampled parameters
+        def _jax_wrapped_pgpe_grad(epsilon, epsilon_star, sigma, returns, r_max, ent):
             if super_symmetric:
                 r1, r2, r3, r4 = returns
             else:
                 r1, r2 = returns
                 r3, r4 = r1, r2
-
-            # calculate gradients
             grad_mu = jax.tree_util.tree_map(
-                partial(_jax_wrapped_mu_grad, r1=r1, r2=r2, r3=r3, r4=r4, m=r_max), 
+                partial(_jax_wrapped_mu_grad, r1=r1, r2=r2, r3=r3, r4=r4, m=r_max),
                 epsilon, epsilon_star
-            ) 
+            )
             grad_sigma = jax.tree_util.tree_map(
-                partial(_jax_wrapped_sigma_grad, r1=r1, r2=r2, r3=r3, r4=r4, m=r_max, ent=ent), 
+                partial(_jax_wrapped_sigma_grad, r1=r1, r2=r2, r3=r3, r4=r4, m=r_max, ent=ent),
                 epsilon, epsilon_star, sigma
             )
-            return grad_mu, grad_sigma, r_max, loss
+            return grad_mu, grad_sigma
 
         # calculate the policy gradients with batching on the first dimension
         def _jax_wrapped_pgpe_grad_batched(sim_state, planner_state, stats, r_max, ent):
-            
-            # no batching required
+
+            # sample policy parameters and evaluate their returns
             if batch_size == 1:
-                mu_grad, sigma_grad, r_max, loss = _jax_wrapped_pgpe_grad(
-                    sim_state, planner_state, stats, r_max, ent)
-            
-            # for batching need to handle how meta-gradients of mean, sigma are aggregated
+                samples = _jax_wrapped_pgpe_returns(sim_state, planner_state, stats)
+                epsilon, epsilon_star, returns = jax.tree_util.tree_map(
+                    lambda x: x[None], samples)
             else:
-                # do the batched calculation of mean and sigma gradients
                 keys = random.split(sim_state.key, num=batch_size)
                 sim_state = sim_state.replace(key=keys)
-                vmap_axes = (JaxRDDLSimState(key=0), None, None, None, None)
-                mu_grad, sigma_grad, r_max, loss = jax.vmap(
-                    _jax_wrapped_pgpe_grad, in_axes=vmap_axes)(
-                        sim_state, planner_state, stats, r_max, ent)
+                vmap_axes = (JaxRDDLSimState(key=0), None, None)
+                epsilon, epsilon_star, returns = jax.vmap(
+                    _jax_wrapped_pgpe_returns, in_axes=vmap_axes)(
+                        sim_state, planner_state, stats)
+            loss = -jnp.mean(returns)
 
-                # calculate the average gradient for aggregation
-                mu_grad, sigma_grad, loss = jax.tree_util.tree_map(
-                    partial(jnp.mean, axis=0), (mu_grad, sigma_grad, loss))
-                r_max = jnp.max(r_max)
+            # the samples give no gradient if any of their returns is invalid, unless
+            # the returns are replaced by their centered ranks
+            if centered_ranks:
+                returns = _jax_wrapped_centered_ranks(returns)
+            else:
+                valid = jnp.all(jnp.isfinite(returns), axis=1, keepdims=True)
+                r_max = jnp.maximum(r_max, jnp.max(jnp.where(valid, returns, -jnp.inf)))
+                returns = jnp.where(valid, returns, 0.)
+
+            # calculate the average gradient over the batch
+            mu_grad, sigma_grad = jax.vmap(
+                _jax_wrapped_pgpe_grad, in_axes=(0, 0, None, 0, None, None))(
+                    epsilon, epsilon_star, stats['sigma'], returns, r_max, ent)
+            mu_grad, sigma_grad = jax.tree_util.tree_map(
+                partial(jnp.mean, axis=0), (mu_grad, sigma_grad))
             return {'mu': mu_grad, 'sigma': sigma_grad}, r_max, loss
         
         # ***********************************************************************
