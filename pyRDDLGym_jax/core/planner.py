@@ -2139,6 +2139,19 @@ class JaxLMMAESPlanner(JaxPlanner):
                 return jnp.where(j < iteration, e_new, e)
             return jax.lax.fori_loop(0, num_directions, _jax_wrapped_invert_direction, z)
 
+        # applies the inverse of M to z, inverting each factor in closed form in the
+        # reverse order of the transformation
+        def _jax_wrapped_inverse(z, directions, iteration):
+            if num_directions == 0:
+                return z
+            def _jax_wrapped_invert_direction(i, e):
+                j = num_directions - 1 - i
+                v, c = directions[j], c_d[j]
+                denom = (1. - c) + c * jnp.sum(jnp.square(v))
+                e_new = (e - c * jnp.outer(e @ v, v) / denom) / (1. - c)
+                return jnp.where(j < iteration, e_new, e)
+            return jax.lax.fori_loop(0, num_directions, _jax_wrapped_invert_direction, z)
+
         # samples z ~ N(0, I) made orthogonal in blocks of at most n: each sample keeps
         # its length, which is independent of its direction
         def _jax_wrapped_orthogonal_normal(key, num_samples):
@@ -2191,6 +2204,20 @@ class JaxLMMAESPlanner(JaxPlanner):
                 # update the mean, the evolution paths of the step size and covariance
                 step = sigma * diagonal * d_mean
                 mu = unravel(mu_flat + step)
+                mu, converged = projection(planner_state.replace(policy_params=mu))
+
+                # the evolution paths follow the step of the mean after projection, whose
+                # length is at most that of the step before projection
+                correction = ravel(mu) - (mu_flat + step)
+                step = step + correction
+                z_step = z_mean + _jax_wrapped_inverse(
+                    (correction / jnp.maximum(sigma * diagonal, 1e-30))[None, :],
+                    opt_state['directions'], opt_state['iteration'])[0]
+                z_norm = jnp.sqrt(jnp.sum(jnp.square(z_step)))
+                z_mean_norm = jnp.sqrt(jnp.sum(jnp.square(z_mean)))
+                z_mean = jnp.where(z_norm > z_mean_norm,
+                                   z_step * (z_mean_norm / jnp.maximum(z_norm, 1e-30)),
+                                   z_step)
                 new_opt_state = dict(opt_state)
                 if num_directions > 0:
                     new_opt_state['directions'] = (
@@ -2211,9 +2238,7 @@ class JaxLMMAESPlanner(JaxPlanner):
                     score = d_sorted * e_sorted - 1.
                     new_opt_state['diagonal'] = diagonal * jnp.exp(
                         0.5 * lr_diagonal * (utilities @ score))
-                mu, converged = projection(planner_state.replace(policy_params=mu))
-                return (key, mu, new_opt_state, converged, jnp.mean(losses),
-                        unravel(-step))
+                return (key, mu, new_opt_state, converged, jnp.mean(losses), unravel(-step))
 
             # do an unrolled update
             mu = planner_state.policy_params
