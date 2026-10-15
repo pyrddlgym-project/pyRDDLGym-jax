@@ -415,6 +415,7 @@ class JaxPlanner(metaclass=ABCMeta):
                  batch_size_test: Optional[int]=None,
                  rollout_horizon: Optional[int]=None,
                  parallel_updates: int=1,
+                 model_param_ranges: Optional[Dict[Any, Tuple[float, float]]]=None,
                  action_bounds: Optional[Bounds]=None,
                  auxiliary: Optional['JaxPlanner']=None,
                  compiler: JaxRDDLCompilerWithGrad=DefaultJaxRDDLCompilerWithGrad,
@@ -444,6 +445,14 @@ class JaxPlanner(metaclass=ABCMeta):
         optimization step
         :param rollout_horizon: lookahead planning horizon: None uses the env horizon
         :param parallel_updates: how many optimizers to run independently in parallel
+        :param model_param_ranges: optional ranges (low, high) of parameters of the
+        relaxed model (e.g. the weights of relaxations), each keyed by a parameter name
+        to match that parameter of every expression, an expression id to match all
+        parameters of that expression, or a path 'id/name' to match one parameter of one
+        expression (the most specific key applies): the parallel optimizers sample the
+        parameters from a Latin hypercube over their ranges on log scale (a dimension
+        per key), such that the policy with the best test return on the exact model
+        selects them
         :param action_bounds: box constraints on actions
         :param auxiliary: optional planner to run alongside this planner
         :param compiler: compiler instance to use for planning
@@ -472,6 +481,14 @@ class JaxPlanner(metaclass=ABCMeta):
             batch_size_test = batch_size_train
         self.batch_size_test = batch_size_test
         self.parallel_updates = parallel_updates
+        if model_param_ranges is not None:
+            if parallel_updates < 2:
+                raise ValueError('model_param_ranges requires parallel_updates > 1.')
+            for (name, (low, high)) in model_param_ranges.items():
+                if not 0 < low <= high:
+                    raise ValueError(f'Range of model parameter <{name}> must satisfy '
+                                     f'0 < low <= high, got ({low}, {high}).')
+        self.model_param_ranges = model_param_ranges
         if rollout_horizon is None and rddl is not None:
             rollout_horizon = rddl.horizon
         self.horizon = rollout_horizon
@@ -600,6 +617,7 @@ class JaxPlanner(metaclass=ABCMeta):
                   f'    batch_size_train  ={self.batch_size_train}\n'
                   f'    batch_size_test   ={self.batch_size_test}\n'
                   f'    parallel_updates  ={self.parallel_updates}\n'
+                  f'    model_param_ranges={self.model_param_ranges}\n'
                   f'    preprocessor      ={self.preprocessor}\n')
         result += self.summarize_optimizer()
         result += str(self.plan)
@@ -851,6 +869,58 @@ class JaxPlanner(metaclass=ABCMeta):
             x = np.repeat(x[np.newaxis, ...], self.parallel_updates, axis=0)
             return x
         return jax.tree_util.tree_map(make_batched, pytree)
+
+    def _sample_model_params(self, key, model_params):
+        '''Samples the parameters of the relaxed model of the parallel optimizers that
+        are matched by model_param_ranges from a Latin hypercube over their ranges on
+        log scale, given the parameters batched over the parallel optimizers.'''
+        ranges = self.model_param_ranges
+        num_samples = self.parallel_updates
+        leaves_with_paths, treedef = jax.tree_util.tree_flatten_with_path(model_params)
+        paths = ['/'.join(str(getattr(entry, 'key', getattr(entry, 'idx', entry)))
+                          for entry in path)
+                 for (path, _) in leaves_with_paths]
+        leaves = [leaf for (_, leaf) in leaves_with_paths]
+
+        # each parameter is matched by its most specific key: its path, then the id of
+        # its expression, then its name
+        def _specificity(name, path):
+            if path == name:
+                return 2
+            elif path.startswith(name + '/'):
+                return 1
+            elif path.rsplit('/', 1)[-1] == name:
+                return 0
+            else:
+                return -1
+        matched = {}
+        for (index, path) in enumerate(paths):
+            specificity, name = max(
+                (_specificity(str(name), path), str(name)) for name in ranges)
+            if specificity >= 0:
+                matched[index] = name
+                
+        # keys that match no parameter of this model are skipped, since the same ranges
+        # can be used for models with different relaxations
+        unmatched = [name for name in ranges
+                     if all(_specificity(str(name), path) < 0 for path in paths)]
+        if unmatched and self.print_warnings:
+            print(termcolor.colored(
+                f'[WARN] Model parameters {unmatched} in model_param_ranges were not '
+                f'found and will be ignored: keys must be parameter names, expression ids '
+                f'or paths in {paths}.', 'yellow'))
+
+        # each key is a dimension of the Latin hypercube
+        for (dim, (name, (low, high))) in enumerate(ranges.items()):
+            strata = np.asarray(random.permutation(random.fold_in(key, dim), num_samples))
+            values = low * np.power(high / low, (strata + 0.5) / num_samples)
+            for (index, matched_name) in matched.items():
+                if matched_name == str(name):
+                    leaf = np.asarray(leaves[index])
+                    values_shape = (-1,) + (1,) * (leaf.ndim - 1)
+                    leaves[index] = np.broadcast_to(
+                        np.reshape(values, values_shape), leaf.shape).astype(leaf.dtype)
+        return jax.tree_util.tree_unflatten(treedef, leaves)
     
     def as_optimization_problem(self, key: Optional[random.PRNGKey]=None,
                                 critic_params: Optional[Pytree]=None,
@@ -1060,8 +1130,10 @@ class JaxPlanner(metaclass=ABCMeta):
         # update model params from user
         if model_params is None:
             model_params = train_sim_state.model_params
-        train_sim_state = train_sim_state.replace(
-            model_params=self._batched_pytree(model_params))
+        model_params = self._batched_pytree(model_params)
+        if self.model_param_ranges is not None:
+            model_params = self._sample_model_params(key, model_params)
+        train_sim_state = train_sim_state.replace(model_params=model_params)
         test_sim_state = test_sim_state.replace(
             model_params=self._batched_pytree(test_sim_state.model_params))
                         
