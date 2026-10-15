@@ -120,14 +120,15 @@ def _load_config(config, args):
             raise ValueError(f'Invalid planner <{planner_method}>.')
         planner_args['planner'] = planner_class
 
-    # planner optimizer
-    planner_optimizer = planner_args.get('optimizer', None)
-    if planner_optimizer is not None:
-        optimizer = _getattr_any(packages=[optax], item=planner_optimizer)
-        if optimizer is None:
-            raise ValueError(f'Invalid optimizer <{planner_optimizer}>.')
-        else:
-            planner_args['optimizer'] = optimizer
+    # planner optimizers
+    for name in ('optimizer', 'optimizer_sigma'):
+        planner_optimizer = planner_args.get(name, None)
+        if planner_optimizer is not None:
+            optimizer = _getattr_any(packages=[optax], item=planner_optimizer)
+            if optimizer is None:
+                raise ValueError(f'Invalid optimizer <{planner_optimizer}>.')
+            else:
+                planner_args[name] = optimizer
 
     # auxiliary planner: if not specified the default of the planner class is used
     aux_kwargs = planner_args.pop('auxiliary_kwargs', {})
@@ -136,12 +137,13 @@ def _load_config(config, args):
             raise ValueError('auxiliary_kwargs was provided without auxiliary.')
     elif planner_args['auxiliary'] is not None:
         aux_method = planner_args['auxiliary']
-        if 'optimizer' in aux_kwargs:
-            aux_optimizer = _getattr_any(packages=[optax], item=aux_kwargs['optimizer'])
-            if aux_optimizer is None:
-                raise ValueError(f'Invalid optimizer <{aux_kwargs["optimizer"]}>.')
-            else:
-                aux_kwargs['optimizer'] = aux_optimizer
+        for name in ('optimizer', 'optimizer_sigma'):
+            if name in aux_kwargs:
+                aux_optimizer = _getattr_any(packages=[optax], item=aux_kwargs[name])
+                if aux_optimizer is None:
+                    raise ValueError(f'Invalid optimizer <{aux_kwargs[name]}>.')
+                else:
+                    aux_kwargs[name] = aux_optimizer
         planner_args['auxiliary'] = getattr(planner, aux_method)(**aux_kwargs)
 
     # preprocessor settings
