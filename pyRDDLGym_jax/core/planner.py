@@ -415,6 +415,7 @@ class JaxPlanner(metaclass=ABCMeta):
                  batch_size_test: Optional[int]=None,
                  rollout_horizon: Optional[int]=None,
                  parallel_updates: int=1,
+                 shard_parallel_updates: bool=False,
                  model_param_ranges: Optional[Dict[Any, Tuple[float, float]]]=None,
                  action_bounds: Optional[Bounds]=None,
                  auxiliary: Optional['JaxPlanner']=None,
@@ -445,6 +446,10 @@ class JaxPlanner(metaclass=ABCMeta):
         optimization step
         :param rollout_horizon: lookahead planning horizon: None uses the env horizon
         :param parallel_updates: how many optimizers to run independently in parallel
+        :param shard_parallel_updates: whether to shard the parallel optimizers over all
+        devices, if parallel_updates is a multiple of the number of devices (e.g. several
+        GPUs, or CPU cores exposed as devices with the XLA flag
+        --xla_force_host_platform_device_count set before importing jax)
         :param model_param_ranges: optional ranges (low, high) of parameters of the
         relaxed model (e.g. the weights of relaxations), each keyed by a parameter name
         to match that parameter of every expression, an expression id to match all
@@ -481,6 +486,7 @@ class JaxPlanner(metaclass=ABCMeta):
             batch_size_test = batch_size_train
         self.batch_size_test = batch_size_test
         self.parallel_updates = parallel_updates
+        self.shard_parallel_updates = shard_parallel_updates
         if model_param_ranges is not None:
             if parallel_updates < 2:
                 raise ValueError('model_param_ranges requires parallel_updates > 1.')
@@ -617,6 +623,7 @@ class JaxPlanner(metaclass=ABCMeta):
                   f'    batch_size_train  ={self.batch_size_train}\n'
                   f'    batch_size_test   ={self.batch_size_test}\n'
                   f'    parallel_updates  ={self.parallel_updates}\n'
+                  f'    shard_parallel    ={self.shard_parallel_updates}\n'
                   f'    model_param_ranges={self.model_param_ranges}\n'
                   f'    preprocessor      ={self.preprocessor}\n')
         result += self.summarize_optimizer()
@@ -869,6 +876,32 @@ class JaxPlanner(metaclass=ABCMeta):
             x = np.repeat(x[np.newaxis, ...], self.parallel_updates, axis=0)
             return x
         return jax.tree_util.tree_map(make_batched, pytree)
+
+    def _parallel_sharding(self):
+        '''Returns the sharding of the parallel optimizers over all devices, or None if
+        sharding is off, there is a single device, or the parallel optimizers are not a
+        multiple of the number of devices.'''
+        devices = jax.devices()
+        if not self.shard_parallel_updates or len(devices) < 2:
+            return None
+        if self.parallel_updates % len(devices) != 0:
+            if self.print_warnings:
+                print(termcolor.colored(
+                    f'[WARN] parallel_updates={self.parallel_updates} is not a multiple of '
+                    f'the {len(devices)} devices: parallel optimizers will run on a single '
+                    f'device.', 'yellow'))
+            return None
+        mesh = jax.sharding.Mesh(np.asarray(devices), ('parallel',))
+        return jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec('parallel'))
+
+    def _shard_parallel(self, pytree, sharding):
+        '''Places the leaves of a pytree batched over the parallel optimizers with the
+        given sharding along their leading axis.'''
+        if sharding is None:
+            return pytree
+        return jax.tree_util.tree_map(
+            lambda leaf: jax.device_put(leaf, sharding) if np.ndim(leaf) > 0 else leaf,
+            pytree)
 
     def _sample_model_params(self, key, model_params):
         '''Samples the parameters of the relaxed model of the parallel optimizers that
@@ -1133,9 +1166,16 @@ class JaxPlanner(metaclass=ABCMeta):
         model_params = self._batched_pytree(model_params)
         if self.model_param_ranges is not None:
             model_params = self._sample_model_params(key, model_params)
-        train_sim_state = train_sim_state.replace(model_params=model_params)
-        test_sim_state = test_sim_state.replace(
-            model_params=self._batched_pytree(test_sim_state.model_params))
+
+        # the parallel optimizers are sharded over all devices
+        sharding = self._parallel_sharding()
+        if sharding is not None and print_summary:
+            print(f'[INFO] Parallel optimizers are sharded over {len(jax.devices())} '
+                  f'devices.')
+        train_sim_state = train_sim_state.replace(
+            model_params=self._shard_parallel(model_params, sharding))
+        test_sim_state = test_sim_state.replace(model_params=self._shard_parallel(
+            self._batched_pytree(test_sim_state.model_params), sharding))
                         
         # ======================================================================
         # INITIALIZATION OF PLANNER STATE
@@ -1148,11 +1188,18 @@ class JaxPlanner(metaclass=ABCMeta):
                 raise ValueError('guess was provided without policy_hyperparams.')
             planner_state = planner_state.replace(policy_params=self._batched_pytree(guess))
         planner_state = self.initialize(train_sim_state, planner_state, guess is None)
+        planner_state = planner_state.replace(
+            policy_params=self._shard_parallel(planner_state.policy_params, sharding),
+            opt_state=self._shard_parallel(planner_state.opt_state, sharding),
+            opt_aux=self._shard_parallel(planner_state.opt_aux, sharding))
 
         # initialize the auxiliary planner at the policy parameters of this planner
         auxiliary = self.auxiliary
         if auxiliary is not None:
             aux_state = auxiliary.initialize(train_sim_state, planner_state, False)
+            aux_state = aux_state.replace(
+                opt_state=self._shard_parallel(aux_state.opt_state, sharding),
+                opt_aux=self._shard_parallel(aux_state.opt_aux, sharding))
             rolling_aux_loss = RollingMean(test_rolling_window)
         else:
             aux_state = rolling_aux_loss = None
