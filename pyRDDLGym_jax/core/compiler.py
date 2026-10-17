@@ -299,6 +299,8 @@ class JaxRDDLCompiler:
         elif etype == 'boolean' and (op == '^' or op == '&'):
             for arg in expr.args:
                 result.extend(self._extract_inequality_constraint(arg))
+        elif etype == 'aggregation' and op == 'forall':
+            result.extend(self._extract_inequality_constraint(expr.args[-1]))
         return result
     
     def _extract_equality_constraint(self, expr):
@@ -311,6 +313,8 @@ class JaxRDDLCompiler:
         elif etype == 'boolean' and (op == '^' or op == '&'):
             for arg in expr.args:
                 result.extend(self._extract_equality_constraint(arg))
+        elif etype == 'aggregation' and op == 'forall':
+            result.extend(self._extract_equality_constraint(expr.args[-1]))
         return result
             
     def _jax_nonlinear_constraints(self, aux):         
@@ -335,6 +339,87 @@ class JaxRDDLCompiler:
                     jax_equalities.append(jax_constr)
         return jax_inequalities, jax_equalities
     
+    def _jax_violations(self, expr, aux):
+        '''Compiles a boolean expression into the numbers of its ground conditions that
+        must change for it to become true and false: an atom (a comparison or any other
+        boolean expression) counts one if it has the other value, conjunction and forall
+        add the counts of their arguments to become true and take the smallest count to
+        become false, disjunction and exists do the reverse, and negation swaps them.
+        The first count is zero if and only if the expression is true.'''
+        NORMAL = JaxRDDLCompiler.ERROR_CODES['NORMAL']
+        etype, op = expr.etype
+        is_logical = etype == 'boolean'
+        is_quantifier = etype == 'aggregation' and (op == 'forall' or op == 'exists')
+
+        # any other boolean expression is an atom
+        if not (is_logical or is_quantifier):
+            jax_expr = self._jax(expr, aux)
+            def _jax_wrapped_atom_violations(fls, nfls, params, key):
+                sample, key, err, params = jax_expr(fls, nfls, params, key)
+                false = jnp.asarray(
+                    jnp.logical_not(jnp.asarray(sample, dtype=jnp.bool_)), dtype=self.REAL)
+                return (false, 1. - false), key, err, params
+            return _jax_wrapped_atom_violations
+
+        # counts to become true and false of the logical operations
+        def _and(a, b):
+            return a[0] + b[0], jnp.minimum(a[1], b[1])
+        def _or(a, b):
+            return jnp.minimum(a[0], b[0]), a[1] + b[1]
+        def _not(a):
+            return a[1], a[0]
+        def _implies(a, b):
+            return _or(_not(a), b)
+        def _equiv(a, b):
+            return _and(_implies(a, b), _implies(b, a))
+        def _combine(counts):
+            if is_quantifier:
+                _, axes = self.traced.cached_sim_info(expr)
+                (true, false), = counts
+                if op == 'forall':
+                    return jnp.sum(true, axis=axes), jnp.min(false, axis=axes)
+                else:
+                    return jnp.min(true, axis=axes), jnp.sum(false, axis=axes)
+            elif op == '~' and len(counts) == 1:
+                return _not(counts[0])
+            elif op == '^' or op == '&' or op == '|':
+                result = counts[0]
+                for count in counts[1:]:
+                    result = (_or if op == '|' else _and)(result, count)
+                return result
+            elif op == '=>':
+                return _implies(*counts)
+            elif op == '<=>':
+                return _equiv(*counts)
+            else:
+                return _not(_equiv(*counts))
+
+        args = [expr.args[-1]] if is_quantifier else expr.args
+        jax_args = [self._jax_violations(arg, aux) for arg in args]
+        def _jax_wrapped_violations(fls, nfls, params, key):
+            error = NORMAL
+            counts = []
+            for jax_arg in jax_args:
+                count, key, err, params = jax_arg(fls, nfls, params, key)
+                counts.append(count)
+                error = error | err
+            return _combine(counts), key, error, params
+        return _jax_wrapped_violations
+
+    def _jax_precondition_violations(self, aux):
+        '''Compiles the total number of ground conditions of the action preconditions that
+        are not box constraints that must change for them to hold.'''
+        jax_violations = [self._jax_violations(expr, aux)
+                          for (i, expr) in enumerate(self.rddl.preconditions)
+                          if not self.constraints.is_box_preconditions[i]]
+        def _jax_wrapped_precondition_violations(fls, nfls, params, key):
+            total = jnp.zeros((), dtype=self.REAL)
+            for jax_violation in jax_violations:
+                (true, _), key, _, params = jax_violation(fls, nfls, params, key)
+                total = total + jnp.sum(true)
+            return total
+        return _jax_wrapped_precondition_violations
+
     def _jax_preconditions(self):
         preconds = self.preconditions
         def _jax_wrapped_preconditions(key, errors, fls, nfls, params):
@@ -423,7 +508,7 @@ class JaxRDDLCompiler:
     def compile_transition(self, check_constraints: bool=False,
                            constraint_func: bool=False, 
                            cache_path_info: bool=False,
-                           aux_constr: Dict[str, Any]={}) -> Callable:
+                           aux_constr: Optional[Dict[str, Any]]=None) -> Callable:
         '''Compiles the current RDDL model into a JAX transition function that 
         samples the next state.
         
@@ -462,6 +547,8 @@ class JaxRDDLCompiler:
         :param aux_constr: auxiliary info to pass when compiling constraint_func
         '''
         NORMAL = JaxRDDLCompiler.ERROR_CODES['NORMAL']      
+        if aux_constr is None:
+            aux_constr = self.model_aux
         rddl = self.rddl
         
         # compile all components of the RDDL
@@ -576,11 +663,16 @@ class JaxRDDLCompiler:
         '''
         return model_params
 
-    def _compile_policy_step(self, policy, transition_fn):
+    def _compile_policy_step(self, policy, transition_fn, action_repair=None):
         def _jax_wrapped_policy_step(sim_state, planner_state):
             key, subkey = random.split(sim_state.key)
             actions = policy(sim_state.replace(key=key), planner_state)
+            if action_repair is not None:
+                actions, repair_info = action_repair(
+                    sim_state.replace(key=key), planner_state, actions)
             sim_state, log = transition_fn(sim_state.replace(key=subkey), actions)
+            if action_repair is not None:
+                log['repair'] = repair_info
             return sim_state.fls, log
         return _jax_wrapped_policy_step
 
@@ -651,7 +743,8 @@ class JaxRDDLCompiler:
                          check_constraints: bool=False,
                          constraint_func: bool=False, 
                          cache_path_info: bool=False,
-                         aux_constr: Dict[str, Any]={}) -> Callable:
+                         aux_constr: Optional[Dict[str, Any]]=None,
+                         action_repair: Optional[Callable]=None) -> Callable:
         '''Compiles the current RDDL model into a JAX transition function that 
         samples trajectories with a fixed horizon from a policy.
         
@@ -680,10 +773,12 @@ class JaxRDDLCompiler:
         in addition to the usual outputs
         :param cache_path_info: whether to save full path traces as part of the log
         :param aux_constr: auxiliary info to pass when compiling constraint_func
+        :param action_repair: optional function (sim_state, planner_state, actions) ->
+        (actions, info) that repairs the actions of the policy at each step
         '''
         jax_fn = self.compile_transition(
             check_constraints, constraint_func, cache_path_info, aux_constr)
-        jax_fn = self._compile_policy_step(policy, jax_fn)
+        jax_fn = self._compile_policy_step(policy, jax_fn, action_repair)
         jax_fn = self._compile_batched_policy_step(jax_fn, n_batch)
         jax_fn = self._compile_unrolled_policy_step(jax_fn, n_steps, history_dependent)
         return jax_fn

@@ -202,8 +202,9 @@ UTILITY_LOOKUP = {
 class RollingMean:
     '''Maintains the rolling mean of a stream of real-valued observations.'''
     
-    def __init__(self, window_size: int) -> None:
+    def __init__(self, window_size: int, exact: bool=False) -> None:
         self._window_size = window_size
+        self._exact = exact
         self._memory = deque(maxlen=window_size)
         self._total = 0
     
@@ -213,7 +214,7 @@ class RollingMean:
         if len(memory) == self._window_size:
             self._total = self._total - memory.popleft()
         memory.append(x)
-        if not np.all(np.isfinite(self._total)):
+        if self._exact or not np.all(np.isfinite(self._total)):
             self._total = np.sum(np.stack(memory), axis=0)
         return self._total / len(memory)
 
@@ -271,7 +272,8 @@ class NoImprovementStoppingRule(JaxPlannerStoppingRule):
         self.iters_since_last_update = 0
         
     def monitor(self, callback: Dict[str, Any]) -> bool:
-        if self.callback is None or callback['best_return'] > self.callback['best_return']:
+        if self.callback is None or \
+        callback['last_iteration_improved'] > self.callback['last_iteration_improved']:
             self.callback = callback
             self.iters_since_last_update = 0
         else:
@@ -371,6 +373,249 @@ def _jax_invalidate_loss(loss: jnp.ndarray, policy_params: Pytree) -> jnp.ndarra
     return jnp.where(jnp.all(jnp.stack(finite), axis=0), loss, jnp.inf)
     
 
+class JaxActionRepair:
+    '''Repairs actions to satisfy the action preconditions of the exact model by moving
+    them towards the default actions.'''
+
+    def __init__(self, compiled: JaxRDDLCompiler, print_warnings: bool=True) -> None:
+        '''Creates a new repair of the actions of the given exact model, which must be
+        compiled with its constraints.
+
+        :param compiled: the compiled exact model
+        :param print_warnings: whether to print warnings
+        '''
+        self.compiled = compiled
+
+        # default actions, with enum values as their indices
+        rddl = compiled.rddl
+        ranges = rddl.variable_ranges
+        defaults = {}
+        for var in rddl.action_fluents:
+            value = np.asarray(compiled.init_values[var])
+            if value.dtype.type is np.str_:
+                value = rddl.object_string_to_index_array(ranges[var], value)
+            defaults[var] = value
+        self._defaults = defaults
+
+        # repaired actions are guaranteed feasible only if the default actions are
+        if print_warnings:
+            default_actions = {var: compiled.init_values[var] for var in defaults}
+            if not compiled.constraints.sim.check_action_preconditions(
+                    default_actions, silent=True):
+                print(termcolor.colored(
+                    '[WARN] The default actions violate the preconditions in the initial '
+                    'state: repaired actions may still violate them.', 'yellow'))
+
+        self._repair = self._jax_repair()
+
+    def _jax_repair(self) -> Callable:
+        '''Returns the function (sim_state, actions, scores) -> (actions, info, kept, step)
+        that repairs the actions in the state of the given simulation state, where the
+        scores are the values in [0, 1] of the boolean actions.'''
+        compiled = self.compiled
+        REAL, INT = compiled.REAL, compiled.INT
+        NORMAL = JaxRDDLCompiler.ERROR_CODES['NORMAL']
+        precond_fn = compiled._jax_preconditions()
+        violations_fn = compiled._jax_precondition_violations(compiled.model_aux)
+        params = compiled.model_aux['params']
+        ranges = compiled.rddl.variable_ranges
+        shapes = {var: np.shape(value) for (var, value) in compiled.init_values.items()}
+        sizes = {var: int(np.size(value)) for (var, value) in compiled.init_values.items()}
+
+        # flat default actions
+        defaults = self._defaults
+        bool_vars = [var for var in defaults if ranges[var] == 'bool']
+        other_vars = [var for var in defaults if ranges[var] != 'bool']
+        bool_default = np.asarray(np.concatenate(
+            [np.ravel(defaults[var]) for var in bool_vars] + [np.zeros((0,), bool)]),
+            dtype=bool)
+        bool_splits = np.cumsum([sizes[var] for var in bool_vars])[:-1]
+        other_default = np.asarray(np.concatenate(
+            [np.ravel(defaults[var]) for var in other_vars] + [np.zeros((0,))]),
+            dtype=REAL)
+        other_splits = np.cumsum([sizes[var] for var in other_vars])[:-1]
+
+        # bisection stops at the square root of the precision of the model
+        num_bisections = (np.finfo(REAL).nmant + 1) // 2
+
+        def _jax_wrapped_feasible(sim_state, fls, actions):
+            fls = {**fls, **actions}
+            feasible, *_ = precond_fn(sim_state.key, NORMAL, fls, sim_state.nfls, params)
+            return feasible
+
+        def _jax_wrapped_violations(sim_state, fls, actions):
+            fls = {**fls, **actions}
+            return violations_fn(fls, sim_state.nfls, params, sim_state.key)
+
+        def _jax_wrapped_unflatten(flat, splits, names):
+            parts = jnp.split(flat, splits)
+            return {var: jnp.reshape(part, shapes[var])
+                    for (var, part) in zip(names, parts)}
+
+        # the state given to the policy outside the rollouts has the shapes of the
+        # environment, which are made the shapes of the compiled model
+        def _jax_wrapped_model_fls(fls):
+            result = {}
+            for (var, value) in fls.items():
+                if var in shapes and jnp.shape(value) != shapes[var] and \
+                jnp.size(value) == sizes[var]:
+                    value = jnp.reshape(value, shapes[var])
+                result[var] = value
+            return result
+
+        def _jax_wrapped_repair(sim_state, actions, scores):
+            fls = {**_jax_wrapped_model_fls(sim_state.fls), **actions}
+            infeasible = jnp.logical_not(_jax_wrapped_feasible(sim_state, fls, {}))
+            resets = jnp.zeros((), dtype=REAL)
+            kept = {var: jnp.ones(shapes[var], dtype=jnp.bool_) for var in bool_vars}
+            step = {}
+
+            # reset the boolean actions that differ from defaults in order of confidence
+            if bool_vars:
+                flat = jnp.concatenate(
+                    [jnp.ravel(jnp.asarray(actions[var], dtype=jnp.bool_))
+                     for var in bool_vars])
+                score = jnp.concatenate(
+                    [jnp.ravel(jnp.asarray(scores[var], dtype=REAL)) for var in bool_vars])
+                flat_default = jnp.asarray(bool_default)
+                active = flat != flat_default
+                order = jnp.argsort(jnp.where(active, jnp.abs(score - 0.5), jnp.inf))
+
+                def _jax_wrapped_targeted_reset(i, carry):
+                    flat, violations = carry
+                    index = order[i]
+                    candidate = flat.at[index].set(flat_default[index])
+                    cand_violations = _jax_wrapped_violations(
+                        sim_state, fls, _jax_wrapped_unflatten(
+                            candidate, bool_splits, bool_vars))
+                    reset = active[index] & (violations > 0) & (cand_violations < violations)
+                    return (jnp.where(reset, candidate, flat),
+                            jnp.where(reset, cand_violations, violations))
+
+                def _jax_wrapped_reset(i, flat):
+                    index = order[i]
+                    reset = active[index] & jnp.logical_not(_jax_wrapped_feasible(
+                        sim_state, fls, _jax_wrapped_unflatten(flat, bool_splits, bool_vars)))
+                    candidate = flat.at[index].set(flat_default[index])
+                    return jnp.where(reset, candidate, flat)
+
+                initial = flat
+                violations = _jax_wrapped_violations(
+                    sim_state, fls, _jax_wrapped_unflatten(flat, bool_splits, bool_vars))
+                flat, _ = jax.lax.fori_loop(
+                    0, flat.size, _jax_wrapped_targeted_reset, (flat, violations))
+                flat = jax.lax.fori_loop(0, flat.size, _jax_wrapped_reset, flat)
+                resets = jnp.sum(flat != initial).astype(REAL)
+                kept = _jax_wrapped_unflatten(flat == initial, bool_splits, bool_vars)
+                fls = {**fls, **_jax_wrapped_unflatten(flat, bool_splits, bool_vars)}
+
+            # move the other actions towards their defaults by bisection
+            shrink = jnp.zeros((), dtype=REAL)
+            if other_vars:
+                origin = jnp.asarray(other_default)
+                proposal = jnp.concatenate(
+                    [jnp.ravel(jnp.asarray(fls[var], dtype=REAL)) for var in other_vars])
+
+                def _jax_wrapped_interpolate(t, involved):
+                    flat = jnp.where(involved, origin + t * (proposal - origin), proposal)
+                    new_actions = _jax_wrapped_unflatten(flat, other_splits, other_vars)
+                    for var in other_vars:
+                        if ranges[var] != 'real':
+                            new_actions[var] = jnp.asarray(
+                                jnp.round(new_actions[var]), dtype=INT)
+                    return new_actions
+
+                def _jax_wrapped_reset_violations(i):
+                    reset = jnp.zeros(proposal.shape, dtype=jnp.bool_).at[i].set(True)
+                    return _jax_wrapped_violations(
+                        sim_state, fls, _jax_wrapped_interpolate(0., reset))
+
+                def _jax_wrapped_bisect(_, bounds):
+                    low, high = bounds
+                    mid = 0.5 * (low + high)
+                    feasible = _jax_wrapped_feasible(
+                        sim_state, fls, _jax_wrapped_interpolate(mid, involved))
+                    return jnp.where(feasible, mid, low), jnp.where(feasible, high, mid)
+
+                violations = _jax_wrapped_violations(sim_state, fls, {})
+                reset_violations = jax.vmap(_jax_wrapped_reset_violations)(
+                    jnp.arange(proposal.size))
+                involved = (proposal != origin) & (reset_violations < violations)
+                involved = jnp.where(_jax_wrapped_feasible(
+                    sim_state, fls, _jax_wrapped_interpolate(0., involved)), involved, True)
+                low, _ = jax.lax.fori_loop(
+                    0, num_bisections, _jax_wrapped_bisect,
+                    (jnp.zeros((), dtype=REAL), jnp.ones((), dtype=REAL)))
+                feasible = _jax_wrapped_feasible(sim_state, fls, {})
+                repaired = _jax_wrapped_interpolate(low, involved)
+                fls = {**fls, **{var: jnp.where(feasible, fls[var], repaired[var])
+                                 for var in other_vars}}
+                shrink = jnp.where(feasible, 0., 1. - low)
+                step = _jax_wrapped_unflatten(
+                    jnp.where(feasible | jnp.logical_not(involved), 1., low),
+                    other_splits, other_vars)
+
+            info = {'infeasible': infeasible, 'resets': resets, 'shrink': shrink,
+                    'failed': jnp.logical_not(_jax_wrapped_feasible(sim_state, fls, {}))}
+            actions = {**actions, **{var: fls[var] for var in defaults}}
+            return actions, info, kept, step
+        return _jax_wrapped_repair
+
+    def exact(self, score_policy: Callable) -> Callable:
+        '''Returns the function (sim_state, planner_state, actions) -> (actions, info)
+        that repairs the actions on the exact model.
+
+        :param score_policy: a policy whose boolean actions are in [0, 1]
+        '''
+        def _jax_wrapped_repair_exact_actions(sim_state, planner_state, actions):
+            scores = score_policy(sim_state, planner_state)
+            actions, info, _, _ = self._repair(sim_state, actions, scores)
+            return actions, info
+        return _jax_wrapped_repair_exact_actions
+
+    def relaxed(self) -> Callable:
+        '''Returns the function (sim_state, planner_state, actions) -> (actions, info)
+        that repairs relaxed actions as their exact (rounded) values are repaired.'''
+        repair_fn = self._repair
+        INT = self.compiled.INT
+        ranges = self.compiled.rddl.variable_ranges
+        defaults = {var: np.asarray(value, dtype=self.compiled.REAL)
+                    for (var, value) in self._defaults.items()}
+
+        def _jax_wrapped_repair_relaxed_actions(sim_state, planner_state, actions):
+            exact = {}
+            for var in defaults:
+                if ranges[var] == 'bool':
+                    exact[var] = actions[var] > 0.5
+                elif ranges[var] == 'real':
+                    exact[var] = actions[var]
+                else:
+                    exact[var] = jnp.asarray(jnp.round(actions[var]), dtype=INT)
+            _, info, kept, step = repair_fn(sim_state, {**actions, **exact}, actions)
+            kept, step = jax.lax.stop_gradient((kept, step))
+            repaired = dict(actions)
+            for var in defaults:
+                if ranges[var] == 'bool':
+                    repaired[var] = jnp.where(kept[var], actions[var], defaults[var])
+                else:
+                    repaired[var] = defaults[var] + step[var] * (actions[var] - defaults[var])
+            return repaired, info
+        return _jax_wrapped_repair_relaxed_actions
+
+    @staticmethod
+    def statistics(log: Dict[str, Any]) -> Dict[str, float]:
+        '''Returns statistics of the repairs in the given log of rollouts.'''
+        info = log['repair']
+        infeasible = np.asarray(info['infeasible'])
+        num_repairs = max(int(np.sum(infeasible)), 1)
+        return {
+            'repaired': float(np.mean(infeasible)),
+            'resets_per_repair': float(np.sum(np.asarray(info['resets'])) / num_repairs),
+            'shrink_per_repair': float(np.sum(np.asarray(info['shrink'])) / num_repairs),
+            'failed': float(np.mean(np.asarray(info['failed'])))
+        }
+
+
 class JaxPlanner(metaclass=ABCMeta):
     '''Base class for all planners that optimize a policy or plan in a RDDL MDP.
 
@@ -404,6 +649,7 @@ class JaxPlanner(metaclass=ABCMeta):
         'compiler_type', 'compiler_kwargs', 'use_symlog_reward', 'critic_fn', 'logger',
         'preprocessor', 'python_functions', 'cache_full_train_rollouts',
         'cache_full_test_rollouts', 'compiled', 'test_compiled', 'print_warnings',
+        'check_preconditions',
         'init_test_nfls', 'train_policy', 'test_policy', 'train_rollouts',
         'test_rollouts', 'init_policy', 'single_train_loss', 'single_test_loss',
         'test_loss'
@@ -417,6 +663,7 @@ class JaxPlanner(metaclass=ABCMeta):
                  parallel_updates: int=1,
                  shard_parallel_updates: bool=False,
                  model_param_ranges: Optional[Dict[Any, Tuple[float, float]]]=None,
+                 complex_preconditions: bool=True,
                  action_bounds: Optional[Bounds]=None,
                  auxiliary: Optional['JaxPlanner']=None,
                  compiler: JaxRDDLCompilerWithGrad=DefaultJaxRDDLCompilerWithGrad,
@@ -458,6 +705,8 @@ class JaxPlanner(metaclass=ABCMeta):
         parameters from a Latin hypercube over their ranges on log scale (a dimension
         per key), such that the policy with the best test return on the exact model
         selects them
+        :param complex_preconditions: whether the action preconditions that are
+        not box constraints on actions are part of the problem
         :param action_bounds: box constraints on actions
         :param auxiliary: optional planner to run alongside this planner
         :param compiler: compiler instance to use for planning
@@ -495,6 +744,7 @@ class JaxPlanner(metaclass=ABCMeta):
                     raise ValueError(f'Range of model parameter <{name}> must satisfy '
                                      f'0 < low <= high, got ({low}, {high}).')
         self.model_param_ranges = model_param_ranges
+        self.complex_preconditions = complex_preconditions
         if rollout_horizon is None and rddl is not None:
             rollout_horizon = rddl.horizon
         self.horizon = rollout_horizon
@@ -625,6 +875,7 @@ class JaxPlanner(metaclass=ABCMeta):
                   f'    parallel_updates  ={self.parallel_updates}\n'
                   f'    shard_parallel    ={self.shard_parallel_updates}\n'
                   f'    model_param_ranges={self.model_param_ranges}\n'
+                  f'    complex_preconds  ={self.complex_preconditions}\n'
                   f'    preprocessor      ={self.preprocessor}\n')
         result += self.summarize_optimizer()
         result += str(self.plan)
@@ -665,8 +916,14 @@ class JaxPlanner(metaclass=ABCMeta):
             use64bit=self.compiled.use64bit,
             python_functions=self.python_functions
         )
+        self.check_preconditions = self.complex_preconditions and not all(
+            self.test_compiled.constraints.is_box_preconditions)
+        if self.check_preconditions and self.print_warnings:
+            print(termcolor.colored(
+                '[INFO] Some action preconditions are not box constraints: they will be '
+                'checked on the exact model.', 'dark_grey'))
         self.test_compiled.compile(log_jax_expr=True, heading='EXACT MODEL',
-                                   compile_constraints=False)
+                                   compile_constraints=self.check_preconditions)
         
         self.init_test_nfls = self.test_compiled.init_sim_state(None, None, 1, False).nfls
 
@@ -678,8 +935,26 @@ class JaxPlanner(metaclass=ABCMeta):
                           horizon=self.horizon,
                           preprocessor=self.preprocessor)
         self.train_policy = jax.jit(self.plan.train_policy)
-        self.test_policy = jax.jit(self.plan.test_policy)
+
+        # the actions on the exact model are repaired to satisfy the preconditions,
+        # with the boolean actions of the train policy as their scores
+        self.action_repair = None
+        test_policy = self.plan.test_policy
+        if self.check_preconditions:
+            self.action_repair = JaxActionRepair(
+                self.test_compiled, print_warnings=self.print_warnings)
+            exact_repair = self.action_repair.exact(self.plan.train_policy)
+            def _jax_wrapped_repaired_test_policy(sim_state, planner_state):
+                actions = self.plan.test_policy(sim_state, planner_state)
+                return exact_repair(sim_state, planner_state, actions)[0]
+            test_policy = _jax_wrapped_repaired_test_policy
+        self.test_policy = jax.jit(test_policy)
         self.init_policy = self._jax_init_policy()
+
+    def _jax_train_action_repair(self) -> Optional[Callable]:
+        '''Returns the function that repairs the actions of the train policy in the
+        rollouts on the relaxed model, or None if they are not repaired.'''
+        return None
 
     def _jax_compile_rollouts(self):
         self.train_rollouts = self.compiled.compile_rollouts(
@@ -687,14 +962,18 @@ class JaxPlanner(metaclass=ABCMeta):
             n_steps=self.horizon,
             n_batch=self.batch_size_train,
             history_dependent=self.plan.history_dependent,
-            cache_path_info=self.cache_full_train_rollouts
+            cache_path_info=self.cache_full_train_rollouts,
+            action_repair=self._jax_train_action_repair()
         )
         test_rollouts = self.test_compiled.compile_rollouts(
             policy=self.plan.test_policy,
             n_steps=self.horizon,
             n_batch=self.batch_size_test,
             history_dependent=self.plan.history_dependent,
-            cache_path_info=self.cache_full_test_rollouts
+            check_constraints=self.check_preconditions,
+            cache_path_info=self.cache_full_test_rollouts,
+            action_repair=(None if self.action_repair is None
+                           else self.action_repair.exact(self.plan.train_policy))
         )
         self.test_rollouts = jax.jit(test_rollouts)
 
@@ -840,6 +1119,11 @@ class JaxPlanner(metaclass=ABCMeta):
             rewards = rewards * alive
             critic_values = critic_values * not_terminated[:, -1]
 
+            # number of steps of each rollout at which the action preconditions are
+            # violated until the episode terminates (zero if they are not checked)
+            violated = 1. - jnp.asarray(log['precondition'], dtype=rewards.dtype)
+            log['violations'] = jnp.sum(violated * alive, axis=1)
+
             # evaluate cumulative return per rollout
             returns = _jax_wrapped_returns(rewards, critic_values)
             loss = -utility_fn(returns, **utility_kwargs)
@@ -869,6 +1153,14 @@ class JaxPlanner(metaclass=ABCMeta):
     # ===========================================================================
     # OPTIMIZE API
     # ===========================================================================
+
+    @staticmethod
+    def _is_better(violations, loss, best_violations, best_loss):
+        '''Returns whether plans with the given mean numbers of violations of the action
+        preconditions and losses improve on the best plans: a plan improves if it has
+        fewer violations, or as many violations and a smaller loss.'''
+        return np.less(violations, best_violations) | (
+            np.equal(violations, best_violations) & np.less(loss, best_loss))
 
     def _batched_pytree(self, pytree):
         def make_batched(x):
@@ -1201,8 +1493,9 @@ class JaxPlanner(metaclass=ABCMeta):
                 opt_state=self._shard_parallel(aux_state.opt_state, sharding),
                 opt_aux=self._shard_parallel(aux_state.opt_aux, sharding))
             rolling_aux_loss = RollingMean(test_rolling_window)
+            rolling_aux_violations = RollingMean(test_rolling_window, exact=True)
         else:
-            aux_state = rolling_aux_loss = None
+            aux_state = rolling_aux_loss = rolling_aux_violations = None
 
         # ======================================================================
         # INITIALIZATION OF RUNNING STATISTICS
@@ -1211,9 +1504,12 @@ class JaxPlanner(metaclass=ABCMeta):
         # initialize running statistics
         best_params = _unbatched_pytree(planner_state.policy_params, 0)
         best_loss, pbest_loss, best_grad = np.inf, np.inf, None
+        best_violations, pbest_violations = np.inf, np.inf
         best_index = 0
+        best_found_by = ' '
         last_iter_improve = 0
         rolling_test_loss = RollingMean(test_rolling_window)
+        rolling_test_violations = RollingMean(test_rolling_window, exact=True)
         status = JaxPlannerStatus.NORMAL
         progress_percent = 0
         total_aux_it = 0
@@ -1239,6 +1535,13 @@ class JaxPlanner(metaclass=ABCMeta):
         else:
             progress_bar = None
         position_str = '' if tqdm_position is None else f'[{tqdm_position}]'
+
+        # a return is marked F if its plan satisfies the action preconditions
+        def _feasible_marker(violations):
+            if not self.check_preconditions:
+                return ''
+            else:
+                return 'F' if violations == 0 else ' '
 
         # error handlers (to avoid spam messaging)
         policy_constraint_msg_shown = False
@@ -1279,6 +1582,11 @@ class JaxPlanner(metaclass=ABCMeta):
             test_loss = np.asarray(_jax_invalidate_loss(test_loss, planner_state.policy_params))
             test_loss_smooth = rolling_test_loss.update(test_loss)
 
+            # mean number of violations of the action preconditions per rollout
+            test_violations = np.mean(np.asarray(test_log['violations']), axis=1)
+            test_violations = np.where(np.isfinite(test_loss), test_violations, np.inf)
+            test_violations_smooth = rolling_test_violations.update(test_violations)
+
             # ==================================================================
             # AUXILIARY PLANNER UPDATE STEP
             # ==================================================================
@@ -1298,15 +1606,20 @@ class JaxPlanner(metaclass=ABCMeta):
                     train_sim_state, test_sim_state, aux_state)
                 
                 # evaluate with the state of this planner to reuse the compiled test loss
-                aux_loss, _ = self.test_loss(
+                aux_loss, (aux_log, _) = self.test_loss(
                     test_sim_state, planner_state.replace(policy_params=aux_state.policy_params))
                 aux_loss = np.asarray(_jax_invalidate_loss(aux_loss, aux_state.policy_params))
                 aux_loss_smooth = rolling_aux_loss.update(aux_loss)
                 aux_return = -aux_loss_smooth
+                aux_violations = np.mean(np.asarray(aux_log['violations']), axis=1)
+                aux_violations = np.where(np.isfinite(aux_loss), aux_violations, np.inf)
+                aux_violations_smooth = rolling_aux_violations.update(aux_violations)
 
                 # replace plan with auxiliary plan if new minimum reached or train loss
                 # invalid
-                aux_mask = np.less(aux_loss_smooth, pbest_loss) | ~np.isfinite(train_loss)
+                aux_mask = self._is_better(
+                    aux_violations_smooth, aux_loss_smooth, pbest_violations, pbest_loss
+                ) | ~np.isfinite(train_loss)
                 if np.any(aux_mask):
                     policy_params, test_loss, test_loss_smooth, converged = \
                         self.merge_auxiliary(
@@ -1314,11 +1627,14 @@ class JaxPlanner(metaclass=ABCMeta):
                             aux_loss, test_loss, aux_loss_smooth, test_loss_smooth,
                             aux_converged, converged
                         )
+                    test_violations = np.where(aux_mask, aux_violations, test_violations)
+                    test_violations_smooth = np.where(
+                        aux_mask, aux_violations_smooth, test_violations_smooth)
                     planner_state = planner_state.replace(policy_params=policy_params)
                     aux_improve = True
                     total_aux_it += 1
             else:
-                aux_loss = aux_loss_smooth = aux_return = None
+                aux_loss = aux_loss_smooth = aux_return = aux_violations_smooth = None
 
             # ==================================================================
             # STATUS CHECKS AND LOGGING
@@ -1326,14 +1642,21 @@ class JaxPlanner(metaclass=ABCMeta):
 
             # evaluate test losses and record best parameters so far
             train_grad = train_log.get('grad', None)
-            best_index = np.argmin(test_loss_smooth)
-            if test_loss_smooth[best_index] < best_loss:
+            best_index = np.lexsort((test_loss_smooth, test_violations_smooth))[0]
+            if self._is_better(test_violations_smooth[best_index],
+                               test_loss_smooth[best_index], best_violations, best_loss):
                 best_params = _unbatched_pytree(planner_state.policy_params, best_index)
                 if train_grad is not None:
                     best_grad = _unbatched_pytree(train_grad, best_index)
                 best_loss = test_loss_smooth[best_index]
+                best_violations = test_violations_smooth[best_index]
+                best_found_by = 'H' if aux_improve and aux_mask[best_index] else '*'
                 last_iter_improve = it
-            pbest_loss = np.minimum(pbest_loss, test_loss_smooth)
+            pbest_improve = self._is_better(
+                test_violations_smooth, test_loss_smooth, pbest_violations, pbest_loss)
+            pbest_loss = np.where(pbest_improve, test_loss_smooth, pbest_loss)
+            pbest_violations = np.where(
+                pbest_improve, test_violations_smooth, pbest_violations)
                         
             # no progress
             if (not aux_improve) and np.all(zero_grads):
@@ -1346,6 +1669,8 @@ class JaxPlanner(metaclass=ABCMeta):
                         '[FAIL] Policy update violated action constraints.', 'red'
                     ))
                     policy_constraint_msg_shown = True
+                status = JaxPlannerStatus.PRECONDITION_POSSIBLY_UNSATISFIED
+            if self.check_preconditions and best_violations > 0:
                 status = JaxPlannerStatus.PRECONDITION_POSSIBLY_UNSATISFIED
             
             # numerical error
@@ -1402,6 +1727,7 @@ class JaxPlanner(metaclass=ABCMeta):
                 'train_return':-train_loss,
                 'test_return':-test_loss_smooth,
                 'best_return':-best_loss,
+                'best_violations': best_violations,
                 'last_iteration_improved': last_iter_improve,
                 'params': planner_state.policy_params,
                 'best_params': best_params,
@@ -1414,6 +1740,8 @@ class JaxPlanner(metaclass=ABCMeta):
                 'test_log': test_log,
                 'planner_state': planner_state,
                 'auxiliary_return': aux_return,
+                'auxiliary_violations': aux_violations_smooth,
+                'best_found_by': best_found_by,
                 'auxiliary_improved': aux_improve,
                 'auxiliary_params': None if aux_state is None else aux_state.policy_params,                
             }
@@ -1428,15 +1756,20 @@ class JaxPlanner(metaclass=ABCMeta):
             
             # if the progress bar is used
             if print_progress:
+                test_info = (f'{-test_loss_smooth[best_index]:13.5f}'
+                             f'{_feasible_marker(test_violations_smooth[best_index])}')
                 if auxiliary is not None:
-                    aux_info = f'{np.max(aux_return):13.5f} [{total_aux_it} it] aux | '
+                    aux_index = np.lexsort((aux_loss_smooth, aux_violations_smooth))[0]
+                    aux_info = (f'{-aux_loss_smooth[aux_index]:13.5f}'
+                                f'{_feasible_marker(aux_violations_smooth[aux_index])} '
+                                f'[{total_aux_it} it] aux | ')
                 else:
                     aux_info = ''
+                best_info = (f'{best_found_by} {-best_loss:13.5f}'
+                             f'{_feasible_marker(best_violations)}')
                 progress_bar.set_description(
                     f'{position_str} {it} it | {-np.min(train_loss):13.5f} train | '
-                    f'{-np.min(test_loss_smooth):13.5f} test | {aux_info}'
-                    f'{-best_loss:13.5f} best | '
-                    f'{status.value} status', 
+                    f'{test_info} test | {aux_info}{best_info} best | {status.value} status', 
                     refresh=False
                 )
                 progress_bar.set_postfix_str(
@@ -1478,6 +1811,20 @@ class JaxPlanner(metaclass=ABCMeta):
             final_returns = np.sum(final_log['reward'], axis=2)
             best_returns = np.ravel(final_returns[best_index])
             mean, rlo, rhi = self._ci_bootstrap(best_returns, key[0].item())            
+            if self.check_preconditions:
+                final_violations = np.mean(final_log['violations'][best_index])
+                repairs = JaxActionRepair.statistics(final_log)
+                violations_info = (f'    best violations:  {final_violations:.5f} '
+                                   f'steps per rollout\n'
+                                   f'    best repairs:     {repairs["repaired"]:.1%} of '
+                                   f'steps, {repairs["resets_per_repair"]:.2f} resets '
+                                   f'per repair, {repairs["failed"]:.1%} of steps '
+                                   f'infeasible after repair\n')
+                if best_violations > 0:
+                    print(termcolor.colored(
+                        '[WARN] No plan satisfying the preconditions was found.', 'yellow'))
+            else:
+                violations_info = ''
 
             # diagnosis
             diagnosis = self._perform_diagnosis(
@@ -1492,6 +1839,7 @@ class JaxPlanner(metaclass=ABCMeta):
                 f'    best objective:   {-best_loss:.5f}\n'
                 f'    best grad norm:   {grad_norm:.5f}\n'
                 f'    best cuml reward: Mean = {mean:.5f}, 95% CI [{rlo:.5f}, {rhi:.5f}]\n'
+                f'{violations_info}'
                 f'    diagnosis:        {diagnosis}\n'
             )
     
@@ -2503,6 +2851,12 @@ class JaxBackpropPlanner(JaxPlanner):
                   f'    reduce_on_plateau ={self.reduce_on_plateau_kwargs}\n'
                   f'    steps_per_update  ={self.steps_per_update}\n')
         return result
+
+    def _jax_train_action_repair(self) -> Optional[Callable]:
+        if self.action_repair is not None:
+            return self.action_repair.relaxed()
+        else:
+            return None
 
     def _jax_compile_optimizer(self) -> None:
         self.initialize = self._jax_init_optimizer()
