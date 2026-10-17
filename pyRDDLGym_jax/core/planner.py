@@ -309,11 +309,9 @@ class JaxPlannerState:
 
 
 def _build_optax_optimizer(optimizer, optimizer_kwargs, clip_grad, noise_kwargs,
-                           line_search_kwargs, ema_decay,
-                           reduce_on_plateau_kwargs):
+                           line_search_kwargs, ema_decay, reduce_on_plateau_kwargs):
 
-    # set optimizer: integer arguments (including defaults) are structural, such as the
-    # minimum dimension to factor in adafactor, and cannot be traced
+    # set optimizer: integer arguments cannot be traced
     try:
         arguments = inspect.signature(optimizer).bind(**optimizer_kwargs)
         arguments.apply_defaults()
@@ -427,12 +425,12 @@ class JaxActionRepair:
         bool_vars = [var for var in defaults if ranges[var] == 'bool']
         other_vars = [var for var in defaults if ranges[var] != 'bool']
         bool_default = np.asarray(np.concatenate(
-            [np.ravel(defaults[var]) for var in bool_vars] + [np.zeros((0,), bool)]),
+            [np.ravel(defaults[var]) for var in bool_vars] + [np.zeros((0,), dtype=bool)]),
             dtype=bool)
-        bool_splits = np.cumsum([sizes[var] for var in bool_vars])[:-1]
         other_default = np.asarray(np.concatenate(
-            [np.ravel(defaults[var]) for var in other_vars] + [np.zeros((0,))]),
+            [np.ravel(defaults[var]) for var in other_vars] + [np.zeros((0,))]), 
             dtype=REAL)
+        bool_splits = np.cumsum([sizes[var] for var in bool_vars])[:-1]
         other_splits = np.cumsum([sizes[var] for var in other_vars])[:-1]
 
         # bisection stops at the square root of the precision of the model
@@ -440,8 +438,7 @@ class JaxActionRepair:
 
         def _jax_wrapped_feasible(sim_state, fls, actions):
             fls = {**fls, **actions}
-            feasible, *_ = precond_fn(sim_state.key, NORMAL, fls, sim_state.nfls, params)
-            return feasible
+            return precond_fn(sim_state.key, NORMAL, fls, sim_state.nfls, params)[0]
 
         def _jax_wrapped_violations(sim_state, fls, actions):
             fls = {**fls, **actions}
@@ -449,7 +446,7 @@ class JaxActionRepair:
 
         def _jax_wrapped_unflatten(flat, splits, names):
             parts = jnp.split(flat, splits)
-            return {var: jnp.reshape(part, shapes[var])
+            return {var: jnp.reshape(part, shapes[var]) 
                     for (var, part) in zip(names, parts)}
 
         # the state given to the policy outside the rollouts has the shapes of the
@@ -485,23 +482,23 @@ class JaxActionRepair:
                     flat, violations = carry
                     index = order[i]
                     candidate = flat.at[index].set(flat_default[index])
-                    cand_violations = _jax_wrapped_violations(
-                        sim_state, fls, _jax_wrapped_unflatten(
-                            candidate, bool_splits, bool_vars))
+                    unflat = _jax_wrapped_unflatten(candidate, bool_splits, bool_vars)
+                    cand_violations = _jax_wrapped_violations(sim_state, fls, unflat)
                     reset = active[index] & (violations > 0) & (cand_violations < violations)
                     return (jnp.where(reset, candidate, flat),
                             jnp.where(reset, cand_violations, violations))
 
                 def _jax_wrapped_reset(i, flat):
                     index = order[i]
-                    reset = active[index] & jnp.logical_not(_jax_wrapped_feasible(
-                        sim_state, fls, _jax_wrapped_unflatten(flat, bool_splits, bool_vars)))
+                    unflat = _jax_wrapped_unflatten(flat, bool_splits, bool_vars)
+                    unflat_feas = _jax_wrapped_feasible(sim_state, fls, unflat)
+                    reset = active[index] & jnp.logical_not(unflat_feas)
                     candidate = flat.at[index].set(flat_default[index])
                     return jnp.where(reset, candidate, flat)
 
                 initial = flat
-                violations = _jax_wrapped_violations(
-                    sim_state, fls, _jax_wrapped_unflatten(flat, bool_splits, bool_vars))
+                unflats = _jax_wrapped_unflatten(flat, bool_splits, bool_vars)
+                violations = _jax_wrapped_violations(sim_state, fls, unflats)
                 flat, _ = jax.lax.fori_loop(
                     0, flat.size, _jax_wrapped_targeted_reset, (flat, violations))
                 flat = jax.lax.fori_loop(0, flat.size, _jax_wrapped_reset, flat)
@@ -527,8 +524,8 @@ class JaxActionRepair:
 
                 def _jax_wrapped_reset_violations(i):
                     reset = jnp.zeros(proposal.shape, dtype=jnp.bool_).at[i].set(True)
-                    return _jax_wrapped_violations(
-                        sim_state, fls, _jax_wrapped_interpolate(0., reset))
+                    interp_0 = _jax_wrapped_interpolate(0., reset)
+                    return _jax_wrapped_violations(sim_state, fls, interp_0)
 
                 def _jax_wrapped_bisect(_, bounds):
                     low, high = bounds
@@ -541,8 +538,8 @@ class JaxActionRepair:
                 reset_violations = jax.vmap(_jax_wrapped_reset_violations)(
                     jnp.arange(proposal.size))
                 involved = (proposal != origin) & (reset_violations < violations)
-                involved = jnp.where(_jax_wrapped_feasible(
-                    sim_state, fls, _jax_wrapped_interpolate(0., involved)), involved, True)
+                involved = jnp.where(_jax_wrapped_feasible(sim_state, fls, 
+                    _jax_wrapped_interpolate(0., involved)), involved, True)
                 low, _ = jax.lax.fori_loop(
                     0, num_bisections, _jax_wrapped_bisect,
                     (jnp.zeros((), dtype=REAL), jnp.ones((), dtype=REAL)))
@@ -662,7 +659,7 @@ class JaxPlanner(metaclass=ABCMeta):
                  rollout_horizon: Optional[int]=None,
                  parallel_updates: int=1,
                  shard_parallel_updates: bool=False,
-                 model_param_ranges: Optional[Dict[Any, Tuple[float, float]]]=None,
+                 model_param_ranges: Optional[Dict[str, Tuple[float, float]]]=None,
                  complex_preconditions: bool=True,
                  action_bounds: Optional[Bounds]=None,
                  auxiliary: Optional['JaxPlanner']=None,
@@ -687,24 +684,14 @@ class JaxPlanner(metaclass=ABCMeta):
         :param rddl: the RDDL domain to optimize: None if the planner is to be used
         as an auxiliary planner, in which case the remaining arguments are ignored
         :param plan: the policy/plan representation to optimize
-        :param batch_size_train: how many rollouts to perform per optimization 
-        step
-        :param batch_size_test: how many rollouts to use to test the plan at each
-        optimization step
+        :param batch_size_train: how many rollouts to perform per optimization step
+        :param batch_size_test: how many rollouts to use to test the plan at each step
         :param rollout_horizon: lookahead planning horizon: None uses the env horizon
         :param parallel_updates: how many optimizers to run independently in parallel
         :param shard_parallel_updates: whether to shard the parallel optimizers over all
-        devices, if parallel_updates is a multiple of the number of devices (e.g. several
-        GPUs, or CPU cores exposed as devices with the XLA flag
-        --xla_force_host_platform_device_count set before importing jax)
+        devices, if parallel_updates is a multiple of the number of devices
         :param model_param_ranges: optional ranges (low, high) of parameters of the
         relaxed model (e.g. the weights of relaxations), each keyed by a parameter name
-        to match that parameter of every expression, an expression id to match all
-        parameters of that expression, or a path 'id/name' to match one parameter of one
-        expression (the most specific key applies): the parallel optimizers sample the
-        parameters from a Latin hypercube over their ranges on log scale (a dimension
-        per key), such that the policy with the best test return on the exact model
-        selects them
         :param complex_preconditions: whether the action preconditions that are
         not box constraints on actions are part of the problem
         :param action_bounds: box constraints on actions
@@ -921,7 +908,8 @@ class JaxPlanner(metaclass=ABCMeta):
         if self.check_preconditions and self.print_warnings:
             print(termcolor.colored(
                 '[INFO] Some action preconditions are not box constraints: they will be '
-                'checked on the exact model.', 'dark_grey'))
+                'checked on the exact model.', 'dark_grey'
+            ))
         self.test_compiled.compile(log_jax_expr=True, heading='EXACT MODEL',
                                    compile_constraints=self.check_preconditions)
         
@@ -987,8 +975,7 @@ class JaxPlanner(metaclass=ABCMeta):
 
     @abstractmethod
     def _jax_compile_optimizer(self) -> None:
-        '''Compiles the initialize and update functions of this planner (see the class
-        description for their signatures).'''
+        '''Compiles the initialize and update functions of this planner.'''
         pass
 
     def _jax_compile_auxiliary(self):
@@ -1055,7 +1042,6 @@ class JaxPlanner(metaclass=ABCMeta):
     def _jax_return(self, use_symlog):
         gamma = self.rddl.discount
         
-        # apply discounting of future reward and then optional symlog transform
         def _jax_wrapped_returns(rewards, critic_values):
 
             # apply optional discounting
@@ -1078,15 +1064,10 @@ class JaxPlanner(metaclass=ABCMeta):
         _jax_wrapped_returns = self._jax_return(use_symlog)
         _jax_wrapped_critic = self._jax_critic()
         
-        # the loss is the average cumulative reward across all roll-outs
-        # but applies a utility function if requested to each return observation:
-        # by default, the utility function is the mean
         def _jax_wrapped_plan_loss(sim_state, planner_state):
             
-            # generate sample rollouts
-            log, model_params = rollouts(sim_state, planner_state)
-
             # update the model parameters from statistics collected in the rollouts
+            log, model_params = rollouts(sim_state, planner_state)
             model_params = compiled.update_model_params(model_params, log['model_stats'])
             
             # evaluate optional critic network at termination of rollouts
@@ -1104,7 +1085,7 @@ class JaxPlanner(metaclass=ABCMeta):
             rewards = log['reward']
             if planner_state.reward_mask is not None:
                 mask = planner_state.reward_mask
-                if mask.ndim != 1:
+                if jnp.ndim(mask) != 1:
                     raise ValueError('Reward mask must be 1-dimensional.')
                 if mask.size != rewards.shape[1]:
                     raise ValueError('Reward mask size must match reward dimension.')
@@ -1181,7 +1162,8 @@ class JaxPlanner(metaclass=ABCMeta):
                 print(termcolor.colored(
                     f'[WARN] parallel_updates={self.parallel_updates} is not a multiple of '
                     f'the {len(devices)} devices: parallel optimizers will run on a single '
-                    f'device.', 'yellow'))
+                    f'device.', 'yellow'
+                ))
             return None
         mesh = jax.sharding.Mesh(np.asarray(devices), ('parallel',))
         return jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec('parallel'))
@@ -1202,47 +1184,28 @@ class JaxPlanner(metaclass=ABCMeta):
         ranges = self.model_param_ranges
         num_samples = self.parallel_updates
         leaves_with_paths, treedef = jax.tree_util.tree_flatten_with_path(model_params)
-        paths = ['/'.join(str(getattr(entry, 'key', getattr(entry, 'idx', entry)))
-                          for entry in path)
-                 for (path, _) in leaves_with_paths]
         leaves = [leaf for (_, leaf) in leaves_with_paths]
 
-        # each parameter is matched by its most specific key: its path, then the id of
-        # its expression, then its name
-        def _specificity(name, path):
-            if path == name:
-                return 2
-            elif path.startswith(name + '/'):
-                return 1
-            elif path.rsplit('/', 1)[-1] == name:
-                return 0
-            else:
-                return -1
-        matched = {}
-        for (index, path) in enumerate(paths):
-            specificity, name = max(
-                (_specificity(str(name), path), str(name)) for name in ranges)
-            if specificity >= 0:
-                matched[index] = name
-                
-        # keys that match no parameter of this model are skipped, since the same ranges
-        # can be used for models with different relaxations
-        unmatched = [name for name in ranges
-                     if all(_specificity(str(name), path) < 0 for path in paths)]
+        # a parameter is matched by its name, the last key of its path
+        names = [str(getattr(path[-1], 'key', path[-1]))
+                 for (path, _) in leaves_with_paths]
+
+        # names that match no parameter of this model are skipped
+        unmatched = [name for name in ranges if name not in names]
         if unmatched and self.print_warnings:
             print(termcolor.colored(
                 f'[WARN] Model parameters {unmatched} in model_param_ranges were not '
-                f'found and will be ignored: keys must be parameter names, expression ids '
-                f'or paths in {paths}.', 'yellow'))
+                f'found and will be ignored.', 'yellow'))
 
-        # each key is a dimension of the Latin hypercube
-        for (dim, (name, (low, high))) in enumerate(ranges.items()):
-            strata = np.asarray(random.permutation(random.fold_in(key, dim), num_samples))
+        # each name is a dimension of the Latin hypercube
+        rng = np.random.default_rng(np.asarray(key))
+        for (name, (low, high)) in ranges.items():
+            strata = rng.permutation(num_samples)
             values = low * np.power(high / low, (strata + 0.5) / num_samples)
-            for (index, matched_name) in matched.items():
-                if matched_name == str(name):
+            for (index, leaf_name) in enumerate(names):
+                if leaf_name == name:
                     leaf = np.asarray(leaves[index])
-                    values_shape = (-1,) + (1,) * (leaf.ndim - 1)
+                    values_shape = (-1,) + (1,) * (np.ndim(leaf) - 1)
                     leaves[index] = np.broadcast_to(
                         np.reshape(values, values_shape), leaf.shape).astype(leaf.dtype)
         return jax.tree_util.tree_unflatten(treedef, leaves)
@@ -1462,8 +1425,7 @@ class JaxPlanner(metaclass=ABCMeta):
         # the parallel optimizers are sharded over all devices
         sharding = self._parallel_sharding()
         if sharding is not None and print_summary:
-            print(f'[INFO] Parallel optimizers are sharded over {len(jax.devices())} '
-                  f'devices.')
+            print(f'[INFO] Parallel updates are sharded over {len(jax.devices())} devices.')
         train_sim_state = train_sim_state.replace(
             model_params=self._shard_parallel(model_params, sharding))
         test_sim_state = test_sim_state.replace(model_params=self._shard_parallel(
@@ -1594,9 +1556,7 @@ class JaxPlanner(metaclass=ABCMeta):
             aux_improve = False
             if auxiliary is not None:
 
-                # auxiliary update of the plan: the auxiliary planner shares the
-                # hyper-parameters and progress of this planner, and advances the test
-                # simulation state only
+                # auxiliary update of the plan
                 aux_state = planner_state.replace(
                     policy_params=aux_state.policy_params,
                     opt_state=aux_state.opt_state,
@@ -2397,8 +2357,7 @@ class JaxPGPEPlanner(JaxPlanner):
                 # apply a gradient projection
                 new_stats['mu'], converged = _jax_wrapped_projection(
                     new_stats['mu'], planner_state.hyperparams)
-                return (key, new_stats, new_r_max, new_opt_state, converged, loss,
-                        grad['mu'])
+                return (key, new_stats, new_r_max, new_opt_state, converged, loss, grad['mu'])
 
             # do an unrolled update
             opt_state = planner_state.opt_state
