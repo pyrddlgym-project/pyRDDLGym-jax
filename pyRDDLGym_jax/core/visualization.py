@@ -92,6 +92,10 @@ class JaxPlannerDashboard:
         
         self.xticks = {}
         self.test_return = {}
+        self.check_preconditions = {}
+        self.test_violations = {}
+        self.auxiliary_violations = {}
+        self.best_found_by = {}
         self.train_return = {}
         self.auxiliary_return = {}
         self.basic_time_curve_last_progress = {}
@@ -122,6 +126,15 @@ class JaxPlannerDashboard:
         # CREATE PAGE LAYOUT
         # ======================================================================
         
+        # the best return is marked * if found by the planner or H if found by the
+        # auxiliary planner, and F if its plan satisfies the action preconditions (when
+        # they are checked)
+        def feasible_marker(id):
+            violations = self.test_violations[id]
+            if self.check_preconditions[id] and violations and violations[-1] == 0:
+                return 'F'
+            return ''
+
         def create_info_card(id):
             status_type = self.status_type[id]
             if status_type == 'info':
@@ -238,7 +251,9 @@ class JaxPlannerDashboard:
                         ], width=1),
                         dbc.Col([
                             dbc.Card(
-                                dbc.CardBody(f'{(self.test_return[id] or [np.nan])[-1]:.3f}',
+                                dbc.CardBody(f'{self.best_found_by[id]} '
+                                             f'{(self.test_return[id] or [np.nan])[-1]:.3f}'
+                                             f'{feasible_marker(id)}',
                                              style={"padding": "0"}),
                                 className="border-0 bg-transparent"
                             ),
@@ -355,7 +370,8 @@ class JaxPlannerDashboard:
                                     dbc.Col(Graph(id='test-return-graph'), width=6),
                                 ]),
                                 dbc.Row([                           
-                                    dbc.Col(Graph(id='auxiliary-return-graph'), width=6)
+                                    dbc.Col(Graph(id='auxiliary-return-graph'), width=6),
+                                    dbc.Col(Graph(id='violations-graph'), width=6)
                                 ]),
                                 dbc.Row([                           
                                     Graph(id='dist-return-graph')
@@ -729,7 +745,7 @@ class JaxPlannerDashboard:
                         marker=dict(size=3), line=dict(width=2)
                     ))
             fig.update_layout(
-                title=dict(text="Test Return"),
+                title=dict(text="Best Return"),
                 xaxis=dict(title=dict(text="Training Iteration")),
                 yaxis=dict(title=dict(text="Cumulative Reward")),
                 font=dict(size=PLOT_AXES_FONT_SIZE),
@@ -759,6 +775,38 @@ class JaxPlannerDashboard:
                 title=dict(text="Auxiliary Planner Return"),
                 xaxis=dict(title=dict(text="Training Iteration")),
                 yaxis=dict(title=dict(text="Cumulative Reward")),
+                font=dict(size=PLOT_AXES_FONT_SIZE),
+                legend=dict(bgcolor='rgba(0,0,0,0)'),
+                template="plotly_white"
+            )
+            return fig
+
+        @app.callback(
+            Output('violations-graph', 'figure'),
+            [Input('interval', 'n_intervals'),
+             Input('trigger-experiment-check', 'children'),
+             Input('tabs-main', 'active_tab')]
+        )
+        def update_violations_graph(n, trigger, active_tab):
+            if active_tab != 'tab-performance': return dash.no_update
+            fig = go.Figure()
+            for (row, checked) in self.checked.copy().items():
+                if checked and self.check_preconditions[row]:
+                    fig.add_trace(go.Scatter(
+                        x=self.xticks[row], y=self.test_violations[row],
+                        name=f'id={row} best',
+                        mode='lines', line=dict(width=2)
+                    ))
+                    if not np.all(np.isnan(self.auxiliary_violations[row])):
+                        fig.add_trace(go.Scatter(
+                            x=self.xticks[row], y=self.auxiliary_violations[row],
+                            name=f'id={row} aux',
+                            mode='lines', line=dict(width=2, dash='dot')
+                        ))
+            fig.update_layout(
+                title=dict(text="Action Precondition Violations"),
+                xaxis=dict(title=dict(text="Training Iteration")),
+                yaxis=dict(title=dict(text="Violations per Rollout"), rangemode='tozero'),
                 font=dict(size=PLOT_AXES_FONT_SIZE),
                 legend=dict(bgcolor='rgba(0,0,0,0)'),
                 template="plotly_white"
@@ -1397,7 +1445,8 @@ class JaxPlannerDashboard:
             'rddl': planner.rddl,
             'string': planner.summarize_system() + str(planner),
             'model_parameter_info': planner.compiled.model_parameter_info(),
-            'trace_info': planner.compiled.traced
+            'trace_info': planner.compiled.traced,
+            'check_preconditions': planner.check_preconditions
         }
         
     def register_experiment(self, experiment_id: str,
@@ -1428,6 +1477,10 @@ class JaxPlannerDashboard:
         self.xticks[experiment_id] = []
         self.train_return[experiment_id] = []
         self.test_return[experiment_id] = []
+        self.check_preconditions[experiment_id] = planner_info.get('check_preconditions', False)
+        self.test_violations[experiment_id] = []
+        self.auxiliary_violations[experiment_id] = []
+        self.best_found_by[experiment_id] = ' '
         self.auxiliary_return[experiment_id] = []
         self.basic_time_curve_last_progress[experiment_id] = 0
         self.return_dist_ticks[experiment_id] = []
@@ -1482,9 +1535,15 @@ class JaxPlannerDashboard:
             self.xticks[experiment_id].append(iteration)
             self.train_return[experiment_id].append(np.min(callback['train_return']))  
             self.test_return[experiment_id].append(np.min(callback['best_return']))
+            self.test_violations[experiment_id].append(
+                float(callback.get('best_violations', 0.)))
             aux_return = callback['auxiliary_return']
             self.auxiliary_return[experiment_id].append(
                 np.nan if aux_return is None else np.min(aux_return))
+            aux_violations = callback.get('auxiliary_violations', None)
+            self.auxiliary_violations[experiment_id].append(
+                np.nan if aux_return is None or aux_violations is None
+                else float(aux_violations[np.argmin(aux_return)]))
             for (key, values) in walk_params(callback['model_params']):
                 value = np.mean(values, axis=0)
                 self.relaxed_exprs_values[experiment_id].setdefault(key, []).append(value)
@@ -1537,6 +1596,7 @@ class JaxPlannerDashboard:
         self.status[experiment_id] = str(callback['status']).split('.')[1]
         self.status_type[experiment_id] = callback['status'].get_type()
         self.duration[experiment_id] = callback["elapsed_time"]
+        self.best_found_by[experiment_id] = callback.get('best_found_by', ' ')
         self.progress[experiment_id] = int(progress)
         self.warnings = None
     

@@ -162,7 +162,7 @@ class JaxRDDLCompilerWithGrad(JaxRDDLCompiler):
     def compile_transition(self, check_constraints: bool=False,
                            constraint_func: bool=False,
                            cache_path_info: bool=False,
-                           aux_constr: Dict[str, Any]={}) -> Callable:
+                           aux_constr: Optional[Dict[str, Any]]=None) -> Callable:
         relaxed_fn = super().compile_transition(
             check_constraints, constraint_func, cache_path_info, aux_constr)
         transition_fn = relaxed_fn
