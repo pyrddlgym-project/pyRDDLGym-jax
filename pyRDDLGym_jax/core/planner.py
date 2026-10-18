@@ -54,6 +54,11 @@
 # self-adaptation in evolution strategies." Evolutionary Computation 9, no. 2 (2001):
 # 159-195.
 #
+# [13] Hansen, Nikolaus, Andre SP Niederberger, Lino Guzzella, and Petros
+# Koumoutsakos. "A method for handling uncertainty in evolutionary optimization with an
+# application to feedback control of combustion." IEEE Transactions on Evolutionary
+# Computation 13, no. 1 (2009): 180-197.
+#
 # ***********************************************************************
 
 
@@ -2286,6 +2291,7 @@ class JaxLMMAESPlanner(JaxPlanner):
                  orthogonal_sampling: bool=True,
                  weights: str='truncation',
                  steps_per_update: int=1,
+                 repair_penalty: bool=True,
                  **planner_kwargs) -> None:
         '''Creates a new LM-MA-ES planner.
 
@@ -2315,6 +2321,8 @@ class JaxLMMAESPlanner(JaxPlanner):
         baseline as in SNES
         :param steps_per_update: how many optimization steps are performed per planner
         update (useful for partially jit compiling the update loop)
+        :param repair_penalty: whether samples are also ranked by the distance of their
+        actions to the repaired actions, weighted as in the boundary handling of [13]
         :param **planner_kwargs: arguments of the planning problem (see JaxPlanner)
         '''
         if weights not in ('truncation', 'utilities'):
@@ -2330,6 +2338,7 @@ class JaxLMMAESPlanner(JaxPlanner):
         self.orthogonal_sampling = orthogonal_sampling
         self.weights = weights
         self.steps_per_update = steps_per_update
+        self.repair_penalty = repair_penalty
         super(JaxLMMAESPlanner, self).__init__(rddl=rddl, plan=plan, **planner_kwargs)
 
     def summarize_optimizer(self) -> str:
@@ -2344,7 +2353,122 @@ class JaxLMMAESPlanner(JaxPlanner):
                 f'    mirrored_correct   ={self.mirrored_correction}\n'
                 f'    orthogonal_samples ={self.orthogonal_sampling}\n'
                 f'    weights            ={self.weights}\n'
-                f'    steps_per_update   ={self.steps_per_update}\n')
+                f'    steps_per_update   ={self.steps_per_update}\n'
+                f'    repair_penalty     ={self.repair_penalty}\n')
+
+    # ***********************************************************************
+    # PENALTY OF REPAIRED ACTIONS
+    #
+    # ***********************************************************************
+
+    @staticmethod
+    def _jax_penalty_weights(state: Dict[str, Any], losses: jnp.ndarray,
+                             variances: jnp.ndarray, mean_distance: jnp.ndarray,
+                             dim: int, mu_eff: float) -> Dict[str, Any]:
+        '''Returns the state of the penalty weights after a generation with the given
+        losses, as in the boundary handling of [13].'''
+        gamma, hist, count = state['gamma'], state['hist'], state['count']
+        iteration = state['iteration'] + 1
+        valid = jnp.arange(hist.size) < count
+
+        # history of the interquartile range of the losses relative to the variances
+        ranked = jnp.sort(losses)
+        size = 1 + losses.size
+        spread = (ranked[3 * size // 4] - ranked[size // 4]) / jnp.mean(variances)
+        history_max = jnp.max(jnp.where(valid, hist, -jnp.inf))
+        insert = (jnp.isfinite(spread) & (spread > 0)) | ((spread == jnp.inf) & (count > 1))
+        value = jnp.where(jnp.isfinite(spread), spread, history_max)
+        hist = jnp.where(insert, jnp.roll(hist, 1).at[0].set(value), hist)
+        count = jnp.where(insert, jnp.minimum(count + 1, hist.size), count)
+        valid = jnp.arange(hist.size) < count
+        ranked_hist = jnp.sort(jnp.where(valid, hist, jnp.inf))
+        median = 0.5 * (ranked_hist[jnp.maximum(count - 1, 0) // 2] + ranked_hist[count // 2])
+
+        # weights are set when the mean is first infeasible (and at the second
+        # generation), then grow where the mean is far infeasible and shrink when large
+        relative = jnp.where(mean_distance > 0, mean_distance / jnp.sqrt(variances), 0.)
+        initialize = (count > 0) & jnp.any(relative > 0) & (
+            jnp.logical_not(state['initialized']) | (iteration == 2))
+        gamma = jnp.where(initialize, 2. * median, gamma)
+        initialized = state['initialized'] | initialize
+        damp = min(1., mu_eff / 10. / dim)
+        excess = relative - 3. * max(1., dim ** 0.5 / mu_eff)
+        grow = jnp.exp(jnp.where(excess > 0, jnp.tanh(excess / 3.) / 2., 0.)) ** damp
+        grown = gamma * grow
+        grown = jnp.where(grown > 5. * median, grown * np.exp(-1. / 3.) ** damp, grown)
+        gamma = jnp.where(initialized & (count > 0), grown, gamma)
+        return {'gamma': gamma, 'hist': hist, 'count': count, 'iteration': iteration,
+                'initialized': initialized}
+
+    @staticmethod
+    def _jax_penalty(gamma: jnp.ndarray, squared_distance: jnp.ndarray) -> jnp.ndarray:
+        '''Returns the penalty of a sample with the given squared distances of its
+        coordinates from their repaired values, averaged over the coordinates.'''
+        return jnp.sum(gamma * squared_distance) / squared_distance.size
+
+    def _jax_penalty_repair(self) -> Callable:
+        '''Returns the function (sim_state, planner_state, actions) -> (actions, info)
+        that repairs the actions on the exact model as in the test rollouts.'''
+        repair_fn = self.action_repair._repair
+        test_policy = self.plan.test_policy
+        train_policy = self.plan.train_policy
+        ranges = self.rddl.variable_ranges
+        action_names = list(self.rddl.action_fluents)
+        REAL = self.test_compiled.REAL
+
+        # the mean policy is evaluated only in the coordinates of the actions present
+        has_real = any(ranges[var] == 'real' for var in action_names)
+        has_score = any(ranges[var] != 'real' for var in action_names)
+
+        def _jax_wrapped_penalty_repair(sim_state, planner_state, actions):
+            scores = train_policy(sim_state, planner_state)
+            repaired, info, kept, _ = repair_fn(sim_state, actions, scores)
+            mean_state = planner_state.replace(policy_params=planner_state.opt_aux)
+            mean_actions = test_policy(sim_state, mean_state) if has_real else None
+            mean_scores = train_policy(sim_state, mean_state) if has_score else None
+            distances, deltas = [], []
+            for var in action_names:
+                if ranges[var] == 'bool':
+                    # the nearest score of a reset action is at the threshold
+                    score = jnp.asarray(scores[var], dtype=REAL)
+                    distance = jnp.where(kept[var], 0., jnp.abs(score - 0.5))
+                    delta = score - mean_scores[var]
+                elif ranges[var] == 'real':
+                    distance = actions[var] - repaired[var]
+                    delta = actions[var] - mean_actions[var]
+                else:
+                    # the nearest score of a changed action rounds to the repaired value
+                    score = jnp.asarray(scores[var], dtype=REAL)
+                    changed = repaired[var] != actions[var]
+                    distance = jnp.where(
+                        changed, jnp.maximum(jnp.abs(score - repaired[var]) - 0.5, 0.), 0.)
+                    delta = score - mean_scores[var]
+                distances.append(jnp.ravel(jnp.asarray(distance, dtype=REAL)))
+                deltas.append(jnp.ravel(jnp.asarray(delta, dtype=REAL)))
+            info = {**info, 'distance': jnp.concatenate(distances),
+                    'delta': jnp.concatenate(deltas)}
+            return repaired, info
+        return _jax_wrapped_penalty_repair
+
+    @staticmethod
+    def _jax_penalty_statistics(log: Dict[str, Any]) -> Tuple[jnp.ndarray, ...]:
+        '''Returns the sums over the rollouts of the squared distances of the action
+        coordinates from their repaired values and of their squared differences from the
+        mean policy, over the steps before termination, and the number of rollouts in
+        which each step precedes termination.'''
+        terminated = jnp.asarray(log['termination'], dtype=log['reward'].dtype)
+        not_terminated = jnp.cumprod(1. - terminated, axis=1)
+        alive = jnp.concatenate(
+            [jnp.ones_like(not_terminated[:, :1]), not_terminated[:, :-1]], axis=1)
+        info = log['repair']
+        squared_distance = jnp.sum(alive[..., None] * jnp.square(info['distance']), axis=0)
+        squared_delta = jnp.sum(alive[..., None] * jnp.square(info['delta']), axis=0)
+        return squared_distance, squared_delta, jnp.sum(alive, axis=0)
+
+    # ***********************************************************************
+    # LM-MA-ES UPDATE
+    #
+    # ***********************************************************************
 
     def _jax_compile_optimizer(self) -> None:
         loss_fn = self.single_test_loss
@@ -2357,6 +2481,27 @@ class JaxLMMAESPlanner(JaxPlanner):
         use_diagonal = self.diagonal_scaling
         mirrored = self.mirrored_sampling
         orthogonal = self.orthogonal_sampling
+
+        # the samples are also ranked by the distances of their actions from the repaired
+        # actions, logged by rollouts that otherwise repair as the test rollouts
+        use_penalty = self.repair_penalty and self.action_repair is not None
+        if use_penalty:
+            penalty_rollouts = self.test_compiled.compile_rollouts(
+                policy=self.plan.test_policy,
+                n_steps=self.horizon,
+                n_batch=self.batch_size_test,
+                history_dependent=self.plan.history_dependent,
+                check_constraints=self.check_preconditions,
+                action_repair=self._jax_penalty_repair()
+            )
+            loss_fn = self._jax_loss(penalty_rollouts, self.test_compiled)
+            penalty_statistics = self._jax_penalty_statistics
+            penalty_weights = self._jax_penalty_weights
+            penalty_of = self._jax_penalty
+            horizon = self.horizon
+            num_rollouts = self.batch_size_test
+            num_coordinates = sum(int(np.size(self.test_compiled.init_values[var]))
+                                  for var in self.rddl.action_fluents)
 
         # the search operates on the policy parameters flattened to a vector
         sim_state = self.compiled.init_sim_state(
@@ -2397,6 +2542,14 @@ class JaxLMMAESPlanner(JaxPlanner):
             squared_length -= (np.square(np.sum(weights)) - squared_length) / (
                 population_size - 1)
         mu_eff = 1. / squared_length
+
+        # the penalty weights depend on the variance effective selection mass of the
+        # positive weights and keep a history of 20 + 3 n / lambda generations [13]
+        if use_penalty:
+            positive_weights = np.maximum(weights, 0.)
+            mu_eff_positive = float(np.square(np.sum(positive_weights)) /
+                                    np.sum(np.square(positive_weights)))
+            history_size = int(np.floor(20 + 3 * n / population_size))
 
         # learning rates of the step size and of the directions
         c_sigma = 2. * population_size / n
@@ -2439,6 +2592,15 @@ class JaxLMMAESPlanner(JaxPlanner):
             }
             if use_diagonal:
                 opt_state['diagonal'] = jnp.ones((parallel_updates, n), dtype=real_dtype)
+            if use_penalty:
+                opt_state['penalty'] = {
+                    'gamma': jnp.zeros(
+                        (parallel_updates, horizon, num_coordinates), dtype=real_dtype),
+                    'hist': jnp.zeros((parallel_updates, history_size), dtype=real_dtype),
+                    'count': jnp.zeros((parallel_updates,), dtype=jnp.int32),
+                    'iteration': jnp.zeros((parallel_updates,), dtype=jnp.int32),
+                    'initialized': jnp.zeros((parallel_updates,), dtype=jnp.bool_)
+                }
             return planner_state.replace(opt_state=opt_state)
         self.initialize = jax.jit(
             _jax_wrapped_batched_lmmaes_init, static_argnames=['init_policy_params'])
@@ -2520,10 +2682,46 @@ class JaxLMMAESPlanner(JaxPlanner):
                 mu_flat = ravel(mu)
                 z, d = _jax_wrapped_sample(sample_key, opt_state)
                 _sim_state = sim_state.replace(key=rollout_key)
-                losses = jax.vmap(
-                    lambda dd: loss_fn(_sim_state, planner_state.replace(
-                        policy_params=unravel(mu_flat + sigma * diagonal * dd)))[0]
-                )(d)
+                if use_penalty:
+                    def _jax_wrapped_penalty_statistics(params):
+                        loss, (log, _) = loss_fn(_sim_state, planner_state.replace(
+                            policy_params=params, opt_aux=mu))
+                        return (loss,) + penalty_statistics(log)
+
+                    # the mean is evaluated with the samples, and the sampling variance
+                    # of each action coordinate is estimated from the differences of the
+                    # sampled actions from the mean policy
+                    flat_params = jnp.concatenate(
+                        [mu_flat + sigma * diagonal * d, mu_flat[None]], axis=0)
+                    all_losses, all_squared_distance, all_squared_delta, all_alive = \
+                        jax.vmap(lambda flat: _jax_wrapped_penalty_statistics(
+                            unravel(flat)))(flat_params)
+                    sample_losses = all_losses[:-1]
+                    squared_distance = all_squared_distance[:-1]
+                    alive = all_alive[:-1]
+                    reached = jnp.sum(alive, axis=0)[:, None]
+                    variances = jnp.where(reached > 0, jnp.sum(
+                        all_squared_delta[:-1], axis=0) / reached, 0.)
+                    mean_squared_distance = all_squared_distance[-1]
+                    mean_alive = all_alive[-1]
+                    mean_distance = jnp.where(
+                        mean_alive[:, None] > 0,
+                        jnp.sqrt(mean_squared_distance / mean_alive[:, None]), 0.)
+
+                    # the weights are updated before the samples are penalized
+                    penalty_state = penalty_weights(
+                        opt_state['penalty'], sample_losses, variances, mean_distance,
+                        dim=n, mu_eff=mu_eff_positive)
+                    penalties = jax.vmap(penalty_of, in_axes=(None, 0))(
+                        penalty_state['gamma'], squared_distance / num_rollouts)
+                    losses = sample_losses + penalties
+                    opt_state = {**opt_state, 'penalty': penalty_state}
+                else:
+                    losses = jax.vmap(
+                        lambda dd: loss_fn(_sim_state, planner_state.replace(
+                            policy_params=unravel(mu_flat + sigma * diagonal * dd)))[0]
+                    )(d)
+                    sample_losses = losses
 
                 # recombine the samples sorted from best to worst, with invalid returns
                 # ranked last
@@ -2569,7 +2767,8 @@ class JaxLMMAESPlanner(JaxPlanner):
                     score = d_sorted * e_sorted - 1.
                     new_opt_state['diagonal'] = diagonal * jnp.exp(
                         0.5 * lr_diagonal * (utilities @ score))
-                return (key, mu, new_opt_state, converged, jnp.mean(losses), unravel(-step))
+                return (key, mu, new_opt_state, converged, jnp.mean(sample_losses),
+                        unravel(-step))
 
             # do an unrolled update
             mu = planner_state.policy_params
