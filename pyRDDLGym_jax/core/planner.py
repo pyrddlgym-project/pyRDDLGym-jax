@@ -311,7 +311,9 @@ class JaxActionRepair:
         bool_splits = np.cumsum([sizes[var] for var in bool_vars])[:-1]
         other_splits = np.cumsum([sizes[var] for var in other_vars])[:-1]
 
-        # bisection stops at the square root of the precision of the model
+        # bisection stops at the square root of the precision of the model, so that the
+        # repaired actions keep a margin from the boundary of the preconditions against
+        # rounding differences between evaluations of the preconditions (e.g. in float64)
         num_bisections = (np.finfo(REAL).nmant + 1) // 2
 
         def _jax_wrapped_feasible(sim_state, fls, actions):
@@ -351,7 +353,8 @@ class JaxActionRepair:
                     [jnp.ravel(jnp.asarray(actions[var], dtype=jnp.bool_))
                      for var in bool_vars])
                 score = jnp.concatenate(
-                    [jnp.ravel(jnp.asarray(scores[var], dtype=REAL)) for var in bool_vars])
+                    [jnp.ravel(jnp.asarray(scores[var], dtype=REAL)) 
+                     for var in bool_vars])
                 flat_default = jnp.asarray(bool_default)
                 active = flat != flat_default
                 order = jnp.argsort(jnp.where(active, jnp.abs(score - 0.5), jnp.inf))
@@ -392,7 +395,9 @@ class JaxActionRepair:
                     [jnp.ravel(jnp.asarray(fls[var], dtype=REAL)) for var in other_vars])
 
                 def _jax_wrapped_interpolate(t, involved):
-                    flat = jnp.where(involved, origin + t * (proposal - origin), proposal)
+                    return jnp.where(involved, origin + t * (proposal - origin), proposal)
+
+                def _jax_wrapped_flat_actions(flat):
                     new_actions = _jax_wrapped_unflatten(flat, other_splits, other_vars)
                     for var in other_vars:
                         if ranges[var] != 'real':
@@ -402,27 +407,33 @@ class JaxActionRepair:
 
                 def _jax_wrapped_reset_violations(i):
                     reset = jnp.zeros(proposal.shape, dtype=jnp.bool_).at[i].set(True)
-                    interp_0 = _jax_wrapped_interpolate(0., reset)
+                    interp_0 = _jax_wrapped_flat_actions(_jax_wrapped_interpolate(0., reset))
                     return _jax_wrapped_violations(sim_state, fls, interp_0)
 
+                # the bisection keeps the last candidate found feasible
                 def _jax_wrapped_bisect(_, bounds):
-                    low, high = bounds
+                    low, high, best = bounds
                     mid = 0.5 * (low + high)
-                    feasible = _jax_wrapped_feasible(
-                        sim_state, fls, _jax_wrapped_interpolate(mid, involved))
-                    return jnp.where(feasible, mid, low), jnp.where(feasible, high, mid)
+                    candidate = _jax_wrapped_interpolate(mid, involved)
+                    cand_flat = _jax_wrapped_flat_actions(candidate)
+                    feasible = _jax_wrapped_feasible(sim_state, fls, cand_flat)
+                    return (jnp.where(feasible, mid, low), 
+                            jnp.where(feasible, high, mid),
+                            jnp.where(feasible, candidate, best))
 
                 violations = _jax_wrapped_violations(sim_state, fls, {})
                 reset_violations = jax.vmap(_jax_wrapped_reset_violations)(
                     jnp.arange(proposal.size))
                 involved = (proposal != origin) & (reset_violations < violations)
-                involved = jnp.where(_jax_wrapped_feasible(sim_state, fls, 
-                    _jax_wrapped_interpolate(0., involved)), involved, True)
-                low, _ = jax.lax.fori_loop(
+                interp_0 = _jax_wrapped_flat_actions(_jax_wrapped_interpolate(0., involved))
+                feasible_0 = _jax_wrapped_feasible(sim_state, fls, interp_0)
+                involved = jnp.where(feasible_0, involved, True)
+                involved_0_1 = _jax_wrapped_interpolate(0., involved)
+                low, _, best = jax.lax.fori_loop(
                     0, num_bisections, _jax_wrapped_bisect,
-                    (jnp.zeros((), dtype=REAL), jnp.ones((), dtype=REAL)))
+                    (jnp.zeros((), dtype=REAL), jnp.ones((), dtype=REAL), involved_0_1))
                 feasible = _jax_wrapped_feasible(sim_state, fls, {})
-                repaired = _jax_wrapped_interpolate(low, involved)
+                repaired = _jax_wrapped_flat_actions(best)
                 fls = {**fls, **{var: jnp.where(feasible, fls[var], repaired[var])
                                  for var in other_vars}}
                 shrink = jnp.where(feasible, 0., 1. - low)
