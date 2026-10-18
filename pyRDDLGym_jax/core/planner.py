@@ -45,6 +45,15 @@
 # covariance matrix adaptation evolution strategies." Evolutionary Computation 27,
 # no. 4 (2019): 699-725.
 #
+# [11] Brockhoff, Dimo, Anne Auger, Nikolaus Hansen, Dirk V. Arnold, and Tim Hohm.
+# "Mirrored sampling and sequential selection for evolution strategies." In
+# International Conference on Parallel Problem Solving from Nature, pp. 11-21.
+# Springer, 2010.
+#
+# [12] Hansen, Nikolaus, and Andreas Ostermeier. "Completely derandomized
+# self-adaptation in evolution strategies." Evolutionary Computation 9, no. 2 (2001):
+# 159-195.
+#
 # ***********************************************************************
 
 
@@ -2273,6 +2282,7 @@ class JaxLMMAESPlanner(JaxPlanner):
                  diagonal_scaling: bool=False,
                  learning_rate_diagonal: Optional[float]=None,
                  mirrored_sampling: bool=True,
+                 mirrored_correction: bool=True,
                  orthogonal_sampling: bool=True,
                  weights: str='truncation',
                  steps_per_update: int=1,
@@ -2294,6 +2304,9 @@ class JaxLMMAESPlanner(JaxPlanner):
         :param learning_rate_diagonal: learning rate of the log diagonal scaling: None
         uses the default (3 + ln n) / (5 sqrt(n)) of SNES for n policy parameters
         :param mirrored_sampling: whether to sample mirrored pairs of parameters
+        :param mirrored_correction: whether the evolution paths account for mirrored
+        pairs cancelling in the recombination [11], so that the step size and directions
+        are unbiased under random selection [12]
         :param orthogonal_sampling: whether to sample orthogonal parameters (in blocks
         of the number of parameters), each with the length of a Gaussian sample
         :param weights: recombination weights of the samples sorted from best to worst,
@@ -2313,6 +2326,7 @@ class JaxLMMAESPlanner(JaxPlanner):
         self.diagonal_scaling = diagonal_scaling
         self.learning_rate_diagonal = learning_rate_diagonal
         self.mirrored_sampling = mirrored_sampling
+        self.mirrored_correction = mirrored_correction
         self.orthogonal_sampling = orthogonal_sampling
         self.weights = weights
         self.steps_per_update = steps_per_update
@@ -2327,6 +2341,7 @@ class JaxLMMAESPlanner(JaxPlanner):
                 f'    diagonal_scaling   ={self.diagonal_scaling}\n'
                 f'    learning_rate_diag ={self.learning_rate_diagonal}\n'
                 f'    mirrored_sampling  ={self.mirrored_sampling}\n'
+                f'    mirrored_correct   ={self.mirrored_correction}\n'
                 f'    orthogonal_samples ={self.orthogonal_sampling}\n'
                 f'    weights            ={self.weights}\n'
                 f'    steps_per_update   ={self.steps_per_update}\n')
@@ -2374,7 +2389,14 @@ class JaxLMMAESPlanner(JaxPlanner):
         else:
             weights = np.maximum(0., np.log(population_size / 2 + 1) - np.log(ranks))
             weights = weights / np.sum(weights) - 1. / population_size
-        mu_eff = 1. / np.sum(np.square(weights))
+        
+        # the evolution paths are normalized by the expected squared length of the
+        # recombined sample per dimension under random selection
+        squared_length = np.sum(np.square(weights))
+        if mirrored and self.mirrored_correction:
+            squared_length -= (np.square(np.sum(weights)) - squared_length) / (
+                population_size - 1)
+        mu_eff = 1. / squared_length
 
         # learning rates of the step size and of the directions
         c_sigma = 2. * population_size / n
