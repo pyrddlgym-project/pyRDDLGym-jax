@@ -63,7 +63,6 @@ import jax.flatten_util
 import jax.numpy as jnp
 import jax.random as random
 import flax
-import softjax as sj
 import numpy as np
 import optax
 import termcolor
@@ -73,120 +72,16 @@ warnings.filterwarnings("ignore", category=TqdmWarning)
 
 from pyRDDLGym.core.compiler.model import RDDLPlanningModel, RDDLLiftedModel
 from pyRDDLGym.core.debug.logger import Logger
-from pyRDDLGym.core.debug.exception import RDDLNotImplementedError
 
 from pyRDDLGym_jax import __version__
 from pyRDDLGym_jax.core.compiler import JaxRDDLCompiler, JaxRDDLSimState
 from pyRDDLGym_jax.core.logic import JaxRDDLCompilerWithGrad, DefaultJaxRDDLCompilerWithGrad
 from pyRDDLGym_jax.core.plan import Preprocessor, JaxPlan
+from pyRDDLGym_jax.core.utility import create_utility
 
 Bounds = Dict[str, Tuple[np.ndarray, np.ndarray]]
 Kwargs = Dict[str, Any]
 Pytree = Any
-
-
-# ***********************************************************************
-# ALL VERSIONS OF RISK FUNCTIONS
-# 
-# Based on the original paper "A Distributional Framework for Risk-Sensitive 
-# End-to-End Planning in Continuous MDPs" by Patton et al., AAAI 2022.
-#
-# Original risk functions:
-# - entropic utility
-# - mean-variance
-# - mean-semideviation
-# - conditional value at risk with straight-through gradient trick
-#
-# ***********************************************************************
-
-
-@jax.jit
-def entropic_utility(returns: jnp.ndarray, beta: float) -> float:
-    return -jnp.divide(
-        jax.scipy.special.logsumexp(-beta * returns, b=1. / returns.size), beta)
-
-
-@jax.jit
-def mean_variance_utility(returns: jnp.ndarray, beta: float) -> float:
-    return jnp.mean(returns) - 0.5 * beta * jnp.var(returns)
-
-
-@jax.jit
-def mean_deviation_utility(returns: jnp.ndarray, beta: float) -> float:
-    return jnp.mean(returns) - 0.5 * beta * jnp.std(returns)
-
-
-@jax.jit
-def mean_semideviation_utility(returns: jnp.ndarray, beta: float) -> float:
-    mu = jnp.mean(returns)
-    msd = sj.sqrt(jnp.mean(jnp.square(jnp.minimum(0.0, returns - mu))))
-    return mu - 0.5 * beta * msd
-
-
-@jax.jit
-def mean_semivariance_utility(returns: jnp.ndarray, beta: float) -> float:
-    mu = jnp.mean(returns)
-    msv = jnp.mean(jnp.square(jnp.minimum(0.0, returns - mu)))
-    return mu - 0.5 * beta * msv
-
-
-@jax.jit
-def sharpe_utility(returns: jnp.ndarray, risk_free: float=0.0, eps: float=1e-12) -> float:
-    return jnp.divide(jnp.mean(returns) - risk_free, jnp.std(returns) + eps)
-
-
-@jax.jit
-def var_utility(returns: jnp.ndarray, alpha: float, *args, **kwargs) -> float:
-    return sj.percentile(returns, 100 * alpha, *args, **kwargs)
-
-
-@jax.jit
-def cvar_utility(returns: jnp.ndarray, alpha: float, *args, **kwargs) -> float:
-    var = sj.percentile(returns, 100 * alpha, *args, **kwargs)
-    return var - jnp.divide(jnp.mean(jax.nn.relu(var - returns)), alpha)
-
-
-@jax.jit
-def cvar_ste_utility(returns: jnp.ndarray, alpha: float) -> float:
-    mask = returns <= jnp.percentile(returns, 100 * alpha)
-    return jnp.divide(jnp.sum(mask * returns), jnp.maximum(1, jnp.count_nonzero(mask)))
-
-
-@jax.jit(static_argnames=['max_iter'])
-def expectile_utility(returns: jnp.ndarray, alpha: float, max_iter: int=30) -> float:
-    def scan_body(current_val, _):
-        weights = jnp.where(returns > current_val, alpha, 1.0 - alpha)
-        next_val = jnp.sum(weights * returns) / jnp.sum(weights)
-        return next_val, None
-    final_val, _ = jax.lax.scan(scan_body, jnp.mean(returns), xs=None, length=max_iter)
-    return final_val
-
-
-@jax.jit
-def gini_utility(returns: jnp.ndarray, gamma: float) -> float:
-    mean_return = jnp.mean(returns)
-    diffs = returns[:, jnp.newaxis] - returns[jnp.newaxis, :]
-    downside_diffs = jax.nn.relu(-diffs)
-    gini_dispersion = 2.0 * jnp.mean(downside_diffs)
-    return mean_return - gamma * gini_dispersion
-
-
-# set of all currently valid built-in utility functions
-UTILITY_LOOKUP = {
-    'mean': jnp.mean,
-    'mean_var': mean_variance_utility,
-    'mean_std': mean_deviation_utility,
-    'mean_semivar': mean_semivariance_utility,
-    'mean_semidev': mean_semideviation_utility,
-    'sharpe': sharpe_utility,
-    'entropic': entropic_utility,
-    'exponential': entropic_utility,
-    'var': var_utility,
-    'cvar': cvar_utility,
-    'cvar_ste': cvar_ste_utility,
-    'expectile': expectile_utility,
-    'gini': gini_utility,
-}
 
 
 # ***********************************************************************
@@ -195,28 +90,22 @@ UTILITY_LOOKUP = {
 # - smoothed mean calculation
 # - planner status
 # - stopping criteria
+# - optimizer construction and chaining with optax  
+# - action repair for contraints
 #
 # ***********************************************************************
 
 
-class RollingMean:
-    '''Maintains the rolling mean of a stream of real-valued observations.'''
-    
-    def __init__(self, window_size: int, exact: bool=False) -> None:
-        self._window_size = window_size
-        self._exact = exact
-        self._memory = deque(maxlen=window_size)
-        self._total = 0
-    
-    def update(self, x: Union[float, np.ndarray]) -> Union[float, np.ndarray]:
-        memory = self._memory
-        self._total = self._total + x
-        if len(memory) == self._window_size:
-            self._total = self._total - memory.popleft()
-        memory.append(x)
-        if self._exact or not np.all(np.isfinite(self._total)):
-            self._total = np.sum(np.stack(memory), axis=0)
-        return self._total / len(memory)
+@flax.struct.dataclass
+class JaxPlannerState:
+    '''The JAX planner state representation.'''
+    policy_params: Pytree=None
+    hyperparams: Pytree=None
+    opt_state: Pytree=None
+    opt_aux: Pytree=None
+    critic_params: Pytree=None
+    progress: float=None
+    reward_mask: jnp.ndarray=None
 
 
 class JaxPlannerStatus(Enum):
@@ -248,6 +137,26 @@ class JaxPlannerStatus(Enum):
         else:
             raise Exception(f'Invalid value {self.value}.')
 
+
+class RollingMean:
+    '''Maintains the rolling mean of a stream of real-valued observations.'''
+    
+    def __init__(self, window_size: int, exact: bool=False) -> None:
+        self._window_size = window_size
+        self._exact = exact
+        self._memory = deque(maxlen=window_size)
+        self._total = 0
+    
+    def update(self, x: Union[float, np.ndarray]) -> Union[float, np.ndarray]:
+        memory = self._memory
+        self._total = self._total + x
+        if len(memory) == self._window_size:
+            self._total = self._total - memory.popleft()
+        memory.append(x)
+        if self._exact or not np.all(np.isfinite(self._total)):
+            self._total = np.sum(np.stack(memory), axis=0)
+        return self._total / len(memory)
+    
 
 class JaxPlannerStoppingRule(metaclass=ABCMeta):
     '''The base class of all planner stopping rules.'''
@@ -283,30 +192,6 @@ class NoImprovementStoppingRule(JaxPlannerStoppingRule):
     def __str__(self) -> str:
         return f'No improvement for {self.patience} iterations'
         
-
-# ***********************************************************************
-# ALL VERSIONS OF JAX PLANNER
-# 
-# - base class of all planners (compilation, optimization loop and actions)
-# - gradient descent through the relaxed model
-# - parameter exploring policy gradients (PGPE)
-# - limited-memory matrix adaptation evolution strategy (LM-MA-ES), which includes
-#   separable natural evolution strategies (SNES)
-# 
-# ***********************************************************************
-
-
-@flax.struct.dataclass
-class JaxPlannerState:
-    '''The JAX planner state representation.'''
-    policy_params: Pytree=None
-    hyperparams: Pytree=None
-    opt_state: Pytree=None
-    opt_aux: Pytree=None
-    critic_params: Pytree=None
-    progress: float=None
-    reward_mask: jnp.ndarray=None
-
 
 def _build_optax_optimizer(optimizer, optimizer_kwargs, clip_grad, noise_kwargs,
                            line_search_kwargs, ema_decay, reduce_on_plateau_kwargs):
@@ -363,13 +248,6 @@ def _jax_zero_tree(tree: Pytree) -> bool:
         jax.tree_util.tree_map(partial(jnp.allclose, b=0), tree))
     return jnp.all(jnp.asarray(leaves))
 
-
-@jax.jit
-def _jax_invalidate_loss(loss: jnp.ndarray, policy_params: Pytree) -> jnp.ndarray:
-    finite = [jnp.all(jnp.isfinite(leaf), axis=tuple(range(1, jnp.ndim(leaf))))
-              for leaf in jax.tree_util.tree_leaves(policy_params)]
-    return jnp.where(jnp.all(jnp.stack(finite), axis=0), loss, jnp.inf)
-    
 
 class JaxActionRepair:
     '''Repairs actions to satisfy the action preconditions of the exact model by moving
@@ -613,6 +491,18 @@ class JaxActionRepair:
         }
 
 
+# ***********************************************************************
+# ALL VERSIONS OF JAX PLANNER
+# 
+# - base class of all planners (compilation, optimization loop and actions)
+# - gradient descent through the relaxed model
+# - parameter exploring policy gradients (PGPE)
+# - limited-memory matrix adaptation evolution strategy (LM-MA-ES), which includes
+#   separable natural evolution strategies (SNES)
+# 
+# ***********************************************************************
+
+
 class JaxPlanner(metaclass=ABCMeta):
     '''Base class for all planners that optimize a policy or plan in a RDDL MDP.
 
@@ -745,16 +635,8 @@ class JaxPlanner(metaclass=ABCMeta):
         
         # set utility
         if isinstance(utility, str):
-            utility = utility.lower()
-            utility_fn = UTILITY_LOOKUP.get(utility, None)
-            if utility_fn is None:
-                raise RDDLNotImplementedError(
-                    f'Utility function <{utility}> is not supported, '
-                    f'must be one of {list(UTILITY_LOOKUP.keys())}.'
-                )
-        else:
-            utility_fn = utility
-        self.utility = utility_fn
+            utility = create_utility(utility)
+        self.utility = utility
         if utility_kwargs is None:
             utility_kwargs = {}
         self.utility_kwargs = utility_kwargs    
@@ -1295,7 +1177,7 @@ class JaxPlanner(metaclass=ABCMeta):
         :param guess: initial policy parameters: if None will use the initializer
         specified in this instance
         :param critic_params: parameters of the critic function
-        :param print_summary: whether to print planner header and diagnosis
+        :param print_summary: whether to print planner header and summary
         :param print_progress: whether to print the progress bar during training
         :param print_hyperparams: whether to print list of hyper-parameter settings   
         :param dashboard_id: experiment id for the dashboard
@@ -1321,6 +1203,13 @@ class JaxPlanner(metaclass=ABCMeta):
                 pass
         return callback
     
+    @staticmethod
+    @jax.jit
+    def _jax_invalidate_loss(loss, policy_params):
+        finite = [jnp.all(jnp.isfinite(leaf), axis=tuple(range(1, jnp.ndim(leaf))))
+                  for leaf in jax.tree_util.tree_leaves(policy_params)]
+        return jnp.where(jnp.all(jnp.stack(finite), axis=0), loss, jnp.inf)
+        
     def optimize_generator(self, key: Optional[random.PRNGKey]=None,
                            epochs: int=999999,
                            train_seconds: float=120.,
@@ -1351,7 +1240,7 @@ class JaxPlanner(metaclass=ABCMeta):
         :param guess: initial policy parameters: if None will use the initializer
         specified in this instance        
         :param critic_params: parameters of the critic function
-        :param print_summary: whether to print planner header and diagnosis
+        :param print_summary: whether to print planner header and summary
         :param print_progress: whether to print the progress bar during training
         :param print_hyperparams: whether to print list of hyper-parameter settings
         :param dashboard_id: experiment id for the dashboard
@@ -1520,8 +1409,6 @@ class JaxPlanner(metaclass=ABCMeta):
             # PLANNER UPDATE STEP
             # ==================================================================
             
-            status = JaxPlannerStatus.NORMAL
-            
             # update the parameters of the plan
             (train_sim_state, test_sim_state, planner_state, train_loss, converged,
              train_log, zero_grads) = self.update(train_sim_state, test_sim_state, planner_state)
@@ -1541,7 +1428,8 @@ class JaxPlanner(metaclass=ABCMeta):
                 test_sim_state, planner_state)
             test_sim_state = test_sim_state.replace(model_params=model_params_test)
             train_loss = np.asarray(train_loss)
-            test_loss = np.asarray(_jax_invalidate_loss(test_loss, planner_state.policy_params))
+            test_loss = np.asarray(self._jax_invalidate_loss(
+                test_loss, planner_state.policy_params))
             test_loss_smooth = rolling_test_loss.update(test_loss)
 
             # mean number of violations of the action preconditions per rollout
@@ -1568,15 +1456,14 @@ class JaxPlanner(metaclass=ABCMeta):
                 # evaluate with the state of this planner to reuse the compiled test loss
                 aux_loss, (aux_log, _) = self.test_loss(
                     test_sim_state, planner_state.replace(policy_params=aux_state.policy_params))
-                aux_loss = np.asarray(_jax_invalidate_loss(aux_loss, aux_state.policy_params))
+                aux_loss = np.asarray(self._jax_invalidate_loss(aux_loss, aux_state.policy_params))
                 aux_loss_smooth = rolling_aux_loss.update(aux_loss)
                 aux_return = -aux_loss_smooth
                 aux_violations = np.mean(np.asarray(aux_log['violations']), axis=1)
                 aux_violations = np.where(np.isfinite(aux_loss), aux_violations, np.inf)
                 aux_violations_smooth = rolling_aux_violations.update(aux_violations)
 
-                # replace plan with auxiliary plan if new minimum reached or train loss
-                # invalid
+                # replace plan with auxiliary if new min reached or train loss invalid
                 aux_mask = self._is_better(
                     aux_violations_smooth, aux_loss_smooth, pbest_violations, pbest_loss
                 ) | ~np.isfinite(train_loss)
@@ -1619,6 +1506,7 @@ class JaxPlanner(metaclass=ABCMeta):
                 pbest_improve, test_violations_smooth, pbest_violations)
                         
             # no progress
+            status = JaxPlannerStatus.NORMAL
             if (not aux_improve) and np.all(zero_grads):
                 status = JaxPlannerStatus.NO_PROGRESS
             
@@ -1782,25 +1670,21 @@ class JaxPlanner(metaclass=ABCMeta):
                                    f'infeasible after repair\n')
                 if best_violations > 0:
                     print(termcolor.colored(
-                        '[WARN] No plan satisfying the preconditions was found.', 'yellow'))
+                        '[WARN] No plan satisfying the preconditions was found.', 'yellow'
+                    ))
             else:
                 violations_info = ''
 
-            # diagnosis
-            diagnosis = self._perform_diagnosis(
-                last_iter_improve, -np.min(train_loss), -np.min(test_loss_smooth), 
-                -best_loss, grad_norm
-            )
             print(
                 f'[INFO] Summary of optimization:\n'
-                f'    status:           {status}\n'
-                f'    time:             {elapsed:.2f} seconds\n'
-                f'    iterations:       {it}\n'
-                f'    best objective:   {-best_loss:.5f}\n'
-                f'    best grad norm:   {grad_norm:.5f}\n'
-                f'    best cuml reward: Mean = {mean:.5f}, 95% CI [{rlo:.5f}, {rhi:.5f}]\n'
+                f'    status:             {status}\n'
+                f'    time:               {elapsed:.2f} seconds\n'
+                f'    iterations:         {it}\n'
+                f'    best objective:     {-best_loss:.5f}\n'
+                f'    best grad norm:     {grad_norm:.5f}\n'
+                f'    best reward mean:   {mean:.5f}\n'
+                f'    best reward 95% CI: [{rlo:.5f}, {rhi:.5f}]\n'
                 f'{violations_info}'
-                f'    diagnosis:        {diagnosis}\n'
             )
     
     @staticmethod
@@ -1814,51 +1698,6 @@ class JaxPlanner(metaclass=ABCMeta):
         mean = np.mean(returns)
         return mean, lower, upper
 
-    def _perform_diagnosis(self, last_iter_improve, train_return, test_return, best_return, 
-                           grad_norm, train_test_valid_bound=0.2, grad_rel_return_bound=1.0):
-        
-        # divergence if the solution is not finite
-        if not np.isfinite(train_return):
-            return termcolor.colored('[FAIL] Training loss diverged.', 'red')
-            
-        # hit a plateau is likely IF:
-        # 1. planner does not improve at all
-        # 2. the gradient norm at the best solution is zero
-        grad_is_zero = np.allclose(grad_norm, 0)
-        if last_iter_improve <= 1:
-            if grad_is_zero:
-                return termcolor.colored(
-                    f'[FAIL] No progress and ||g||={grad_norm:.4f}, '
-                    f'solver initialized in a plateau.', 'red'
-                )
-            else:
-                return termcolor.colored(
-                    f'[FAIL] No progress and ||g||={grad_norm:.4f}, '
-                    f'adjust learning rate or other parameters.', 'red'
-                )
-        
-        # model is likely poor IF:
-        # 1. the train and test return disagree
-        validation_error = abs(test_return - train_return)
-        validation_error_norm = max(abs(train_return), abs(test_return))
-        if not (validation_error < train_test_valid_bound * validation_error_norm):
-            return termcolor.colored(
-                f'[WARN] Progress but large rel. train/test error {validation_error:.4f}, '
-                f'adjust model or batch size.', 'yellow'
-            )
-        
-        # model likely did not converge IF:
-        # 1. the max grad relative to the return is high
-        if not grad_is_zero:
-            if not (abs(best_return) > grad_rel_return_bound * grad_norm):
-                return termcolor.colored(
-                    f'[WARN] Progress but large ||g||={grad_norm:.4f}, '
-                    f'adjust learning rate or budget.', 'yellow'
-                )
-        
-        # likely successful
-        return termcolor.colored('[SUCC] No convergence problems found.', 'green')
-        
     def get_action(self, key: random.PRNGKey,
                    params: Pytree,
                    step: int,
@@ -2553,9 +2392,7 @@ class JaxLMMAESPlanner(JaxPlanner):
 
         # the policy parameters are the mean of the search, and the optimizer state
         # holds the step size, its evolution path and the directions of the covariance
-        # (and the diagonal scaling)
-        def _jax_wrapped_batched_lmmaes_init(sim_state, planner_state,
-                                             init_policy_params=True):
+        def _jax_wrapped_batched_lmmaes_init(sim_state, planner_state, init_policy_params=True):
             if init_policy_params:
                 params, hyperparams = init_policy(sim_state)
                 planner_state = planner_state.replace(
