@@ -878,7 +878,15 @@ class JaxPlanner(metaclass=ABCMeta):
         self.single_test_loss = self._jax_loss(
             self.test_rollouts, self.test_compiled, use_symlog=False)
         vmap_axes = (JaxRDDLSimState(model_params=0), JaxPlannerState(policy_params=0))
-        self.test_loss = jax.jit(jax.vmap(self.single_test_loss, in_axes=vmap_axes))
+        batched_test_loss = jax.vmap(self.single_test_loss, in_axes=vmap_axes)
+
+        # the test loss of a policy with non-finite parameters is invalid
+        def _jax_wrapped_test_loss(sim_state, planner_state):
+            loss, aux = batched_test_loss(sim_state, planner_state)
+            finite = [jnp.all(jnp.isfinite(leaf), axis=tuple(range(1, jnp.ndim(leaf))))
+                      for leaf in jax.tree_util.tree_leaves(planner_state.policy_params)]
+            return jnp.where(jnp.all(jnp.stack(finite), axis=0), loss, jnp.inf), aux
+        self.test_loss = jax.jit(_jax_wrapped_test_loss)
 
     @abstractmethod
     def _jax_compile_optimizer(self) -> None:
@@ -1227,14 +1235,7 @@ class JaxPlanner(metaclass=ABCMeta):
             for callback in it:
                 pass
         return callback
-    
-    @staticmethod
-    @jax.jit
-    def _jax_invalidate_loss(loss, policy_params):
-        finite = [jnp.all(jnp.isfinite(leaf), axis=tuple(range(1, jnp.ndim(leaf))))
-                  for leaf in jax.tree_util.tree_leaves(policy_params)]
-        return jnp.where(jnp.all(jnp.stack(finite), axis=0), loss, jnp.inf)
-        
+
     def optimize_generator(self, key: Optional[random.PRNGKey]=None,
                            epochs: int=999999,
                            train_seconds: float=120.,
@@ -1453,8 +1454,7 @@ class JaxPlanner(metaclass=ABCMeta):
                 test_sim_state, planner_state)
             test_sim_state = test_sim_state.replace(model_params=model_params_test)
             train_loss = np.asarray(train_loss)
-            test_loss = np.asarray(self._jax_invalidate_loss(
-                test_loss, planner_state.policy_params))
+            test_loss = np.asarray(test_loss)
             test_loss_smooth = rolling_test_loss.update(test_loss)
 
             # mean number of violations of the action preconditions per rollout
@@ -1481,7 +1481,7 @@ class JaxPlanner(metaclass=ABCMeta):
                 # evaluate with the state of this planner to reuse the compiled test loss
                 aux_loss, (aux_log, _) = self.test_loss(
                     test_sim_state, planner_state.replace(policy_params=aux_state.policy_params))
-                aux_loss = np.asarray(self._jax_invalidate_loss(aux_loss, aux_state.policy_params))
+                aux_loss = np.asarray(aux_loss)
                 aux_loss_smooth = rolling_aux_loss.update(aux_loss)
                 aux_return = -aux_loss_smooth
                 aux_violations = np.mean(np.asarray(aux_log['violations']), axis=1)
