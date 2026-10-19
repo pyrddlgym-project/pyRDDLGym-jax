@@ -561,7 +561,7 @@ class JaxPlanner(metaclass=ABCMeta):
         'compiler_type', 'compiler_kwargs', 'use_symlog_reward', 'critic_fn', 'logger',
         'preprocessor', 'python_functions', 'cache_full_train_rollouts',
         'cache_full_test_rollouts', 'compiled', 'test_compiled', 'print_warnings',
-        'check_preconditions',
+        'check_preconditions', 'action_repair',
         'init_test_nfls', 'train_policy', 'test_policy', 'train_rollouts',
         'test_rollouts', 'init_policy', 'single_train_loss', 'single_test_loss',
         'test_loss'
@@ -2932,7 +2932,7 @@ class JaxBackpropPlanner(JaxPlanner):
                 # require a slightly different update if line search is used
                 if use_ls:
                     updates, opt_state = optimizer.update(
-                        grad, opt_state, params=params, value=loss_val, grad=grad, 
+                        grad, opt_state, params=params, value=loss_val, grad=grad,
                         value_fn=lambda p, s: _jax_wrapped_plan_params_loss(p, s)[0], 
                         s=_sim_state
                     )
@@ -2940,7 +2940,7 @@ class JaxBackpropPlanner(JaxPlanner):
                     updates, opt_state = optimizer.update(
                         grad, opt_state, params=params, value=loss_val)
                 else:
-                    updates, opt_state = optimizer.update(grad, opt_state, params=params) 
+                    updates, opt_state = optimizer.update(grad, opt_state, params=params)
 
                 # apply optimizer and optional policy projection
                 params = optax.apply_updates(params, updates)
@@ -2972,6 +2972,25 @@ class JaxBackpropPlanner(JaxPlanner):
                          JaxPlannerState(policy_params=0, opt_state=0, opt_aux=0))
             model_params, params, opt_state, *rest = jax.vmap(
                 _jax_wrapped_plan_update, in_axes=vmap_axes)(sim_state, planner_state)
+
+            # an update that leaves the optimizer state of a policy non-finite is rejected,
+            # and the state, which then holds no valid statistics, is reinitialized
+            state_leaves = jax.tree_util.tree_leaves(opt_state)
+            if state_leaves:
+                finite = jnp.all(jnp.stack([
+                    jnp.all(jnp.isfinite(leaf), axis=tuple(range(1, jnp.ndim(leaf))))
+                    for leaf in state_leaves]), axis=0)
+                def _jax_wrapped_reset(params, opt_state):
+                    old_params = planner_state.policy_params
+                    init_state = jax.vmap(optimizer.init, in_axes=0)(old_params)
+                    select = lambda new, old: jnp.where(
+                        finite[(...,) + (jnp.newaxis,) * (jnp.ndim(new) - 1)], new, old)
+                    return (jax.tree_util.tree_map(select, params, old_params),
+                            jax.tree_util.tree_map(select, opt_state, init_state))
+                params, opt_state = jax.lax.cond(
+                    jnp.all(finite), lambda *args: args, _jax_wrapped_reset,
+                    params, opt_state)
+                
             sim_state = sim_state.replace(key=keys[0], model_params=model_params)
             planner_state = planner_state.replace(policy_params=params, opt_state=opt_state)
             return (sim_state, planner_state, *rest)
