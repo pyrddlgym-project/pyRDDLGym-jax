@@ -155,21 +155,12 @@ class JaxPlannerStatus(Enum):
 class RollingMean:
     '''Maintains the rolling mean of a stream of real-valued observations.'''
     
-    def __init__(self, window_size: int, exact: bool=False) -> None:
-        self._window_size = window_size
-        self._exact = exact
+    def __init__(self, window_size: int) -> None:
         self._memory = deque(maxlen=window_size)
-        self._total = 0
-    
+
     def update(self, x: Union[float, np.ndarray]) -> Union[float, np.ndarray]:
-        memory = self._memory
-        self._total = self._total + x
-        if len(memory) == self._window_size:
-            self._total = self._total - memory.popleft()
-        memory.append(x)
-        if self._exact or not np.all(np.isfinite(self._total)):
-            self._total = np.sum(np.stack(memory), axis=0)
-        return self._total / len(memory)
+        self._memory.append(x)
+        return np.mean(np.stack(self._memory), axis=0)
     
 
 class JaxPlannerStoppingRule(metaclass=ABCMeta):
@@ -1370,7 +1361,7 @@ class JaxPlanner(metaclass=ABCMeta):
                 opt_state=self._shard_parallel(aux_state.opt_state, sharding),
                 opt_aux=self._shard_parallel(aux_state.opt_aux, sharding))
             rolling_aux_loss = RollingMean(test_rolling_window)
-            rolling_aux_violations = RollingMean(test_rolling_window, exact=True)
+            rolling_aux_violations = RollingMean(test_rolling_window)
         else:
             aux_state = rolling_aux_loss = rolling_aux_violations = None
 
@@ -1386,7 +1377,7 @@ class JaxPlanner(metaclass=ABCMeta):
         best_found_by = ' '
         last_iter_improve = 0
         rolling_test_loss = RollingMean(test_rolling_window)
-        rolling_test_violations = RollingMean(test_rolling_window, exact=True)
+        rolling_test_violations = RollingMean(test_rolling_window)
         status = JaxPlannerStatus.NORMAL
         progress_percent = 0
         total_aux_it = 0
