@@ -1800,6 +1800,7 @@ class JaxPGPEPlanner(JaxPlanner):
                  baseline_decay: float=0.9,
                  super_symmetric: bool=True,
                  super_symmetric_accurate: bool=True,
+                 exploration: str='per-tensor',
                  project_samples: bool=False,
                  optimizer: Callable[..., optax.GradientTransformation]=optax.adam,
                  optimizer_sigma: Optional[Callable[..., optax.GradientTransformation]]=None,
@@ -1828,6 +1829,8 @@ class JaxPGPEPlanner(JaxPlanner):
         :param super_symmetric: whether to use super-symmetric sampling as in the paper
         :param super_symmetric_accurate: whether to use the accurate formula for super-
         symmetric sampling or the simplified but biased formula
+        :param exploration: whether the standard deviation is shared by all parameters
+        ('global'), by the parameters of each tensor ('per-tensor'), or not ('per-param')
         :param project_samples: whether to use projected gradient on the sampled
         plan parameters (possibly introduces bias into the update rule)
         :param optimizer: a factory for an optax SGD algorithm
@@ -1862,6 +1865,10 @@ class JaxPGPEPlanner(JaxPlanner):
         self.baseline_decay = baseline_decay
         self.super_symmetric = super_symmetric
         self.super_symmetric_accurate = super_symmetric_accurate
+        if exploration not in ('global', 'per-tensor', 'per-param'):
+            raise ValueError(f'Invalid exploration <{exploration}>: must be \'global\', '
+                             f'\'per-tensor\' or \'per-param\'.')
+        self.exploration = exploration
         self.clip_grad_mu = clip_grad_mu
         self.clip_grad_sigma = clip_grad_sigma
         self.project_samples = project_samples
@@ -1871,7 +1878,7 @@ class JaxPGPEPlanner(JaxPlanner):
             optimizer_kwargs_mu = {'learning_rate': 0.1}
         self.optimizer_kwargs_mu = optimizer_kwargs_mu
         if optimizer_kwargs_sigma is None:
-            optimizer_kwargs_sigma = {'learning_rate': 0.01}
+            optimizer_kwargs_sigma = {'learning_rate': 0.05}
         self.optimizer_kwargs_sigma = optimizer_kwargs_sigma
         if optimizer_sigma is None:
             optimizer_sigma = optimizer
@@ -1900,6 +1907,7 @@ class JaxPGPEPlanner(JaxPlanner):
                 f'    baseline_decay     ={self.baseline_decay}\n'
                 f'    super_symmetric    ={self.super_symmetric}\n'
                 f'        accurate       ={self.super_symmetric_accurate}\n'
+                f'    exploration        ={self.exploration}\n'
                 f'    project_samples    ={self.project_samples}\n'
                 f'    eps                ={self.eps}\n'
                 f'[INFO] PGPE optimizer hyper-parameters:\n'
@@ -1930,6 +1938,7 @@ class JaxPGPEPlanner(JaxPlanner):
         baseline_decay = self.baseline_decay
         super_symmetric = self.super_symmetric
         super_symmetric_accurate = self.super_symmetric_accurate
+        exploration = self.exploration
         batch_size = self.batch_size
         optimizer = self.optimizer
         max_kl = self.max_kl
@@ -2187,6 +2196,18 @@ class JaxPGPEPlanner(JaxPlanner):
                     epsilon, epsilon_star, sigma, returns, r_max, baseline)
             mu_grad, sigma_grad = jax.tree_util.tree_map(
                 partial(jnp.mean, axis=0), (mu_grad, sigma_grad))
+
+            # shared sgiam across tensors or global
+            if exploration == 'per-tensor':
+                sigma_grad = jax.tree_util.tree_map(
+                    lambda g: jnp.full_like(g, jnp.mean(g)), sigma_grad)
+            elif exploration == 'global':
+                leaves = jax.tree_util.tree_leaves(sigma_grad)
+                total_leaf_size = sum(leaf.size for leaf in leaves)
+                total = sum(jnp.sum(leaf) for leaf in leaves) / total_leaf_size
+                sigma_grad = jax.tree_util.tree_map(
+                    lambda g: jnp.full_like(g, total), sigma_grad)
+            
             return {'mu': mu_grad, 'log_sigma': sigma_grad}, r_max, new_baseline, loss
         
         # ***********************************************************************
