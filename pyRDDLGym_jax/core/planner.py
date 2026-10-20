@@ -1797,6 +1797,7 @@ class JaxPGPEPlanner(JaxPlanner):
                  sigma_range: Tuple[float, float]=(1e-5, 1e5),
                  reward_shaping: Optional[str]='ranks',
                  min_reward_scale: float=1e-5,
+                 baseline_decay: float=0.9,
                  super_symmetric: bool=True,
                  super_symmetric_accurate: bool=True,
                  project_samples: bool=False,
@@ -1807,8 +1808,6 @@ class JaxPGPEPlanner(JaxPlanner):
                  clip_grad_mu: Optional[float]=None,
                  clip_grad_sigma: Optional[float]=None,
                  ema_decay: Optional[float]=None,
-                 start_entropy_coeff: float=1e-2,
-                 end_entropy_coeff: float=1e-5,
                  max_kl_update: Optional[float]=None,
                  eps: float=1e-10,
                  **planner_kwargs) -> None:
@@ -1825,6 +1824,7 @@ class JaxPGPEPlanner(JaxPlanner):
         shaped: 'scale' applies the reward scaling of the paper, 'ranks' replaces the
         returns by their centered ranks in [-0.5, 0.5], and None uses the raw returns
         :param min_reward_scale: minimum reward scaling to avoid underflow ('scale' only)
+        :param baseline_decay: weight of the previous baseline in its moving average
         :param super_symmetric: whether to use super-symmetric sampling as in the paper
         :param super_symmetric_accurate: whether to use the accurate formula for super-
         symmetric sampling or the simplified but biased formula
@@ -1834,14 +1834,12 @@ class JaxPGPEPlanner(JaxPlanner):
         :param optimizer_sigma: a factory for an optax SGD algorithm of the standard
         deviation (the same as the optimizer of the mean if None)
         :param optimizer_kwargs_mu: a dictionary of parameters to pass to the SGD
-        factory for the mean optimizer
+        factory for the mean optimizer, which steps in units of the standard deviation
         :param optimizer_kwargs_sigma: a dictionary of parameters to pass to the SGD
-        factory for the standard deviation optimizer
+        factory for the optimizer of the log of the standard deviation
         :param clip_grad_mu: gradient clipping for mean optimizer
         :param clip_grad_sigma: gradient clipping for standard deviation optimizer
         :param ema_decay: EMA decay of parameters during optimization
-        :param start_entropy_coeff: starting entropy regularization coeffient for Gaussian
-        :param end_entropy_coeff: ending entropy regularization coeffient for Gaussian
         :param max_kl_update: bound on kl-divergence between parameter updates
         :param eps: small value to avoid division by zero
         :param **planner_kwargs: arguments of the planning problem (see JaxPlanner)
@@ -1859,22 +1857,21 @@ class JaxPGPEPlanner(JaxPlanner):
                              'so the standard deviation would receive no gradient.')
         self.reward_shaping = reward_shaping
         self.min_reward_scale = min_reward_scale
+        if not 0. <= baseline_decay < 1.:
+            raise ValueError(f'baseline_decay must be in [0, 1), got {baseline_decay}.')
+        self.baseline_decay = baseline_decay
         self.super_symmetric = super_symmetric
         self.super_symmetric_accurate = super_symmetric_accurate
         self.clip_grad_mu = clip_grad_mu
         self.clip_grad_sigma = clip_grad_sigma
         self.project_samples = project_samples
 
-        # entropy regularization penalty is decayed exponentially between these values
-        self.start_entropy_coeff = start_entropy_coeff
-        self.end_entropy_coeff = end_entropy_coeff
-        
         # set optimizers
         if optimizer_kwargs_mu is None:
             optimizer_kwargs_mu = {'learning_rate': 0.1}
         self.optimizer_kwargs_mu = optimizer_kwargs_mu
         if optimizer_kwargs_sigma is None:
-            optimizer_kwargs_sigma = {'learning_rate': 0.1}
+            optimizer_kwargs_sigma = {'learning_rate': 0.01}
         self.optimizer_kwargs_sigma = optimizer_kwargs_sigma
         if optimizer_sigma is None:
             optimizer_sigma = optimizer
@@ -1886,8 +1883,8 @@ class JaxPGPEPlanner(JaxPlanner):
             optimizer_sigma, optimizer_kwargs_sigma, clip_grad_sigma, None, None, ema_decay,
             None)
         self.optimizer = optax.multi_transform(
-            {'mu': mu_optimizer, 'sigma': sigma_optimizer}, 
-            param_labels={'mu': 'mu', 'sigma': 'sigma'}
+            {'mu': mu_optimizer, 'sigma': sigma_optimizer},
+            param_labels={'mu': 'mu', 'log_sigma': 'sigma'}
         )
         self.max_kl = max_kl_update if inject_mu and inject_sigma else None
         self.eps = eps
@@ -1900,6 +1897,7 @@ class JaxPGPEPlanner(JaxPlanner):
                 f'    sigma_range        ={self.sigma_range}\n'
                 f'    reward_shaping     ={self.reward_shaping}\n'
                 f'    min_reward_scale   ={self.min_reward_scale}\n'
+                f'    baseline_decay     ={self.baseline_decay}\n'
                 f'    super_symmetric    ={self.super_symmetric}\n'
                 f'        accurate       ={self.super_symmetric_accurate}\n'
                 f'    project_samples    ={self.project_samples}\n'
@@ -1915,8 +1913,6 @@ class JaxPGPEPlanner(JaxPlanner):
                 f'    clip_grad:\n'
                 f'        mu   ={self.clip_grad_mu}\n'
                 f'        sigma={self.clip_grad_sigma}\n'
-                f'    start_entropy_coeff={self.start_entropy_coeff}\n'
-                f'    end_entropy_coeff  ={self.end_entropy_coeff}\n'
                 f'    max_kl_update      ={self.max_kl}\n'
         )
 
@@ -1927,38 +1923,37 @@ class JaxPGPEPlanner(JaxPlanner):
         parallel_updates = self.parallel_updates
         init_policy = self.init_policy
         sigma0 = self.init_sigma
-        sigma_lo, sigma_hi = self.sigma_range
+        log_sigma_lo, log_sigma_hi = (float(np.log(bound)) for bound in self.sigma_range)
         centered_ranks = self.reward_shaping == 'ranks'
         scale_reward = self.reward_shaping == 'scale'
         min_reward_scale = self.min_reward_scale
+        baseline_decay = self.baseline_decay
         super_symmetric = self.super_symmetric
         super_symmetric_accurate = self.super_symmetric_accurate
         batch_size = self.batch_size
         optimizer = self.optimizer
         max_kl = self.max_kl
         project_samples = self.project_samples
-        
-        # entropy regularization penalty is decayed exponentially by elapsed budget
-        # this uses the optimizer progress (as percentage) to move the decay
-        start_entropy_coeff = self.start_entropy_coeff
-        if start_entropy_coeff == 0:
-            entropy_coeff_decay = 0
-        else:
-            entropy_coeff_decay = (self.end_entropy_coeff / start_entropy_coeff) ** 0.01
-        
+        use_baseline = not super_symmetric and not centered_ranks
+
         # ***********************************************************************
         # INITIALIZATION OF POLICY
         #
         # ***********************************************************************
         
         # the policy parameters are the mean of the Gaussian, and the optimizer state
-        # holds its standard deviation and the largest return observed so far
+        # holds its standard deviation, the largest return observed so far and the
+        # baseline of basic pgpe if used
         def _jax_wrapped_pgpe_init(mu):
             sigma = jax.tree_util.tree_map(
                 partial(jnp.full_like, fill_value=sigma0, dtype=real_dtype), mu)
-            opt_state = optimizer.init({'mu': mu, 'sigma': sigma})
+            opt_state = optimizer.init(
+                {'mu': mu, 'log_sigma': jax.tree_util.tree_map(jnp.log, sigma)})
             r_max = jnp.asarray(-jnp.inf, dtype=real_dtype)
-            return {'sigma': sigma, 'r_max': r_max, 'optimizer': opt_state}
+            state = {'sigma': sigma, 'r_max': r_max, 'optimizer': opt_state}
+            if use_baseline:
+                state['baseline'] = jnp.asarray(jnp.nan, dtype=real_dtype)
+            return state
 
         # initialize independent (mean, sigma) per policy parameter instance
         def _jax_wrapped_batched_pgpe_init(sim_state, planner_state, init_policy_params=True):
@@ -1985,7 +1980,7 @@ class JaxPGPEPlanner(JaxPlanner):
         # according to super-symmetric sampling paper
         def _jax_wrapped_eps(sigma, epsilon):
             phi = 0.67449 * sigma
-            a = jnp.divide(sigma - jnp.abs(epsilon), sigma)
+            a = jnp.divide(phi - jnp.abs(epsilon), phi)
 
             # more accurate formula
             if super_symmetric_accurate:
@@ -2072,35 +2067,35 @@ class JaxPGPEPlanner(JaxPlanner):
                 grad = -r_mu * epsilon
             return grad
         
-        #  gradient with respect to std. deviation
-        def _jax_wrapped_sigma_grad(epsilon, epsilon_star, sigma, r1, r2, r3, r4, m, ent):
+        # gradient with respect to the log of the std. deviation
+        def _jax_wrapped_sigma_grad(epsilon, sigma, r1, r2, r3, r4, m, b):
+            s = jnp.square(jnp.divide(epsilon, sigma)) - 1.
 
             # for super symmetric sampling
             if super_symmetric:
-                epsilon_tau = jnp.where(r1 + r2 >= r3 + r4, epsilon, epsilon_star)
-                s = (jnp.divide(jnp.square(epsilon_tau), jnp.power(sigma, 3)) - 
-                     jnp.divide(1., sigma))
                 if scale_reward:
                     scale = jnp.maximum(min_reward_scale, m - (r1 + r2 + r3 + r4) / 4)
                 else:
                     scale = 1.0
                 r_sigma = jnp.divide((r1 + r2) - (r3 + r4), 4 * scale)
-            
+
             # for basic pgpe
             else:
-                s = (jnp.divide(jnp.square(epsilon), jnp.power(sigma, 3)) - 
-                     jnp.divide(1., sigma))
-                if scale_reward:
-                    scale = jnp.maximum(min_reward_scale, jnp.abs(m))
+                if centered_ranks:
+                    r_sigma = (r1 + r2) / 2
                 else:
-                    scale = 1.0
-                r_sigma = jnp.divide(r1 + r2, 2 * scale)
+                    if scale_reward:
+                        scale = jnp.maximum(min_reward_scale, m - b)
+                    else:
+                        scale = 1.0
+                    r_sigma = jnp.divide((r1 + r2) / 2 - b, scale)
 
-            return -(r_sigma * s + jnp.divide(ent, sigma))
+            return -r_sigma * s
             
         # sample policy parameters and evaluate their returns
         def _jax_wrapped_pgpe_returns(sim_state, planner_state, stats):
-            mu, sigma = stats['mu'], stats['sigma']
+            mu = stats['mu']
+            sigma = jax.tree_util.tree_map(jnp.exp, stats['log_sigma'])
             key, subkey = random.split(sim_state.key)
             p1, p2, p3, p4, epsilon, epsilon_star = _jax_wrapped_sample_params(
                 key, mu, sigma, planner_state.hyperparams)
@@ -2120,24 +2115,29 @@ class JaxPGPEPlanner(JaxPlanner):
             return jnp.reshape(ranks, jnp.shape(returns))
 
         # calculate the policy gradients from the returns of the sampled parameters
-        def _jax_wrapped_pgpe_grad(epsilon, epsilon_star, sigma, returns, r_max, ent):
+        def _jax_wrapped_pgpe_grad(epsilon, epsilon_star, sigma, returns, r_max, baseline):
             if super_symmetric:
                 r1, r2, r3, r4 = returns
             else:
                 r1, r2 = returns
                 r3, r4 = r1, r2
+            
+            # the gradient of the mean is in units of the standard deviation, so the
+            # search is invariant to the scale of the parameters for any optimizer
             grad_mu = jax.tree_util.tree_map(
-                partial(_jax_wrapped_mu_grad, r1=r1, r2=r2, r3=r3, r4=r4, m=r_max),
-                epsilon, epsilon_star
+                lambda e, e_star, s: _jax_wrapped_mu_grad(
+                    e / s, e_star / s, r1=r1, r2=r2, r3=r3, r4=r4, m=r_max),
+                epsilon, epsilon_star, sigma
             )
             grad_sigma = jax.tree_util.tree_map(
-                partial(_jax_wrapped_sigma_grad, r1=r1, r2=r2, r3=r3, r4=r4, m=r_max, ent=ent),
-                epsilon, epsilon_star, sigma
+                partial(_jax_wrapped_sigma_grad, r1=r1, r2=r2, r3=r3, r4=r4, m=r_max,
+                        b=baseline),
+                epsilon, sigma
             )
             return grad_mu, grad_sigma
 
         # calculate the policy gradients with batching on the first dimension
-        def _jax_wrapped_pgpe_grad_batched(sim_state, planner_state, stats, r_max, ent):
+        def _jax_wrapped_pgpe_grad_batched(sim_state, planner_state, stats, r_max, baseline):
 
             # sample policy parameters and evaluate their returns
             if batch_size == 1:
@@ -2157,18 +2157,37 @@ class JaxPGPEPlanner(JaxPlanner):
             # the returns are replaced by their centered ranks
             if centered_ranks:
                 returns = _jax_wrapped_centered_ranks(returns)
+                new_baseline = baseline
             else:
                 valid = jnp.all(jnp.isfinite(returns), axis=1, keepdims=True)
                 r_max = jnp.maximum(r_max, jnp.max(jnp.where(valid, returns, -jnp.inf)))
-                returns = jnp.where(valid, returns, 0.)
+
+                # the baseline of basic pgpe is a moving average
+                if use_baseline:
+                    any_valid = jnp.any(valid)
+                    pair_rewards = jnp.mean(jnp.where(valid, returns, 0.), axis=1)
+                    batch_reward = jnp.divide(jnp.sum(pair_rewards),
+                                              jnp.maximum(jnp.sum(valid), 1))
+                    baseline = jnp.where(jnp.isfinite(baseline), baseline,
+                                         jnp.where(any_valid, batch_reward, 0.))
+                    new_baseline = jnp.where(
+                        any_valid,
+                        baseline_decay * baseline + (1. - baseline_decay) * batch_reward,
+                        baseline)
+                else:
+                    new_baseline = baseline
+
+                # invalid samples take the baseline as their returns and give no gradient
+                returns = jnp.where(valid, returns, baseline)
 
             # calculate the average gradient over the batch
+            sigma = jax.tree_util.tree_map(jnp.exp, stats['log_sigma'])
             mu_grad, sigma_grad = jax.vmap(
                 _jax_wrapped_pgpe_grad, in_axes=(0, 0, None, 0, None, None))(
-                    epsilon, epsilon_star, stats['sigma'], returns, r_max, ent)
+                    epsilon, epsilon_star, sigma, returns, r_max, baseline)
             mu_grad, sigma_grad = jax.tree_util.tree_map(
                 partial(jnp.mean, axis=0), (mu_grad, sigma_grad))
-            return {'mu': mu_grad, 'sigma': sigma_grad}, r_max, loss
+            return {'mu': mu_grad, 'log_sigma': sigma_grad}, r_max, new_baseline, loss
         
         # ***********************************************************************
         # PARAMETER UPDATE
@@ -2176,33 +2195,37 @@ class JaxPGPEPlanner(JaxPlanner):
         # ***********************************************************************
 
         # estimate KL divergence between two updates
-        def _jax_wrapped_pgpe_kl_term(old_mu, old_sigma, mu, sigma):
-            return 0.5 * jnp.sum(2 * jnp.log(jnp.divide(sigma, old_sigma)) + 
-                                 jnp.square(jnp.divide(old_sigma, sigma)) + 
-                                 jnp.square(jnp.divide(mu - old_mu, sigma)) - 1)
-        
-        # update mean and std. deviation with a gradient step
+        def _jax_wrapped_pgpe_kl_term(old_mu, old_log_sigma, mu, log_sigma):
+            return 0.5 * jnp.sum(2 * (log_sigma - old_log_sigma) +
+                                 jnp.exp(2 * (old_log_sigma - log_sigma)) +
+                                 jnp.square((mu - old_mu) * jnp.exp(-log_sigma)) - 1)
+
+        # update mean and log of the std. deviation with a gradient step
         def _jax_wrapped_pgpe_update_helper(stats, grad, opt_state):
             updates, new_opt_state = optimizer.update(grad, opt_state, stats)
+
+            # the step of the mean is in units of the standard deviation
+            mu_updates = jax.tree_util.tree_map(
+                lambda u, log_sigma: u * jnp.exp(log_sigma),
+                updates['mu'], stats['log_sigma'])
+            updates = {**updates, 'mu': mu_updates}
             new_stats = optax.apply_updates(stats, updates)
-            new_stats['sigma'] = jax.tree_util.tree_map(
-                partial(jnp.clip, min=sigma_lo, max=sigma_hi), new_stats['sigma'])
+            new_stats['log_sigma'] = jax.tree_util.tree_map(
+                partial(jnp.clip, min=log_sigma_lo, max=log_sigma_hi),
+                new_stats['log_sigma'])
             return new_stats, new_opt_state
 
         def _jax_wrapped_pgpe_update(sim_state, planner_state):
-            
-            # calculate entropy coefficient
-            ent = start_entropy_coeff * jnp.power(entropy_coeff_decay, planner_state.progress)
 
             # do a single update step
             def _jax_wrapped_pgpe_update_step(_, carry):
-                key, stats, r_max, opt_state, *_ = carry
+                key, stats, r_max, baseline, opt_state, *_ = carry
 
                 # do a pgpe update
                 key, subkey = random.split(key)
                 _sim_state = sim_state.replace(key=subkey)
-                grad, new_r_max, loss = _jax_wrapped_pgpe_grad_batched(
-                    _sim_state, planner_state, stats, r_max, ent)
+                grad, new_r_max, new_baseline, loss = _jax_wrapped_pgpe_grad_batched(
+                    _sim_state, planner_state, stats, r_max, baseline)
                 new_stats, new_opt_state = _jax_wrapped_pgpe_update_helper(
                     stats, grad, opt_state)
                 
@@ -2210,7 +2233,8 @@ class JaxPGPEPlanner(JaxPlanner):
                 if max_kl is not None:
                     kl = jax.tree_util.tree_map(
                         _jax_wrapped_pgpe_kl_term, 
-                        stats['mu'], stats['sigma'], new_stats['mu'], new_stats['sigma']
+                        stats['mu'], stats['log_sigma'], new_stats['mu'],
+                        new_stats['log_sigma']
                     )
                     sum_kl = jax.tree_util.tree_reduce(jnp.add, kl)
                     scale = jnp.minimum(1.0, jnp.sqrt(jnp.divide(max_kl, sum_kl + self.eps)))
@@ -2221,21 +2245,27 @@ class JaxPGPEPlanner(JaxPlanner):
                 # apply a gradient projection
                 new_stats['mu'], converged = _jax_wrapped_projection(
                     new_stats['mu'], planner_state.hyperparams)
-                return (key, new_stats, new_r_max, new_opt_state, converged, loss, grad['mu'])
+                return (key, new_stats, new_r_max, new_baseline, new_opt_state, converged,
+                        loss, grad['mu'])
 
             # do an unrolled update
             opt_state = planner_state.opt_state
-            stats = {'mu': planner_state.policy_params, 'sigma': opt_state['sigma']}
-            carry = (sim_state.key, stats, opt_state['r_max'], opt_state['optimizer'],
-                     True, jnp.zeros((), dtype=real_dtype),
+            stats = {'mu': planner_state.policy_params,
+                     'log_sigma': jax.tree_util.tree_map(jnp.log, opt_state['sigma'])}
+            baseline = opt_state.get('baseline', jnp.zeros((), dtype=real_dtype))
+            carry = (sim_state.key, stats, opt_state['r_max'], baseline,
+                     opt_state['optimizer'], True, jnp.zeros((), dtype=real_dtype),
                      jax.tree_util.tree_map(jnp.zeros_like, stats['mu']))
-            _, stats, r_max, optimizer_state, converged, loss, grad = jax.lax.fori_loop(
-                lower=0, upper=self.steps_per_update, 
-                body_fun=_jax_wrapped_pgpe_update_step, 
-                init_val=carry
-            )
-            opt_state = {'sigma': stats['sigma'], 'r_max': r_max,
-                         'optimizer': optimizer_state}
+            _, stats, r_max, baseline, optimizer_state, converged, loss, grad = \
+                jax.lax.fori_loop(
+                    lower=0, upper=self.steps_per_update,
+                    body_fun=_jax_wrapped_pgpe_update_step,
+                    init_val=carry
+                )
+            opt_state = {'sigma': jax.tree_util.tree_map(jnp.exp, stats['log_sigma']),
+                         'r_max': r_max, 'optimizer': optimizer_state}
+            if use_baseline:
+                opt_state['baseline'] = baseline
             return stats['mu'], opt_state, converged, loss, grad
 
         # for parallel policy update
