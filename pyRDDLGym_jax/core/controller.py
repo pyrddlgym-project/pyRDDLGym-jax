@@ -16,7 +16,6 @@ from typing import Any, Dict, Optional, Union
 
 import jax.random as random
 import numpy as np
-import termcolor
 
 from pyRDDLGym.core.policy import BaseAgent
 
@@ -165,7 +164,6 @@ class JaxOnlineController(BaseAgent):
                  key: Optional[random.PRNGKey]=None,
                  eval_hyperparams: Optional[Dict[str, Any]]=None,
                  warm_start: bool=True,
-                 max_attempts: int=3,
                  **train_kwargs) -> None:
         '''Creates a new JAX control policy that is trained online in a closed-
         loop fashion.
@@ -176,8 +174,6 @@ class JaxOnlineController(BaseAgent):
         or whenever sample_action is called
         :param warm_start: whether to use the previous decision epoch final
         policy parameters to warm the next decision epoch
-        :param max_attempts: maximum attempted restarts of the optimizer when the total
-        iteration count is 1 (i.e. the execution time is dominated by the jit compilation)
         :param **train_kwargs: any keyword arguments to be passed to the planner
         for optimization
         '''
@@ -189,7 +185,6 @@ class JaxOnlineController(BaseAgent):
         self.hyperparams_given = eval_hyperparams is not None
         self.warm_start = warm_start
         self.train_kwargs = train_kwargs
-        self.max_attempts = max_attempts
         self.reset()
      
     def sample_action(self, state: Dict[str, Any]) -> Dict[str, Any]:
@@ -202,30 +197,6 @@ class JaxOnlineController(BaseAgent):
             key=self.key, guess=self.guess, policy_hyperparams=self.hyperparams, 
             subs=state, **self.train_kwargs
         )
-        
-        # optimize again if jit compilation takes up the entire time budget
-        # this can be done for several attempts until the optimizer has traced the 
-        # computation graph: we report the callback of the successful attempt (if exists)
-        attempts = 0
-        while attempts < self.max_attempts and callback['iteration'] <= 1:
-            attempts += 1
-            if self.planner.print_warnings:
-                print(termcolor.colored(
-                    f'[INFO] JIT compilation dominated the execution time: '
-                    f'executing the optimizer again on the traced model '
-                    f'[attempt {attempts}].', 'dark_grey'
-                ))
-            callback = planner.optimize(
-                key=self.key, guess=self.guess, policy_hyperparams=self.hyperparams, 
-                subs=state, **self.train_kwargs
-            )   
-        if callback['iteration'] <= 1 and self.planner.print_warnings:
-            print(termcolor.colored(
-                f'[FAIL] JIT compilation dominated the execution time and '
-                f'ran out of attempts: increase max_attempts or the training time.', 'red'
-            )) 
-        
-        # use the last callback obtained
         self.callback = callback
         params = callback['best_params']
         if not self.hyperparams_given:

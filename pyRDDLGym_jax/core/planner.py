@@ -69,6 +69,7 @@ from enum import Enum
 from functools import partial
 import inspect
 import sys
+import threading
 import time
 from typing import Any, Callable, Dict, Generator, Optional, Tuple, Union
 
@@ -102,6 +103,7 @@ Pytree = Any
 # SUPPORTING FUNCTIONS
 # 
 # - smoothed mean calculation
+# - compilation timer
 # - planner status
 # - stopping criteria
 # - optimizer construction and chaining with optax  
@@ -162,6 +164,48 @@ class RollingMean:
         self._memory.append(x)
         return np.mean(np.stack(self._memory), axis=0)
     
+
+class CompilationTimer:
+    '''Measures the time spent tracing, lowering and compiling JAX functions in the
+    thread that created the timer while it is running.'''
+
+    _EVENTS = frozenset({'/jax/core/compile/jaxpr_trace_duration',
+                         '/jax/core/compile/jaxpr_to_mlir_module_duration',
+                         '/jax/core/compile/backend_compile_duration'})
+    _running = {}
+
+    def __init__(self) -> None:
+        self._thread = threading.get_ident()
+        self._spans = []
+        self._elapsed = 0.
+
+    @classmethod
+    def _record(cls, event: str, start_time: float, end_time: float, **kwargs) -> None:
+        timer = cls._running.get(threading.get_ident())
+        if timer is not None and event in cls._EVENTS:
+            timer._spans.append((start_time, end_time))
+
+    def start(self) -> None:
+        CompilationTimer._running[self._thread] = self
+
+    def stop(self) -> None:
+        if CompilationTimer._running.get(self._thread) is self:
+            del CompilationTimer._running[self._thread]
+
+    def elapsed(self) -> float:
+        '''Returns the total compilation time so far: functions called by a function are
+        compiled within its span, so the spans are merged.'''
+        last = -np.inf
+        for (start, end) in sorted(self._spans):
+            if end > last:
+                self._elapsed += end - max(start, last)
+                last = end
+        self._spans.clear()
+        return self._elapsed
+
+
+jax.monitoring.register_event_time_span_listener(CompilationTimer._record)
+
 
 class JaxPlannerStoppingRule(metaclass=ABCMeta):
     '''The base class of all planner stopping rules.'''
@@ -1192,7 +1236,8 @@ class JaxPlanner(metaclass=ABCMeta):
         
         :param key: JAX PRNG key (derived from clock if not provided)
         :param epochs: the maximum number of optimization steps
-        :param train_seconds: total time allocated for optimization
+        :param train_seconds: total time allocated for optimization, excluding the time
+        spent compiling JAX functions
         :param model_params: optional model-parameters to override default
         :param policy_hyperparams: hyper-parameters for the policy/plan, such as
         weights for sigmoid wrapping boolean actions
@@ -1248,7 +1293,8 @@ class JaxPlanner(metaclass=ABCMeta):
         
         :param key: JAX PRNG key (derived from clock if not provided)
         :param epochs: the maximum number of optimization steps
-        :param train_seconds: total time allocated for optimization
+        :param train_seconds: total time allocated for optimization, excluding the time
+        spent compiling JAX functions
         :param model_params: optional model-parameters to override default
         :param policy_hyperparams: hyper-parameters for the policy/plan, such as
         weights for sigmoid wrapping boolean actions
@@ -1275,9 +1321,12 @@ class JaxPlanner(metaclass=ABCMeta):
         # INITIALIZATION OF HYPER-PARAMETERS
         # ======================================================================
 
-        # start measuring execution time here, including time spent outside optimize loop
+        # start measuring execution time here, excluding time spent outside the optimize
+        # loop and compiling JAX functions, which can happen at any iteration
         start_time = time.time()
         elapsed_outside_loop = 0
+        compile_timer = CompilationTimer()
+        compile_timer.start()
         
         # if PRNG key is not provided
         if key is None:
@@ -1568,7 +1617,8 @@ class JaxPlanner(metaclass=ABCMeta):
                                 '[FAIL] Testing model error: ' + message, 'red'))
         
             # reached computation budget
-            elapsed = time.time() - start_time - elapsed_outside_loop
+            elapsed = (time.time() - start_time - elapsed_outside_loop -
+                       compile_timer.elapsed())
             if elapsed >= train_seconds:
                 status = JaxPlannerStatus.TIME_BUDGET_REACHED
             if it >= epochs - 1:
@@ -1647,12 +1697,15 @@ class JaxPlanner(metaclass=ABCMeta):
                         
             # yield the callback
             start_time_outside = time.time()
+            compile_timer.stop()
             yield callback
+            compile_timer.start()
             elapsed_outside_loop += (time.time() - start_time_outside)
             
             # abortion check
             if status.is_terminal():
                 break             
+        compile_timer.stop()
         
         # ======================================================================
         # POST-PROCESSING AND CLEANUP
@@ -1695,6 +1748,7 @@ class JaxPlanner(metaclass=ABCMeta):
                 f'[INFO] Summary of optimization:\n'
                 f'    status:             {status}\n'
                 f'    time:               {elapsed:.2f} seconds\n'
+                f'    compile time:       {compile_timer.elapsed():.2f} seconds\n'
                 f'    iterations:         {it}\n'
                 f'    best objective:     {-best_loss:.5f}\n'
                 f'    best grad norm:     {grad_norm:.5f}\n'
