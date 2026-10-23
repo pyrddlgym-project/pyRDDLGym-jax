@@ -163,6 +163,10 @@ class RollingMean:
     def update(self, x: Union[float, np.ndarray]) -> Union[float, np.ndarray]:
         self._memory.append(x)
         return np.mean(np.stack(self._memory), axis=0)
+
+    def replace(self, mask: np.ndarray, other: 'RollingMean') -> None:
+        for i in range(1, min(len(self._memory), len(other._memory)) + 1):
+            self._memory[-i] = np.where(mask, other._memory[-i], self._memory[-i])
     
 
 class CompilationTimer:
@@ -613,6 +617,9 @@ class JaxPlanner(metaclass=ABCMeta):
                  complex_preconditions: bool=True,
                  action_bounds: Optional[Bounds]=None,
                  auxiliary: Optional['JaxPlanner']=None,
+                 auxiliary_patience: float=0.04,
+                 auxiliary_overrides: bool=True,
+                 primary_overrides: bool=False,
                  compiler: JaxRDDLCompilerWithGrad=DefaultJaxRDDLCompilerWithGrad,
                  compiler_kwargs: Optional[Kwargs]=None,
                  use_symlog_reward: bool=False,
@@ -646,6 +653,13 @@ class JaxPlanner(metaclass=ABCMeta):
         not box constraints on actions are part of the problem
         :param action_bounds: box constraints on actions
         :param auxiliary: optional planner to run alongside this planner
+        :param auxiliary_patience: a plan only replaces the plan of the other planner when
+        the latter did not improve over the last auxiliary_patience fraction of the
+        progress of the optimization
+        :param auxiliary_overrides: whether the plan of the auxiliary planner can replace
+        the plan of this planner when it is better
+        :param primary_overrides: whether the plan of this planner can replace the plan
+        of the auxiliary planner when it is better
         :param compiler: compiler instance to use for planning
         :param compiler_kwargs: compiler instances kwargs for initialization
         :param use_symlog_reward: whether to use the symlog transform on the 
@@ -738,6 +752,9 @@ class JaxPlanner(metaclass=ABCMeta):
                 raise ValueError('Auxiliary planner cannot have its own auxiliary planner.')
             auxiliary = copy.copy(auxiliary)
         self.auxiliary = auxiliary
+        self.auxiliary_patience = auxiliary_patience
+        self.auxiliary_overrides = auxiliary_overrides
+        self.primary_overrides = primary_overrides
 
         if rddl is not None:
             if plan is None:
@@ -1429,7 +1446,9 @@ class JaxPlanner(metaclass=ABCMeta):
         rolling_test_violations = RollingMean(test_rolling_window)
         status = JaxPlannerStatus.NORMAL
         progress_percent = 0
-        total_aux_it = 0
+        total_aux_it = total_primary_it = 0
+        primary_stall = auxiliary_stall = 0.
+        aux_pbest_loss = aux_pbest_violations = np.inf
         
         # initialize stopping criterion
         if stopping_rule is not None:
@@ -1490,6 +1509,7 @@ class JaxPlanner(metaclass=ABCMeta):
 
             # evaluate
             test_sim_state = test_sim_state.replace(key=train_sim_state.key)
+            eval_sim_state = test_sim_state
             test_loss, (test_log, model_params_test) = self.test_loss(
                 test_sim_state, planner_state)
             test_sim_state = test_sim_state.replace(model_params=model_params_test)
@@ -1520,19 +1540,34 @@ class JaxPlanner(metaclass=ABCMeta):
                 
                 # evaluate with the state of this planner to reuse the compiled test loss
                 aux_loss, (aux_log, _) = self.test_loss(
-                    test_sim_state, planner_state.replace(policy_params=aux_state.policy_params))
+                    eval_sim_state, planner_state.replace(policy_params=aux_state.policy_params))
                 aux_loss = np.asarray(aux_loss)
                 aux_loss_smooth = rolling_aux_loss.update(aux_loss)
-                aux_return = -aux_loss_smooth
                 aux_violations = np.mean(np.asarray(aux_log['violations']), axis=1)
                 aux_violations = np.where(np.isfinite(aux_loss), aux_violations, np.inf)
                 aux_violations_smooth = rolling_aux_violations.update(aux_violations)
 
-                # replace plan with auxiliary if new min reached or train loss invalid
-                aux_mask = self._is_better(
-                    aux_violations_smooth, aux_loss_smooth, pbest_violations, pbest_loss
-                ) | ~np.isfinite(train_loss)
+                # each planner stalls when its own plans did not improve over the patience
+                patience = 100 * self.auxiliary_patience
+                if np.any(self._is_better(test_violations_smooth, test_loss_smooth,
+                                          pbest_violations, pbest_loss)):
+                    primary_stall = progress_percent
+                aux_pbest_improve = self._is_better(
+                    aux_violations_smooth, aux_loss_smooth, aux_pbest_violations, aux_pbest_loss)
+                if np.any(aux_pbest_improve):
+                    auxiliary_stall = progress_percent
+                aux_pbest_loss = np.where(aux_pbest_improve, aux_loss_smooth, aux_pbest_loss)
+                aux_pbest_violations = np.where(
+                    aux_pbest_improve, aux_violations_smooth, aux_pbest_violations)
+
+                # replace plan of this planner with a better plan of the auxiliary planner
+                # if allowed and this planner stalls, or if train loss invalid
+                aux_mask = ~np.isfinite(train_loss)
+                if self.auxiliary_overrides and progress_percent - primary_stall >= patience:
+                    aux_mask = aux_mask | self._is_better(
+                        aux_violations_smooth, aux_loss_smooth, pbest_violations, pbest_loss)
                 if np.any(aux_mask):
+                    primary_stall = progress_percent
                     policy_params, test_loss, test_loss_smooth, converged = \
                         self.merge_auxiliary(
                             aux_mask, aux_state.policy_params, planner_state.policy_params,
@@ -1542,11 +1577,35 @@ class JaxPlanner(metaclass=ABCMeta):
                     test_violations = np.where(aux_mask, aux_violations, test_violations)
                     test_violations_smooth = np.where(
                         aux_mask, aux_violations_smooth, test_violations_smooth)
+                    rolling_test_loss.replace(aux_mask, rolling_aux_loss)
+                    rolling_test_violations.replace(aux_mask, rolling_aux_violations)
                     planner_state = planner_state.replace(policy_params=policy_params)
                     aux_improve = True
                     total_aux_it += 1
+
+                # replace plan of the auxiliary planner with a better plan of this planner
+                # if allowed and the auxiliary planner stalls
+                if self.primary_overrides and progress_percent - auxiliary_stall >= patience:
+                    primary_mask = self._is_better(
+                        test_violations_smooth, test_loss_smooth,
+                        aux_pbest_violations, aux_pbest_loss)
+                    if np.any(primary_mask):
+                        auxiliary_stall = progress_percent
+                        aux_state = aux_state.replace(policy_params=self.merge_auxiliary(
+                            primary_mask, planner_state.policy_params, aux_state.policy_params,
+                            test_loss, aux_loss, test_loss_smooth, aux_loss_smooth,
+                            converged, aux_converged)[0])
+                        aux_loss = np.where(primary_mask, test_loss, aux_loss)
+                        aux_violations = np.where(primary_mask, test_violations, aux_violations)
+                        aux_loss_smooth = np.where(
+                            primary_mask, test_loss_smooth, aux_loss_smooth)
+                        aux_violations_smooth = np.where(
+                            primary_mask, test_violations_smooth, aux_violations_smooth)
+                        rolling_aux_loss.replace(primary_mask, rolling_test_loss)
+                        rolling_aux_violations.replace(primary_mask, rolling_test_violations)
+                        total_primary_it += 1
             else:
-                aux_loss = aux_loss_smooth = aux_return = aux_violations_smooth = None
+                aux_loss = aux_loss_smooth = aux_violations = aux_violations_smooth = None
 
             # ==================================================================
             # STATUS CHECKS AND LOGGING
@@ -1554,9 +1613,10 @@ class JaxPlanner(metaclass=ABCMeta):
 
             # evaluate test losses and record best parameters so far
             train_grad = train_log.get('grad', None)
-            best_index = np.lexsort((test_loss_smooth, test_violations_smooth))[0]
-            if self._is_better(test_violations_smooth[best_index],
-                               test_loss_smooth[best_index], best_violations, best_loss):
+            test_index = np.lexsort((test_loss_smooth, test_violations_smooth))[0]
+            if self._is_better(test_violations_smooth[test_index],
+                               test_loss_smooth[test_index], best_violations, best_loss):
+                best_index = test_index
                 best_params = _unbatched_pytree(planner_state.policy_params, best_index)
                 if train_grad is not None:
                     best_grad = _unbatched_pytree(train_grad, best_index)
@@ -1564,6 +1624,18 @@ class JaxPlanner(metaclass=ABCMeta):
                 best_violations = test_violations_smooth[best_index]
                 best_found_by = 'H' if aux_improve and aux_mask[best_index] else '*'
                 last_iter_improve = it
+
+            # the best plan can also be a plan of the auxiliary planner it did not adopt
+            if aux_loss_smooth is not None:
+                aux_index = np.lexsort((aux_loss_smooth, aux_violations_smooth))[0]
+                if self._is_better(aux_violations_smooth[aux_index],
+                                   aux_loss_smooth[aux_index], best_violations, best_loss):
+                    best_index = aux_index
+                    best_params = _unbatched_pytree(aux_state.policy_params, aux_index)
+                    best_loss = aux_loss_smooth[aux_index]
+                    best_violations = aux_violations_smooth[aux_index]
+                    best_found_by = 'A'
+                    last_iter_improve = it
             pbest_improve = self._is_better(
                 test_violations_smooth, test_loss_smooth, pbest_violations, pbest_loss)
             pbest_loss = np.where(pbest_improve, test_loss_smooth, pbest_loss)
@@ -1639,7 +1711,7 @@ class JaxPlanner(metaclass=ABCMeta):
                 'key': train_sim_state.key,
                 'test_key': test_sim_state.key,
                 'train_return':-train_loss,
-                'test_return':-test_loss_smooth,
+                'test_return':-test_loss,
                 'best_return':-best_loss,
                 'best_violations': best_violations,
                 'last_iteration_improved': last_iter_improve,
@@ -1653,10 +1725,12 @@ class JaxPlanner(metaclass=ABCMeta):
                 'train_log': train_log,
                 'test_log': test_log,
                 'planner_state': planner_state,
-                'auxiliary_return': aux_return,
-                'auxiliary_violations': aux_violations_smooth,
+                'auxiliary_return': None if aux_loss is None else -aux_loss,
+                'auxiliary_violations': aux_violations,
                 'best_found_by': best_found_by,
                 'auxiliary_improved': aux_improve,
+                'auxiliary_adopted': total_aux_it,
+                'auxiliary_given': total_primary_it,
                 'auxiliary_params': None if aux_state is None else aux_state.policy_params,                
             }
 
@@ -1670,19 +1744,18 @@ class JaxPlanner(metaclass=ABCMeta):
             
             # if the progress bar is used
             if print_progress:
-                test_info = (f'{-test_loss_smooth[best_index]:13.5f}'
-                             f'{_feasible_marker(test_violations_smooth[best_index])}')
+                test_info = (f'{-test_loss_smooth[test_index]:13.5f}'
+                             f'{_feasible_marker(test_violations_smooth[test_index])}')
                 if auxiliary is not None:
                     aux_index = np.lexsort((aux_loss_smooth, aux_violations_smooth))[0]
                     aux_info = (f'{-aux_loss_smooth[aux_index]:13.5f}'
-                                f'{_feasible_marker(aux_violations_smooth[aux_index])} '
-                                f'[{total_aux_it} it] aux | ')
+                                f'{_feasible_marker(aux_violations_smooth[aux_index])} aux | ')
                 else:
                     aux_info = ''
                 best_info = (f'{best_found_by} {-best_loss:13.5f}'
                              f'{_feasible_marker(best_violations)}')
                 progress_bar.set_description(
-                    f'{position_str} {it} it | {-np.min(train_loss):13.5f} train | '
+                    f'{position_str} {it} it | {-train_loss[test_index]:13.5f} train | '
                     f'{test_info} test | {aux_info}{best_info} best | {status.value} status', 
                     refresh=False
                 )
@@ -1743,6 +1816,9 @@ class JaxPlanner(metaclass=ABCMeta):
                     ))
             else:
                 violations_info = ''
+            if auxiliary is not None:
+                violations_info += (f'    auxiliary plans:    {total_aux_it} adopted, '
+                                    f'{total_primary_it} given\n')
 
             print(
                 f'[INFO] Summary of optimization:\n'
