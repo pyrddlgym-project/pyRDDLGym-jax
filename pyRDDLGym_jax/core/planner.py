@@ -81,9 +81,6 @@ import flax
 import numpy as np
 import optax
 import termcolor
-from tqdm import tqdm, TqdmWarning
-import warnings
-warnings.filterwarnings("ignore", category=TqdmWarning)
 
 from pyRDDLGym.core.compiler.model import RDDLPlanningModel, RDDLLiftedModel
 from pyRDDLGym.core.debug.logger import Logger
@@ -92,6 +89,7 @@ from pyRDDLGym_jax import __version__
 from pyRDDLGym_jax.core.compiler import JaxRDDLCompiler, JaxRDDLSimState
 from pyRDDLGym_jax.core.logic import JaxRDDLCompilerWithGrad, DefaultJaxRDDLCompilerWithGrad
 from pyRDDLGym_jax.core.plan import Preprocessor, JaxPlan
+from pyRDDLGym_jax.core.progress import JaxPlannerProgress
 from pyRDDLGym_jax.core.utility import create_utility
 
 Bounds = Dict[str, Tuple[np.ndarray, np.ndarray]]
@@ -1271,7 +1269,7 @@ class JaxPlanner(metaclass=ABCMeta):
         :param test_rolling_window: the test return is averaged on a rolling 
         window of the past test_rolling_window returns when updating the best
         parameters found so far
-        :param tqdm_position: position of tqdm progress bar (for multiprocessing)
+        :param tqdm_position: index of this run shown in the progress display
         '''
         it = self.optimize_generator(*args, **kwargs)
         
@@ -1328,8 +1326,26 @@ class JaxPlanner(metaclass=ABCMeta):
         :param test_rolling_window: the test return is averaged on a rolling 
         window of the past test_rolling_window returns when updating the best
         parameters found so far
-        :param tqdm_position: position of tqdm progress bar (for multiprocessing)
+        :param tqdm_position: index of this run shown in the progress display
         '''
+        # the display is stopped even if the generator is closed early or interrupted
+        if print_progress:
+            progress = JaxPlannerProgress(tqdm_position, self.check_preconditions)
+        else:
+            progress = None
+        try:
+            yield from self._optimize_generator(
+                key, epochs, train_seconds, model_params, policy_hyperparams, subs, guess,
+                critic_params, print_summary, progress, print_hyperparams, dashboard_id,
+                stopping_rule, test_rolling_window)
+        finally:
+            if progress is not None:
+                progress.stop()
+
+    def _optimize_generator(self, key, epochs, train_seconds, model_params,
+                            policy_hyperparams, subs, guess, critic_params, print_summary,
+                            progress, print_hyperparams, dashboard_id, stopping_rule,
+                            test_rolling_window) -> Generator[Dict[str, Any], None, None]:
         if self.rddl is None:
             raise ValueError('Planner was created without a RDDL model: it can only be '
                              'used as an auxiliary planner.')
@@ -1372,7 +1388,7 @@ class JaxPlanner(metaclass=ABCMeta):
                 f'    critic_params      ={critic_params is not None}\n'
                 f'    test_rolling_window={test_rolling_window}\n'
                 f'    print_summary      ={print_summary}\n'
-                f'    print_progress     ={print_progress}\n'
+                f'    print_progress     ={progress is not None}\n'
                 f'    dashboard_id       ={dashboard_id}\n'
                 f'    stopping_rule      ={stopping_rule}\n'
             )
@@ -1464,21 +1480,6 @@ class JaxPlanner(metaclass=ABCMeta):
                 viz=self.dashboard_viz
             )
         
-        # progress bar
-        if print_progress:
-            progress_bar = tqdm(None, total=100, position=tqdm_position, 
-                                bar_format='{l_bar}{bar}| {elapsed} {postfix}')
-        else:
-            progress_bar = None
-        position_str = '' if tqdm_position is None else f'[{tqdm_position}]'
-
-        # a return is marked F if its plan satisfies the action preconditions
-        def _feasible_marker(violations):
-            if not self.check_preconditions:
-                return ''
-            else:
-                return 'F' if violations == 0 else ' '
-
         # error handlers (to avoid spam messaging)
         policy_constraint_msg_shown = False
         jax_train_msg_shown = set()
@@ -1488,6 +1489,8 @@ class JaxPlanner(metaclass=ABCMeta):
         # MAIN TRAINING LOOP BEGINS
         # ======================================================================
         
+        if progress is not None:
+            progress.start()
         for it in range(epochs):
             
             # ==================================================================
@@ -1649,8 +1652,8 @@ class JaxPlanner(metaclass=ABCMeta):
             
             # constraint satisfaction problem
             if not np.all(converged):                
-                if progress_bar is not None and not policy_constraint_msg_shown:
-                    progress_bar.write(termcolor.colored(
+                if progress is not None and not policy_constraint_msg_shown:
+                    print(termcolor.colored(
                         '[FAIL] Policy update violated action constraints.', 'red'
                     ))
                     policy_constraint_msg_shown = True
@@ -1663,21 +1666,21 @@ class JaxPlanner(metaclass=ABCMeta):
             if auxiliary is not None:
                 invalid_loss = invalid_loss and np.all(~np.isfinite(aux_loss))
             if invalid_loss:
-                if progress_bar is not None:
-                    progress_bar.write(termcolor.colored(
+                if progress is not None:
+                    print(termcolor.colored(
                         f'[FAIL] Planner aborted early with train loss {train_loss}.', 'red'
                     ))
                 status = JaxPlannerStatus.INVALID_GRADIENT
               
             # problem in the model compilation
-            if progress_bar is not None:
+            if progress is not None:
 
                 # train model
                 for error_code in np.unique(train_log.get('error', [])):
                     if error_code not in jax_train_msg_shown:
                         jax_train_msg_shown.add(error_code)
                         for message in JaxRDDLCompiler.get_error_messages(error_code):
-                            progress_bar.write(termcolor.colored(
+                            print(termcolor.colored(
                                 '[FAIL] Training model error: ' + message, 'red'))
 
                 # test model
@@ -1685,7 +1688,7 @@ class JaxPlanner(metaclass=ABCMeta):
                     if error_code not in jax_test_msg_shown:
                         jax_test_msg_shown.add(error_code)
                         for message in JaxRDDLCompiler.get_error_messages(error_code):
-                            progress_bar.write(termcolor.colored(
+                            print(termcolor.colored(
                                 '[FAIL] Testing model error: ' + message, 'red'))
         
             # reached computation budget
@@ -1736,34 +1739,20 @@ class JaxPlanner(metaclass=ABCMeta):
 
             # stopping condition reached
             if stopping_rule is not None and stopping_rule.monitor(callback):
-                if self.print_warnings and progress_bar is not None:
-                    progress_bar.write(termcolor.colored(
+                if self.print_warnings and progress is not None:
+                    print(termcolor.colored(
                         '[SUCC] Stopping rule has been reached.', 'green'
                     ))
                 callback['status'] = status = JaxPlannerStatus.STOPPING_RULE_REACHED  
             
-            # if the progress bar is used
-            if print_progress:
-                test_info = (f'{-test_loss_smooth[test_index]:13.5f}'
-                             f'{_feasible_marker(test_violations_smooth[test_index])}')
-                if auxiliary is not None:
-                    aux_index = np.lexsort((aux_loss_smooth, aux_violations_smooth))[0]
-                    aux_info = (f'{-aux_loss_smooth[aux_index]:13.5f}'
-                                f'{_feasible_marker(aux_violations_smooth[aux_index])} aux | ')
-                else:
-                    aux_info = ''
-                best_info = (f'{best_found_by} {-best_loss:13.5f}'
-                             f'{_feasible_marker(best_violations)}')
-                progress_bar.set_description(
-                    f'{position_str} {it} it | {-train_loss[test_index]:13.5f} train | '
-                    f'{test_info} test | {aux_info}{best_info} best | {status.value} status', 
-                    refresh=False
-                )
-                progress_bar.set_postfix_str(
-                    f'{(it + 1) / (elapsed + 1e-6):.2f}it/s', refresh=False
-                )
-                progress_bar.update(progress_percent - progress_bar.n)
-            
+            # update the progress display
+            if progress is not None:
+                progress.update(
+                    it, progress_percent, elapsed, status, train_loss, test_loss_smooth,
+                    test_violations_smooth, test_index, best_loss, best_violations,
+                    best_found_by, aux_loss_smooth, aux_violations_smooth,
+                    aux_index if auxiliary is not None else None)
+        
             # dashboard
             if dashboard is not None:            
                 dashboard.update_experiment(dashboard_id, callback)
@@ -1778,16 +1767,14 @@ class JaxPlanner(metaclass=ABCMeta):
             # abortion check
             if status.is_terminal():
                 break             
+        if progress is not None:
+            progress.stop()
         compile_timer.stop()
         
         # ======================================================================
         # POST-PROCESSING AND CLEANUP
         # ====================================================================== 
 
-        # release resources
-        if print_progress:
-            progress_bar.close()
-        
         # summarize and test for convergence
         if print_summary:
 
