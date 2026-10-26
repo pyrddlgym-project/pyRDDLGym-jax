@@ -38,7 +38,7 @@ setup(
           'tensorflow-probability>=0.25.0'
       ],
       extras_require={
-          'extra': ['bayesian-optimization>=3.2.0', 'rddlrepository>=2.0'],
+          'extra': ['optuna>=5.0', 'optuna-dashboard', 'rddlrepository>=2.0'],
           'dashboard': ['dash>=4.0.0', 'dash-bootstrap-components>=2.0.4']
       },
       python_requires=">=3.12",

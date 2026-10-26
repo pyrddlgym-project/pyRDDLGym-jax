@@ -22,7 +22,7 @@ import io
 import pickle
 import time
 import threading
-from typing import Any, Dict, Optional, Tuple, TYPE_CHECKING
+from typing import Any, Dict, Optional, TYPE_CHECKING
 import webbrowser
 
 # prevent endless console prints
@@ -56,8 +56,6 @@ PROGRESS_FOR_NEXT_BASIC_TIME_CURVE = 0.05
 REWARD_ERROR_DIST_SUBPLOTS = 20
 MODEL_STATE_ERROR_HEIGHT = 300
 POLICY_STATE_VIZ_MAX_HEIGHT = 800
-GP_POSTERIOR_MAX_HEIGHT = 800
-GP_POSTERIOR_PIXELS = 100
 
 PLOT_AXES_FONT_SIZE = 11
 EXPERIMENT_ENTRY_FONT_SIZE = 14
@@ -115,12 +113,6 @@ class JaxPlannerDashboard:
         self.train_state_fluents = {}
         self.train_state_output = {}
         self.test_state_output = {}
-        
-        self.tuning_gp_heatmaps = None
-        self.tuning_gp_targets = None
-        self.tuning_gp_predicted = None
-        self.tuning_gp_params = None
-        self.tuning_gp_update = False
         
         # ======================================================================
         # CREATE PAGE LAYOUT
@@ -503,28 +495,6 @@ class JaxPlannerDashboard:
                                 ]),
                             ]), className="border-0 bg-transparent"
                         ), label="Debug", tab_id='tab-debug'
-                        ),
-                        
-                        # tuning
-                        dbc.Tab(dbc.Card(
-                            dbc.CardBody([
-                                dbc.Row([
-                                    dbc.Col(Graph(id='tuning-target-graph'), width=6),
-                                    dbc.Col(Graph(id='tuning-scatter-graph'), width=6)
-                                ]),
-                                dbc.Row([
-                                    dbc.Col([
-                                        Hr(className='my-4')
-                                    ])
-                                ]),
-                                dbc.Row([
-                                    dbc.Col(Graph(id='tuning-gp-mean-graph'))
-                                ]),
-                                dbc.Row([
-                                    dbc.Col(Graph(id='tuning-gp-unc-graph'))
-                                ])
-                            ]), className="border-0 bg-transparent"
-                        ), label="Tuning", tab_id='tab-tuning'
                         ),
                     ], id='tabs-main')
                 ], width=12)
@@ -1306,115 +1276,6 @@ class JaxPlannerDashboard:
                     ]
                     break            
             return result
-        
-        # update the tuning result
-        @app.callback(
-            [Output('tuning-target-graph', 'figure'),
-             Output('tuning-scatter-graph', 'figure'),
-             Output('tuning-gp-mean-graph', 'figure'),
-             Output('tuning-gp-unc-graph', 'figure')],
-            [Input('interval', 'n_intervals'),
-             Input('tabs-main', 'active_tab'),
-             Input('viewport-sizer', 'children')]
-        )
-        def update_tuning_gp_graph(n, active_tab, viewport_size):
-            if not self.tuning_gp_update: return dash.no_update
-            if not viewport_size: return dash.no_update
-            
-            # tuning target trend
-            fig1 = go.Figure()
-            fig1.add_trace(go.Scatter(
-                x=np.arange(len(self.tuning_gp_targets)), y=self.tuning_gp_targets,
-                mode='lines+markers',
-                marker=dict(size=3), line=dict(width=2)
-            ))
-            fig1.update_layout(
-                title=dict(text="Target Values of Trial Points"),
-                xaxis=dict(title=dict(text="Trial Point")),
-                yaxis=dict(title=dict(text="Target Value")),
-                font=dict(size=PLOT_AXES_FONT_SIZE),
-                legend=dict(bgcolor='rgba(0,0,0,0)'),
-                template="plotly_white"
-            )
-            
-            # tuning scatter actual and predicted
-            fig2 = go.Figure()
-            fig2.add_trace(go.Scatter(
-                x=self.tuning_gp_targets, y=self.tuning_gp_predicted,
-                mode='markers', marker=dict(size=6)
-            ))
-            fig2.add_shape(
-                type="line", 
-                x0=np.min(self.tuning_gp_targets), 
-                y0=np.min(self.tuning_gp_targets), 
-                x1=np.max(self.tuning_gp_targets), 
-                y1=np.max(self.tuning_gp_targets),
-                line=dict(dash="dot", color='gray')
-            )
-            fig2.update_layout(
-                title=dict(text="Gaussian Process Goodness-of-Fit Plot"),
-                xaxis=dict(title=dict(text="Actual Target Value")),
-                yaxis=dict(title=dict(text="Predicted Target Value")),
-                font=dict(size=PLOT_AXES_FONT_SIZE),
-                legend=dict(bgcolor='rgba(0,0,0,0)'),
-                template="plotly_white"
-            )
-            
-            # tuning posterior plot
-            num_cols = len(self.tuning_gp_heatmaps)
-            num_rows = len(self.tuning_gp_heatmaps[0])            
-            fig3 = make_subplots(rows=num_rows, cols=num_cols)
-            fig4 = make_subplots(rows=num_rows, cols=num_cols)            
-            for col, data_col in enumerate(self.tuning_gp_heatmaps):
-                for row, data in enumerate(data_col):
-                    p1, p2, p1v, p2v, mean, std = data
-                    fig3.add_trace(go.Heatmap(
-                        z=mean, x=p1v, y=p2v, colorscale='Blues', showscale=False
-                    ), row=row + 1, col=col + 1)
-                    fig4.add_trace(go.Heatmap(
-                        z=std, x=p1v, y=p2v, colorscale='Reds', showscale=False
-                    ), row=row + 1, col=col + 1)
-                    fig3.add_trace(go.Scatter(
-                        x=self.tuning_gp_params[p1], 
-                        y=self.tuning_gp_params[p2],
-                        opacity=1,
-                        mode='markers', 
-                        marker=dict(size=5, color='green', symbol='x')
-                    ), row=row + 1, col=col + 1)     
-                    fig4.add_trace(go.Scatter(
-                        x=self.tuning_gp_params[p1], 
-                        y=self.tuning_gp_params[p2],
-                        opacity=1,
-                        mode='markers', 
-                        marker=dict(size=5, color='green', symbol='x')
-                    ), row=row + 1, col=col + 1)    
-                    fig3.update_xaxes(title_text=p1, row=row + 1, col=col + 1)
-                    fig4.update_xaxes(title_text=p1, row=row + 1, col=col + 1)
-                    fig3.update_yaxes(title_text=p2, row=row + 1, col=col + 1)
-                    fig4.update_yaxes(title_text=p2, row=row + 1, col=col + 1)
-            subplot_width = min(
-                GP_POSTERIOR_MAX_HEIGHT, viewport_size['width'] // num_cols)                         
-            fig3.update_layout(
-                title="Posterior Mean of Gaussian Process",
-                font=dict(size=PLOT_AXES_FONT_SIZE),
-                height=subplot_width * num_rows,
-                width=subplot_width * num_cols,
-                autosize=False,
-                showlegend=False,
-                template="plotly_white"
-            )       
-            fig4.update_layout(
-                title="Posterior Uncertainty of Gaussian Process",
-                font=dict(size=PLOT_AXES_FONT_SIZE),
-                height=subplot_width * num_rows,
-                width=subplot_width * num_cols,
-                autosize=False,
-                showlegend=False,
-                template="plotly_white"
-            )
-                     
-            self.tuning_gp_update = False
-            return (fig1, fig2, fig3, fig4)
             
         self.app = app
     
@@ -1599,44 +1460,3 @@ class JaxPlannerDashboard:
         self.best_found_by[experiment_id] = callback.get('best_found_by', ' ')
         self.progress[experiment_id] = int(progress)
         self.warnings = None
-    
-    def update_tuning(self, optimizer: Any, bounds: Dict[str, Tuple[float, float]]) -> None:
-        '''Updates the hyper-parameter tuning plots.'''
-        
-        self.tuning_gp_heatmaps = []
-        self.tuning_gp_update = False
-        if not optimizer.res: return
-        
-        self.tuning_gp_targets = optimizer.space.target.reshape((-1,))
-        self.tuning_gp_predicted = optimizer._gp.predict(optimizer.space.params).reshape((-1,))
-        self.tuning_gp_params = {name: optimizer.space.params[:, i] 
-                                 for (i, name) in enumerate(optimizer.space.keys)}
-        
-        for (i1, param1) in enumerate(optimizer.space.keys):
-            self.tuning_gp_heatmaps.append([])
-            for (i2, param2) in enumerate(optimizer.space.keys):
-                if i2 > i1:
-                    
-                    # Generate a grid for visualization
-                    p1_values = np.linspace(*bounds[param1], GP_POSTERIOR_PIXELS)
-                    p2_values = np.linspace(*bounds[param2], GP_POSTERIOR_PIXELS)
-                    P1, P2 = np.meshgrid(p1_values, p2_values)
-                    
-                    # Predict the mean and deviation of the surrogate model
-                    fixed_params = max(
-                        optimizer.res,
-                        key=lambda x: x['target'])['params'].copy()
-                    fixed_params.pop(param1)
-                    fixed_params.pop(param2)
-                    param_grid = []
-                    for p1, p2 in zip(np.ravel(P1), np.ravel(P2)):
-                        params = {param1: p1, param2: p2}
-                        params.update(fixed_params)
-                        param_grid.append([params[key] for key in optimizer.space.keys])
-                    param_grid = np.asarray(param_grid)
-                    mean, std = optimizer._gp.predict(param_grid, return_std=True)
-                    mean = mean.reshape(P1.shape)
-                    std = std.reshape(P1.shape)
-                    self.tuning_gp_heatmaps[-1].append(
-                        (param1, param2, p1_values, p2_values, mean, std))
-        self.tuning_gp_update = True

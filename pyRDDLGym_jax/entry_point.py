@@ -33,11 +33,11 @@ def main():
     parser_tune.add_argument('method', type=str, 
                              help='training method to apply: [slp, drp] are offline methods, and [replan] are online')
     parser_tune.add_argument('-t', '--trials', type=int, required=False, default=5, 
-                             help='number of evaluation rollouts per hyper-parameter choice')
-    parser_tune.add_argument('-i', '--iters', type=int, required=False, default=20, 
-                             help='number of iterations of bayesian optimization')
+                             help='number of independent training runs per hyper-parameter choice')
+    parser_tune.add_argument('-i', '--iters', type=int, required=False, default=50, 
+                             help='number of hyper-parameter configurations to evaluate')
     parser_tune.add_argument('-w', '--workers', type=int, required=False, default=4, 
-                             help='number of parallel hyper-parameters to evaluate per iteration')
+                             help='number of hyper-parameter configurations to evaluate in parallel')
     parser_tune.add_argument('-d', '--dashboard', action='store_true',
                              help='show the dashboard')
     parser_tune.add_argument('-f', '--filepath', type=str, required=False, default='', 

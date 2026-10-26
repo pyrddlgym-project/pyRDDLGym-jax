@@ -1,5 +1,5 @@
 '''This example runs hyper-parameter tuning on the Jax planner. The tuning
-is performed using a batched parallelized Bayesian optimization.
+is performed using asynchronous parallel Bayesian optimization with Optuna.
 
 The syntax is:
 
@@ -11,9 +11,9 @@ where:
     <method> is either slp, drp or replan, as described in JaxExample.py
     <trials> is the number of trials to simulate when estimating the meta loss
     (defaults to 5)
-    <iters> is the number of iterations of Bayesian optimization to perform
-    (defaults to 20)
-    <workers> is the number of parallel workers (i.e. batch size), which must
+    <iters> is the number of hyper-parameter configurations to evaluate
+    (defaults to 50)
+    <workers> is the number of configurations evaluated in parallel, which must
     not exceed the number of cores available on the machine (defaults to 4)
     <dashboard> is whether the dashboard is displayed
     <filepath> is the path to save the best configuration (optional)
@@ -30,12 +30,8 @@ def power_2(x):
     return int(2 ** x)
 
 
-def power_10(x):
-    return 10.0 ** x
-
-
 def main(domain: str, instance: str, method: str, 
-         trials: int=5, iters: int=20, workers: int=4, dashboard: bool=False, 
+         trials: int=3, iters: int=50, workers: int=4, dashboard: bool=False, 
          filepath: str='') -> None:
     
     # set up the environment   
@@ -49,11 +45,11 @@ def main(domain: str, instance: str, method: str,
     
     # map parameters in the config that will be tuned
     hyperparams = [
-        Hyperparameter('MODEL_WEIGHT_TUNE', -1., 4., power_10),
-        Hyperparameter('LEARNING_RATE_TUNE', -5., 0., power_10),
-        Hyperparameter('LAYER1_TUNE', 1, 8, power_2),
-        Hyperparameter('LAYER2_TUNE', 1, 8, power_2),
-        Hyperparameter('ROLLOUT_HORIZON_TUNE', 1, min(env.horizon, 100), int)       
+        Hyperparameter.real('MODEL_WEIGHT_TUNE', 0.1, 1e4, log=True),
+        Hyperparameter.real('LEARNING_RATE_TUNE', 1e-5, 1., log=True),
+        Hyperparameter.integer('LAYER1_TUNE', 1, 8, transform=power_2),
+        Hyperparameter.integer('LAYER2_TUNE', 1, 8, transform=power_2),
+        Hyperparameter.integer('ROLLOUT_HORIZON_TUNE', 1, min(env.horizon, 100))
     ]
     
     # build the tuner and tune
@@ -61,7 +57,7 @@ def main(domain: str, instance: str, method: str,
                                 config_template=config_template,
                                 hyperparams=hyperparams,
                                 online=(method == 'replan'),
-                                eval_trials=trials, num_workers=workers, gp_iters=iters)
+                                eval_trials=trials, num_workers=workers, num_configs=iters)
     tuning.tune(key=42, 
                 log_file=f'gp_{method}_{domain}_{instance}.csv', 
                 show_dashboard=dashboard)
