@@ -32,7 +32,8 @@ import time
 import traceback
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Union
 import webbrowser
-from wsgiref.simple_server import make_server, WSGIRequestHandler
+from socketserver import ThreadingMixIn
+from wsgiref.simple_server import make_server, WSGIRequestHandler, WSGIServer
 
 import jax
 import numpy as np
@@ -124,8 +125,8 @@ class JaxParameterTuning:
                  config_template: str,
                  hyperparams: Hyperparameters,
                  online: bool,
-                 eval_trials: int=5,
-                 rollouts_per_trial: int=1,
+                 num_seeds: int=5,
+                 rollouts_per_seed: int=1,
                  verbose: bool=True,
                  timeout_tuning: float=np.inf,
                  pool_context: str='spawn',
@@ -143,9 +144,9 @@ class JaxParameterTuning:
         tags of the hyper-parameters are replaced by their values
         :param hyperparams: list of hyper-parameters to replace in the config template
         :param online: whether the planner is optimized online or offline
-        :param eval_trials: how many independent training runs to average to estimate
+        :param num_seeds: how many independent training runs (seeds) to average to estimate
         the return of each configuration
-        :param rollouts_per_trial: how many rollouts to perform during evaluation
+        :param rollouts_per_seed: how many rollouts to perform during evaluation
         at the end of each training run (only applies when online=False)
         :param verbose: whether to print intermediate results of tuning
         :param timeout_tuning: no new configurations are started after this many seconds
@@ -164,8 +165,8 @@ class JaxParameterTuning:
         self.hyperparams_dict = {param.tag: param for param in hyperparams
                                  if _tag_pattern(param.tag).search(config_template)}
         self.online = online
-        self.eval_trials = eval_trials
-        self.rollouts_per_trial = rollouts_per_trial
+        self.num_seeds = num_seeds
+        self.rollouts_per_seed = rollouts_per_seed
         self.verbose = verbose
         self.timeout_tuning = timeout_tuning
         self.pool_context = pool_context
@@ -197,8 +198,8 @@ class JaxParameterTuning:
                 f'    mp_pool_context_type      ={self.pool_context}\n'
                 f'    storage                   ={self.storage}\n'
                 f'meta-objective parameters:\n'
-                f'    planning_trials_per_iter  ={self.eval_trials}\n'
-                f'    rollouts_per_trial        ={self.rollouts_per_trial}')
+                f'    seeds_per_config          ={self.num_seeds}\n'
+                f'    rollouts_per_seed         ={self.rollouts_per_seed}')
 
     @staticmethod
     def default_sampler(seed: int) -> optuna.samplers.BaseSampler:
@@ -253,10 +254,15 @@ class JaxParameterTuning:
             def log_message(self, *args):
                 pass
 
-        server = make_server('localhost', port, optuna_dashboard.wsgi(storage),
-                             handler_class=QuietHandler)
+        # requests are handled concurrently: a single-threaded server blocks on idle
+        # connections that browsers open in advance, so the page never loads
+        class ThreadedServer(ThreadingMixIn, WSGIServer):
+            daemon_threads = True
+
+        server = make_server('127.0.0.1', port, optuna_dashboard.wsgi(storage),
+                             server_class=ThreadedServer, handler_class=QuietHandler)
         threading.Thread(target=server.serve_forever, daemon=True).start()
-        webbrowser.open_new(f'http://localhost:{port}/')
+        webbrowser.open_new(f'http://127.0.0.1:{port}/')
 
     @staticmethod
     def queue_listener(queue, dashboard):
@@ -271,7 +277,7 @@ class JaxParameterTuning:
                 dashboard.register_experiment(*args)
 
     @staticmethod
-    def offline_trial(env, planner, train_args, seed, number, rollouts_per_trial,
+    def offline_trial(env, planner, train_args, seed, number, rollouts_per_seed,
                       experiment_id, viz, queue):
         '''Trains the planner offline, then returns the average return of its policy.'''
         key = jax.random.PRNGKey(seed)
@@ -293,7 +299,7 @@ class JaxParameterTuning:
         policy = JaxOfflineController(
             planner=planner, key=key, tqdm_position=number, params=best_params,
             eval_hyperparams=hyperparams, train_on_reset=False)
-        total_reward = policy.evaluate(env, episodes=rollouts_per_trial, seed=seed)['mean']
+        total_reward = policy.evaluate(env, episodes=rollouts_per_seed, seed=seed)['mean']
         iters = None if callback is None else callback['iteration']
         return total_reward, iters
 
@@ -364,18 +370,18 @@ class JaxParameterTuning:
 
         rewards = []
         for (i, seed) in enumerate(seeds):
-            experiment_id = f'config={number}, trial={i}'
+            experiment_id = f'config={number}, seed={i}'
             if online:
                 reward, iters = JaxParameterTuning.online_trial(
                     env, planner, train_args, seed, number, experiment_id,
                     kwargs['viz'], queue)
             else:
                 reward, iters = JaxParameterTuning.offline_trial(
-                    env, planner, train_args, seed, number, kwargs['rollouts_per_trial'],
+                    env, planner, train_args, seed, number, kwargs['rollouts_per_seed'],
                     experiment_id, kwargs['viz'], queue)
             rewards.append(reward)
             if verbose:
-                print(f'    [{number}] trial {i + 1}, seed={seed}, '
+                print(f'    [{number}] seed {i + 1}/{len(seeds)} ({seed}), '
                       f'reward={reward:.6f}, iters={iters}', flush=True)
 
             # stop early if the pruner decides this configuration is not promising
@@ -444,7 +450,7 @@ class JaxParameterTuning:
             'online': self.online,
             'domain': self.env.domain_text,
             'instance': self.env.instance_text,
-            'rollouts_per_trial': self.rollouts_per_trial,
+            'rollouts_per_seed': self.rollouts_per_seed,
             'viz': self.env._visualizer,
             'verbose': self.verbose,
             'study_name': self.study_name,
@@ -452,7 +458,7 @@ class JaxParameterTuning:
             'pruner': self.pruner
         }
         seeds = [int(seed) for seed in
-                 np.random.SeedSequence(key).generate_state(self.eval_trials)]
+                 np.random.SeedSequence(key).generate_state(self.num_seeds)]
         distributions = {tag: param.distribution
                          for (tag, param) in self.hyperparams_dict.items()}
         self._run(study, distributions, seeds, obj_kwargs, dashboard, log_file)

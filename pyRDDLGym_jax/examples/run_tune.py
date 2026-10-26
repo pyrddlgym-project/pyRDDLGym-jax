@@ -3,15 +3,15 @@ is performed using asynchronous parallel Bayesian optimization with Optuna.
 
 The syntax is:
 
-    python run_tune.py <domain> <instance> <method> [<trials>] [<iters>] [<workers>] [<dashboard>] [<filepath>]
+    python run_tune.py <domain> <instance> <method> [<seeds>] [<configs>] [<workers>] [<dashboard>] [<filepath>]
     
 where:
     <domain> is the name of a domain located in the /Examples directory
     <instance> is the instance number
     <method> is either slp, drp or replan, as described in JaxExample.py
-    <trials> is the number of trials to simulate when estimating the meta loss
-    (defaults to 5)
-    <iters> is the number of hyper-parameter configurations to evaluate
+    <seeds> is the number of independent training runs averaged to evaluate each
+    configuration (defaults to 3)
+    <configs> is the number of hyper-parameter configurations to evaluate
     (defaults to 50)
     <workers> is the number of configurations evaluated in parallel, which must
     not exceed the number of cores available on the machine (defaults to 4)
@@ -31,7 +31,7 @@ def power_2(x):
 
 
 def main(domain: str, instance: str, method: str, 
-         trials: int=3, iters: int=50, workers: int=4, dashboard: bool=False, 
+         seeds: int=3, configs: int=50, workers: int=4, dashboard: bool=False, 
          filepath: str='') -> None:
     
     # set up the environment   
@@ -57,7 +57,7 @@ def main(domain: str, instance: str, method: str,
                                 config_template=config_template,
                                 hyperparams=hyperparams,
                                 online=(method == 'replan'),
-                                eval_trials=trials, num_workers=workers, num_configs=iters)
+                                num_seeds=seeds, num_workers=workers, num_configs=configs)
     tuning.tune(key=42, 
                 log_file=f'gp_{method}_{domain}_{instance}.csv', 
                 show_dashboard=dashboard)
@@ -73,14 +73,14 @@ def main(domain: str, instance: str, method: str,
 
 def run_from_args(args):
     if len(args) < 3:
-        print('python run_tune.py <domain> <instance> <method> [<trials>] [<iters>] [<workers>] [<dashboard>] [<filepath>]')
+        print('python run_tune.py <domain> <instance> <method> [<seeds>] [<configs>] [<workers>] [<dashboard>] [<filepath>]')
         exit(1)
     if args[2] not in ['drp', 'slp', 'replan']:
         print('<method> in [drp, slp, replan]')
         exit(1)
     kwargs = {'domain': args[0], 'instance': args[1], 'method': args[2]}
-    if len(args) >= 4: kwargs['trials'] = int(args[3])
-    if len(args) >= 5: kwargs['iters'] = int(args[4])
+    if len(args) >= 4: kwargs['seeds'] = int(args[3])
+    if len(args) >= 5: kwargs['configs'] = int(args[4])
     if len(args) >= 6: kwargs['workers'] = int(args[5])
     if len(args) >= 7: kwargs['dashboard'] = str(args[6]).strip().lower() in {'true', '1'}
     if len(args) >= 8: kwargs['filepath'] = str(args[7])
