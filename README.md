@@ -188,7 +188,7 @@ dashboard=True
 
 ## Tuning the Planner
 
-A basic run script is provided to run automatic Bayesian hyper-parameter tuning for the most sensitive parameters of JaxPlan:
+A basic run script is provided to run automatic Bayesian hyper-parameter tuning (with [Optuna](https://optuna.org/)) for the most sensitive parameters of JaxPlan:
 
 ```shell
 jaxplan tune <domain> <instance> <method> --trials <trials> --iters <iters> --workers <workers> --dashboard <dashboard> --filepath <filepath>
@@ -198,10 +198,10 @@ where:
 - ``domain`` is the domain identifier as specified in rddlrepository
 - ``instance`` is the instance identifier
 - ``method`` is the planning method to use (i.e. drp, slp, replan)
-- ``trials`` is the (optional) number of trials/episodes to average in evaluating each hyper-parameter setting
-- ``iters`` is the (optional) maximum number of iterations/evaluations of Bayesian optimization to perform
-- ``workers`` is the (optional) number of parallel evaluations to be done at each iteration, e.g. the total evaluations = ``iters * workers``
-- ``dashboard`` is whether the optimizations are tracked in the dashboard application
+- ``trials`` is the (optional) number of independent training runs to average in evaluating each hyper-parameter setting
+- ``iters`` is the (optional) number of hyper-parameter settings to evaluate
+- ``workers`` is the (optional) number of hyper-parameter settings evaluated in parallel
+- ``dashboard`` is whether the training runs are tracked in the dashboard application
 - ``filepath`` is the optional file path where a config file with the best hyper-parameter setting will be saved.
 
 It is easy to tune a custom range of the planner's hyper-parameters efficiently. 
@@ -240,18 +240,24 @@ env = pyRDDLGym.make(domain, instance, vectorized=True)
 with open('path/to/config.cfg', 'r') as file: 
     config_template = file.read() 
     
-# tune weight from 10^-1 ... 10^5 and lr from 10^-5 ... 10^1
-def power_10(x):
-    return 10.0 ** x    
-hyperparams = [Hyperparameter('TUNABLE_WEIGHT', -1., 5., power_10),
-               Hyperparameter('TUNABLE_LEARNING_RATE', -5., 1., power_10)]
+# tune weight from 10^-1 ... 10^5 and lr from 10^-5 ... 10^1 in log-space
+hyperparams = [Hyperparameter.real('TUNABLE_WEIGHT', 1e-1, 1e5, log=True),
+               Hyperparameter.real('TUNABLE_LEARNING_RATE', 1e-5, 1e1, log=True)]
     
 # build the tuner and tune
 tuning = JaxParameterTuning(env=env,
                             config_template=config_template, hyperparams=hyperparams,
-                            online=False, eval_trials=trials, num_workers=workers, gp_iters=iters)
+                            online=False, eval_trials=trials, num_workers=workers, num_configs=iters)
 tuning.tune(key=42, log_file='path/to/log.csv')
 ```
+
+Hyper-parameters can also be integer (``Hyperparameter.integer``) or categorical (``Hyperparameter.categorical``), 
+and an optional ``transform`` maps the searched value to the value in the config (e.g. ``transform=lambda x: 2 ** x``).
+By default, configurations are suggested by Optuna's ``GPSampler`` if ``torch`` is installed (otherwise ``TPESampler``); any other Optuna ``sampler`` can be passed, 
+as well as a ``pruner`` (e.g. ``optuna.pruners.WilcoxonPruner()``) to stop evaluating unpromising configurations early, 
+and a ``storage`` journal file to save and resume the study. The Optuna study is available afterwards as ``tuning.study``.
+With ``show_dashboard=True``, the study is shown live in [optuna-dashboard](https://github.com/optuna/optuna-dashboard) (history, parameter importances, contours, etc.),
+and the training curves of each run in the JaxPlan dashboard, where run ``config=N`` is Optuna trial ``N``.
   
 
 ## Simulation
