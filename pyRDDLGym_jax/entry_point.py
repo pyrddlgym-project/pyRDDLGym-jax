@@ -32,9 +32,9 @@ def main():
                              help='name of instance in rddlrepository or a valid file path')
     parser_tune.add_argument('method', type=str, 
                              help='training method to apply: [slp, drp] are offline methods, and [replan] are online')
-    parser_tune.add_argument('-t', '--trials', type=int, required=False, default=5, 
+    parser_tune.add_argument('-s', '--seeds', type=int, required=False, default=3, 
                              help='number of independent training runs per hyper-parameter choice')
-    parser_tune.add_argument('-i', '--iters', type=int, required=False, default=50, 
+    parser_tune.add_argument('-c', '--configs', type=int, required=False, default=50, 
                              help='number of hyper-parameter configurations to evaluate')
     parser_tune.add_argument('-w', '--workers', type=int, required=False, default=4, 
                              help='number of hyper-parameter configurations to evaluate in parallel')
@@ -51,7 +51,7 @@ def main():
     elif args.jaxplan == "tune":
         from pyRDDLGym_jax.examples import run_tune
         run_tune.main(args.domain, args.instance, args.method, 
-                      args.trials, args.iters, args.workers, args.dashboard, 
+                      args.seeds, args.configs, args.workers, args.dashboard, 
                       args.filepath)
     else:
         parser.print_help()
