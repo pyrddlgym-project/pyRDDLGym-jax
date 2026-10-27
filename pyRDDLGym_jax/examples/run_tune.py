@@ -13,8 +13,8 @@ where:
     configuration (defaults to 3)
     <configs> is the number of hyper-parameter configurations to evaluate
     (defaults to 50)
-    <workers> is the number of configurations evaluated in parallel, which must
-    not exceed the number of cores available on the machine (defaults to 4)
+    <workers> is the number of configurations evaluated in parallel, which should
+    not exceed the number of physical cores available, or GPUs (defaults to 4)
     <dashboard> is whether the dashboard is displayed
     <filepath> is the path to save the best configuration (optional)
 '''
@@ -49,7 +49,7 @@ def main(domain: str, instance: str, method: str,
         Hyperparameter.real('LEARNING_RATE_TUNE', 1e-5, 1., log=True),
         Hyperparameter.integer('LAYER1_TUNE', 1, 8, transform=power_2),
         Hyperparameter.integer('LAYER2_TUNE', 1, 8, transform=power_2),
-        Hyperparameter.integer('ROLLOUT_HORIZON_TUNE', 1, min(env.horizon, 100))
+        Hyperparameter.integer('ROLLOUT_HORIZON_TUNE', 1, min(env.horizon, 100), log=True)
     ]
     
     # build the tuner and tune

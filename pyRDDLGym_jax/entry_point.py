@@ -36,8 +36,9 @@ def main():
                              help='number of independent training runs per hyper-parameter choice')
     parser_tune.add_argument('-c', '--configs', type=int, required=False, default=50, 
                              help='number of hyper-parameter configurations to evaluate')
-    parser_tune.add_argument('-w', '--workers', type=int, required=False, default=4, 
-                             help='number of hyper-parameter configurations to evaluate in parallel')
+    parser_tune.add_argument('-w', '--workers', type=int, required=False, default=4,
+                             help='number of hyper-parameter configurations to evaluate in parallel, '
+                                  'at most the number of physical cores available, or GPUs')
     parser_tune.add_argument('-d', '--dashboard', action='store_true',
                              help='show the dashboard')
     parser_tune.add_argument('-f', '--filepath', type=str, required=False, default='', 

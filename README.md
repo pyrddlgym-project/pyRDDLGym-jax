@@ -253,9 +253,11 @@ tuning.tune(key=42, log_file='path/to/log.csv')
 
 Hyper-parameters can also be integer (``Hyperparameter.integer``) or categorical (``Hyperparameter.categorical``), 
 and an optional ``transform`` maps the searched value to the value in the config (e.g. ``transform=lambda x: 2 ** x``).
+Values are substituted as written, so the tag of a string choice must be quoted in the template (e.g. ``optimizer='OPTIMIZER_TUNE'``).
 By default, configurations are suggested by Optuna's ``GPSampler`` if ``torch`` is installed (otherwise ``TPESampler``); any other Optuna ``sampler`` can be passed, 
 as well as a ``pruner`` (e.g. ``optuna.pruners.WilcoxonPruner()``) to stop evaluating unpromising configurations early, 
-and a ``storage`` journal file to save and resume the study. The Optuna study is available afterwards as ``tuning.study``.
+and a ``storage`` journal file to save and resume the study. The Optuna study is available afterwards as ``tuning.study``,
+where the return and training iterations of each run are kept in the ``user_attrs`` of each trial, and also saved in the ``log_file``.
 With ``show_dashboard=True``, the study is shown live in [optuna-dashboard](https://github.com/optuna/optuna-dashboard) (history, parameter importances, contours, etc.),
 and the training curves of each run in the JaxPlan dashboard, where run ``config=N`` is Optuna trial ``N``.
   
