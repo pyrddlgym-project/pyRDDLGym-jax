@@ -1625,7 +1625,7 @@ class JaxPlanner(metaclass=ABCMeta):
                     best_grad = _unbatched_pytree(train_grad, best_index)
                 best_loss = test_loss_smooth[best_index]
                 best_violations = test_violations_smooth[best_index]
-                best_found_by = 'H' if aux_improve and aux_mask[best_index] else '*'
+                best_found_by = 'A' if aux_improve and aux_mask[best_index] else '*'
                 last_iter_improve = it
 
             # the best plan can also be a plan of the auxiliary planner it did not adopt

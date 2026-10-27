@@ -17,13 +17,15 @@
 # ***********************************************************************
 
 
+from ast import literal_eval
 import atexit
+import configparser
 import csv
 import datetime
 import importlib.util
 import multiprocessing
+import multiprocessing.connection
 import os
-from queue import Queue
 import re
 import shutil
 import sys
@@ -102,13 +104,18 @@ class Hyperparameter:
         return value if self.transform is None else self.transform(value)
 
     def describe(self) -> Tuple[str, str, str, str]:
-        '''Returns the tag, range, scale and transform for display.'''
+        '''Returns the tag, range, scale and range of config values for display.'''
         dist = self.distribution
         if isinstance(dist, CategoricalDistribution):
-            space = '{' + ', '.join(format_value(choice) for choice in dist.choices) + '}'
+            values = dist.choices
+            space = '{' + ', '.join(format_value(value) for value in values) + '}'
+            config = '{' + ', '.join(format_value(self.to_config(value))
+                                     for value in values) + '}'
             scale = 'categorical'
         else:
             space = f'[{format_value(dist.low)}, {format_value(dist.high)}]'
+            config = (f'[{format_value(self.to_config(dist.low))}, '
+                      f'{format_value(self.to_config(dist.high))}]')
             if isinstance(dist, IntDistribution):
                 scale = 'log int' if dist.log else 'int'
                 if dist.step != 1:
@@ -117,23 +124,63 @@ class Hyperparameter:
                 scale = 'log' if dist.log else 'linear'
                 if dist.step is not None:
                     scale += f' step {format_value(dist.step)}'
-        transform = '' if self.transform is None else self.transform.__name__
-        return self.tag, space, scale, transform
+        return self.tag, space, scale, ('' if self.transform is None else config)
 
     def __str__(self) -> str:
-        transform = '' if self.transform is None else f' -> {self.transform.__name__}'
-        return f'{self.tag}: {self.distribution}{transform}'
+        (tag, space, scale, config) = self.describe()
+        return f'{tag}: {space} {scale}' + (f' -> {config}' if config else '')
 
 
 Kwargs = Dict[str, Any]
 ParameterValues = Dict[str, Any]
 Hyperparameters = Iterable[Hyperparameter]
 
-COLUMNS = ['number', 'state', 'target', 'best_target', 'seconds']
+COLUMNS = ['number', 'state', 'target', 'best_target', 'seconds', 'std']
 
 
 def _tag_pattern(tag: str) -> re.Pattern:
     return re.compile(r'\b' + re.escape(tag) + r'\b')
+
+
+class _ConfigProcess:
+    '''A configuration being evaluated in its own worker process, which sends the return
+    of each training run and then its outcome through a pipe.'''
+
+    def __init__(self, trial, process, reader, config_params: ParameterValues) -> None:
+        self.trial = trial
+        self.process = process
+        self.reader = reader
+        self.config_params = config_params
+        self.start = time.time()
+        self.outcome = None
+
+    def receive(self, number: int, progress: JaxTuningProgress) -> None:
+        '''Records the messages sent by the worker so far.'''
+        while self.reader is not None:
+            try:
+                if not self.reader.poll():
+                    return
+                message = self.reader.recv()
+            except (EOFError, OSError):
+                self.reader.close()
+                self.reader = None
+                return
+            if message[0] == 'seed':
+                progress.seed_finished(number, message[1], message[2])
+            elif message[0] == 'done':
+                self.outcome = message
+            else:
+                self.outcome = ('error', JaxParameterTuning._describe_error(*message[1:]))
+
+    def stop(self, grace: float) -> None:
+        '''Waits up to grace seconds for the worker to exit, then kills it.'''
+        self.process.join(grace)
+        if self.process.is_alive():
+            self.process.kill()
+            self.process.join()
+        self.process.close()
+        if self.reader is not None:
+            self.reader.close()
 
 
 class JaxParameterTuning:
@@ -150,6 +197,7 @@ class JaxParameterTuning:
                  rollouts_per_seed: int=1,
                  verbose: bool=True,
                  timeout_tuning: float=np.inf,
+                 timeout_config: float=np.inf,
                  pool_context: str='spawn',
                  num_workers: int=1,
                  num_configs: int=50,
@@ -171,7 +219,8 @@ class JaxParameterTuning:
         at the end of each training run (only applies when online=False)
         :param verbose: whether to print intermediate results of tuning
         :param timeout_tuning: no new configurations are started after this many seconds
-        :param pool_context: context for multiprocessing pool (default "spawn")
+        :param timeout_config: a configuration is stopped and fails after this many seconds
+        :param pool_context: context for the worker processes (default "spawn")
         :param num_workers: how many configurations to evaluate in parallel
         :param num_configs: how many configurations to evaluate in total
         :param sampler: Optuna sampler suggesting configurations (default GPSampler if
@@ -183,13 +232,19 @@ class JaxParameterTuning:
         '''
         self.env = env
         self.config_template = config_template
-        self.hyperparams_dict = {param.tag: param for param in hyperparams
-                                 if _tag_pattern(param.tag).search(config_template)}
+        self.hyperparams_dict = {}
+        for param in hyperparams:
+            if _tag_pattern(param.tag).search(config_template):
+                self.hyperparams_dict[param.tag] = param
+            else:
+                raise_warning(f'[WARN] hyper-parameter {param.tag} does not appear in the '
+                              f'config template, so it is not tuned.', 'yellow')
         self.online = online
         self.num_seeds = num_seeds
         self.rollouts_per_seed = rollouts_per_seed
         self.verbose = verbose
         self.timeout_tuning = timeout_tuning
+        self.timeout_config = timeout_config
         self.pool_context = pool_context
         self.num_workers = num_workers
         self.num_configs = num_configs
@@ -197,30 +252,46 @@ class JaxParameterTuning:
         self.pruner = pruner
         self.storage = storage
         self.study_name = study_name
+        self._check_template()
 
-    def summarize_hyperparameters(self) -> str:
-        '''Returns a summary string of the hyper-parameters being tuned and their bounds,
-        as well as the tuning parameters for the optimizer and meta-objective.'''
-        hyperparams_table = '\n'.join(f'        {param}'
-                                      for param in self.hyperparams_dict.values())
-        if self.sampler is not None:
-            sampler_name = type(self.sampler).__name__
-        elif importlib.util.find_spec('torch') is not None:
-            sampler_name = 'GPSampler'
-        else:
-            sampler_name = 'TPESampler'
-        return (f'hyperparameter optimizer parameters:\n'
-                f'    tuned_hyper_parameters    =\n{hyperparams_table}\n'
-                f'    sampler                   ={sampler_name}\n'
-                f'    pruner                    ={type(self.pruner).__name__}\n'
-                f'    num_configs               ={self.num_configs}\n'
-                f'    tuning_timeout            ={self.timeout_tuning}\n'
-                f'    num_workers               ={self.num_workers}\n'
-                f'    mp_pool_context_type      ={self.pool_context}\n'
-                f'    storage                   ={self.storage}\n'
-                f'meta-objective parameters:\n'
-                f'    seeds_per_config          ={self.num_seeds}\n'
-                f'    rollouts_per_seed         ={self.rollouts_per_seed}')
+    def _check_template(self) -> None:
+        '''Parses the config at the lowest values of the hyper-parameters, so that an
+        invalid template fails here rather than in every worker.'''
+        params = {}
+        for (tag, param) in self.hyperparams_dict.items():
+            dist = param.distribution
+            if isinstance(dist, CategoricalDistribution):
+                params[tag] = dist.choices[0]
+            else:
+                params[tag] = dist.low
+        config_string = self.config_from_template(self.search_to_config_params(params))
+        try:
+            planner_args, _, _ = load_config_from_string(config_string)
+        except Exception as error:
+            entry = self._invalid_entry(config_string)
+            where = '' if entry is None else f' in {entry}'
+            raise ValueError(f'Config template is invalid{where} after replacing the '
+                             f'hyper-parameters by values {params}: {error}') from error
+
+        # each configuration is evaluated with a single optimizer
+        parallel_updates = planner_args.get('parallel_updates', 1)
+        if parallel_updates > 1:
+            raise_warning(f'[WARN] parallel_updates={parallel_updates} in the config template '
+                          f'is ignored during tuning', 'yellow')
+
+    @staticmethod
+    def _invalid_entry(config_string: str) -> Optional[str]:
+        '''Returns the first entry of the config whose value is not a Python literal.'''
+        parser = configparser.RawConfigParser()
+        parser.optionxform = str
+        parser.read_string(config_string)
+        for section in parser.sections():
+            for (key, value) in parser.items(section):
+                try:
+                    literal_eval(value)
+                except (ValueError, SyntaxError):
+                    return f'[{section}] {key}={value}'
+        return None
 
     @staticmethod
     def default_sampler(seed: int) -> optuna.samplers.BaseSampler:
@@ -304,7 +375,8 @@ class JaxParameterTuning:
     @staticmethod
     def offline_trial(env, planner, train_args, seed, number, rollouts_per_seed,
                       experiment_id, viz, queue):
-        '''Trains the planner offline, then returns the average return of its policy.'''
+        '''Trains the planner offline, then returns the average return of its policy and
+        the number of training iterations.'''
         key = jax.random.PRNGKey(seed)
 
         # for the dashboard
@@ -316,7 +388,8 @@ class JaxParameterTuning:
         callback = None
         for callback in planner.optimize_generator(key=key, **train_args):
             if queue is not None and queue.empty():
-                queue.put((experiment_id, callback))
+                queue.put((experiment_id,
+                           JaxPlannerDashboard.compact_callback(callback, planner.rddl)))
         best_params = None if callback is None else callback['best_params']
         hyperparams = None if callback is None else callback['policy_hyperparams']
 
@@ -325,12 +398,13 @@ class JaxParameterTuning:
             planner=planner, key=key, tqdm_position=number, params=best_params,
             eval_hyperparams=hyperparams, train_on_reset=False)
         total_reward = policy.evaluate(env, episodes=rollouts_per_seed, seed=seed)['mean']
-        iters = None if callback is None else callback['iteration']
+        iters = 0 if callback is None else int(callback['iteration']) + 1
         return total_reward, iters
 
     @staticmethod
     def online_trial(env, planner, train_args, seed, number, experiment_id, viz, queue):
-        '''Runs the planner online for one episode, then returns its return.'''
+        '''Runs the planner online for one episode, then returns its return and the
+        average number of training iterations per decision step.'''
         key = jax.random.PRNGKey(seed)
 
         # for the dashboard
@@ -344,24 +418,25 @@ class JaxParameterTuning:
 
         # evaluate the policy in the real environment
         total_reward = 0.0
-        callback = None
         state, _ = env.reset(seed=seed)
-        elapsed_time = 0.0
+        elapsed_time, total_iters, steps = 0.0, 0, 0
         for step in range(env.horizon):
             action = policy.sample_action(state)
             state, reward, terminated, truncated, _ = env.step(action)
             total_reward += reward
             callback = policy.callback
+            total_iters += int(callback['iteration']) + 1
+            steps += 1
             elapsed_time += callback['elapsed_time']
             callback['iteration'] = step
             callback['progress'] = int(100 * (step + 1.) / env.horizon)
             callback['elapsed_time'] = elapsed_time
             if queue is not None and queue.empty():
-                queue.put((experiment_id, callback))
+                queue.put((experiment_id,
+                           JaxPlannerDashboard.compact_callback(callback, planner.rddl)))
             if terminated or truncated:
                 break
-        iters = None if callback is None else callback['iteration']
-        return total_reward, iters
+        return total_reward, total_iters / max(1, steps)
 
     @staticmethod
     def _silence_output() -> None:
@@ -375,12 +450,34 @@ class JaxParameterTuning:
         sys.stdout = sys.stderr = devnull
 
     @staticmethod
-    def objective_function(config_string: str, number: int, trial_id: Optional[int],
-                           seeds: List[int], kwargs: Kwargs, queue: object) -> List[float]:
-        '''A pickleable objective function that evaluates a single configuration in a
-        worker process: returns the return of each training run, which are reported to
-        the pruner if any (the list is cut short if the configuration is pruned).'''
+    def _worker(conn, config_string: str, number: int, trial_id: Optional[int],
+                seeds: List[int], kwargs: Kwargs, queue: object) -> None:
+        '''Evaluates a single configuration in a worker process, sending the return of each
+        training run and then the outcome through the given connection.'''
         JaxParameterTuning._silence_output()
+        iterations = []
+
+        def on_seed(i, reward, iters):
+            iterations.append(iters)
+            conn.send(('seed', i, reward))
+
+        try:
+            rewards = JaxParameterTuning.objective_function(
+                config_string, number, trial_id, seeds, kwargs, queue, on_seed=on_seed)
+            message = ('done', rewards, iterations)
+        except BaseException as error:
+            message = ('error', type(error).__name__, str(error), traceback.format_exc())
+        conn.send(message)
+        conn.close()
+
+    @staticmethod
+    def objective_function(config_string: str, number: int, trial_id: Optional[int],
+                           seeds: List[int], kwargs: Kwargs, queue: object,
+                           on_seed: Optional[Callable]=None) -> List[float]:
+        '''An objective function that evaluates a single configuration: returns the return
+        of each training run, which are reported to the pruner if any (the list is cut
+        short if the configuration is pruned), and to on_seed(index, return, iterations) if
+        given.'''
         online = kwargs['online']
         planner_args, _, train_args = load_config_from_string(config_string)
 
@@ -416,7 +513,8 @@ class JaxParameterTuning:
                     env, planner, train_args, seed, number, kwargs['rollouts_per_seed'],
                     experiment_id, kwargs['viz'], queue)
             rewards.append(reward)
-            kwargs['progress_queue'].put((number, i, reward))
+            if on_seed is not None:
+                on_seed(i, reward, iters)
 
             # stop early if the pruner decides this configuration is not promising
             if trial is not None:
@@ -440,11 +538,6 @@ class JaxParameterTuning:
         '''
         if self.verbose:
             print(JaxPlanner.summarize_system())
-
-        # clear and prepare output file
-        if log_file is not None:
-            with open(log_file, 'w', newline='') as file:
-                csv.writer(file).writerow(COLUMNS + list(self.hyperparams_dict.keys()))
 
         # workers report to the pruner through a shared storage: a temporary one is
         # kept until exit, since the study and its dashboard are still read after tuning
@@ -477,6 +570,20 @@ class JaxParameterTuning:
         for trial in study.get_trials(deepcopy=False, states=(TrialState.RUNNING,)):
             study.tell(trial.number, state=TrialState.FAIL)
 
+        # the output file starts with the configurations of a resumed study
+        previous = study.get_trials(
+            deepcopy=False, states=(TrialState.COMPLETE, TrialState.PRUNED, TrialState.FAIL))
+        if log_file is not None:
+            with open(log_file, 'w', newline='') as file:
+                writer = csv.writer(file)
+                writer.writerow(self._log_columns())
+                best_value = None
+                for frozen in previous:
+                    if (frozen.state == TrialState.COMPLETE
+                            and (best_value is None or frozen.value > best_value)):
+                        best_value = frozen.value
+                    writer.writerow(self._log_row(frozen, best_value))
+
         # dash-boards for the study and the training runs, each shown if installed
         dashboard, dashboard_urls = None, []
         if show_dashboard:
@@ -498,7 +605,9 @@ class JaxParameterTuning:
                 [('configs', self.num_configs), ('seeds', self.num_seeds),
                  ('workers', self.num_workers),
                  ('timeout', 'none' if self.timeout_tuning == np.inf
-                  else datetime.timedelta(seconds=self.timeout_tuning))],
+                  else datetime.timedelta(seconds=self.timeout_tuning)),
+                 ('config timeout', 'none' if self.timeout_config == np.inf
+                  else datetime.timedelta(seconds=self.timeout_config))],
                 [('sampler', type(sampler).__name__),
                  ('pruner', 'none' if self.pruner is None else type(self.pruner).__name__),
                  ('storage', storage_path or 'in memory')],
@@ -506,6 +615,12 @@ class JaxParameterTuning:
             ]
             if dashboard_urls:
                 settings.append([(f'{name} dashboard', url) for (name, url) in dashboard_urls])
+            if previous:
+                resumed = [('resumed', f'{len(previous)} configs')]
+                best = self._best_trial(study)
+                if best is not None:
+                    resumed.append(('best', f'#{best.number} return {best.value:.3f}'))
+                settings.append(resumed)
             progress.print_header(
                 'JaxPlan tuning',
                 f'{rddl.domain_name} / {rddl.instance_name}  '
@@ -553,124 +668,172 @@ class JaxParameterTuning:
         return self.best_params
 
     @staticmethod
-    def _describe_error(error: BaseException) -> str:
+    def _describe_error(name: str, message: str, remote_traceback: str) -> str:
         '''Describes an error raised in a worker in one line, with the place it was raised
         from the traceback that the worker sends with it.'''
-        lines = str(error).strip().splitlines()
-        message = f'{type(error).__name__}: {lines[0] if lines else ""}'
-        remote_traceback = getattr(error.__cause__, 'tb', None)
-        if remote_traceback:
-            frames = re.findall(r'File "([^"]+)", line (\d+), in (\S+)', remote_traceback)
-            if frames:
-                (file, line, function) = frames[-1]
-                message += f'  ({os.path.basename(file)}:{line} in {function})'
-        return message
+        lines = message.strip().splitlines()
+        description = f'{name}: {lines[0] if lines else ""}'
+        frames = re.findall(r'File "([^"]+)", line (\d+), in (\S+)', remote_traceback)
+        if frames:
+            (file, line, function) = frames[-1]
+            description += f'  ({os.path.basename(file)}:{line} in {function})'
+        return description
 
     @staticmethod
-    def seed_listener(queue, progress):
-        '''Listens to the given queue and records the finished training runs.'''
-        while True:
-            args = queue.get()
-            if args is None:
-                break
-            progress.seed_finished(*args)
+    def _describe_exit(exitcode: int) -> str:
+        '''Describes the exit of a worker that died without sending a result.'''
+        if exitcode < 0:
+            return f'worker was killed by signal {-exitcode}'
+        code = f'{exitcode:#x}' if exitcode > 255 else str(exitcode)
+        return f'worker exited with code {code} without a result'
 
     def _run(self, study, distributions, seeds, obj_kwargs, dashboard, log_file,
              progress) -> int:
         '''Evaluates configurations asynchronously: a new configuration is suggested
-        as soon as a worker is free, accounting for the ones still running.'''
+        as soon as a worker is free, accounting for the ones still running. A configuration
+        fails if its worker exits without a result or exceeds the time limit.'''
         self._start_time = start_time = time.time()
         pruning = obj_kwargs['pruner'] is not None
-        done = Queue()
-        with multiprocessing.Manager() as manager:
+        context = multiprocessing.get_context(self.pool_context)
 
-            # queue and parallel thread for handing render events
-            if dashboard is not None:
-                render_queue = manager.Queue()
-                dashboard_thread = threading.Thread(
-                    target=JaxParameterTuning.queue_listener, args=(render_queue, dashboard))
-                dashboard_thread.start()
-            else:
-                render_queue = None
+        # queue and parallel thread for handing render events
+        if dashboard is not None:
+            render_queue = context.Queue()
+            dashboard_thread = threading.Thread(
+                target=JaxParameterTuning.queue_listener, args=(render_queue, dashboard),
+                daemon=True)
+            dashboard_thread.start()
+        else:
+            render_queue = None
 
-            # queue and parallel thread for the training runs finished by workers
-            seed_queue = manager.Queue()
-            obj_kwargs = {**obj_kwargs, 'progress_queue': seed_queue}
-            seed_thread = threading.Thread(
-                target=JaxParameterTuning.seed_listener, args=(seed_queue, progress))
-            seed_thread.start()
+        # each configuration runs in a fresh process to release its memory after
+        started, running = 0, {}
+        if self.verbose:
+            progress.start()
+        try:
+            while True:
 
-            # each configuration runs in a fresh process to release its memory after
-            if self.verbose:
-                progress.start()
-            try:
-                with multiprocessing.get_context(self.pool_context).Pool(
-                        processes=self.num_workers, maxtasksperchild=1) as pool:
-                    started, running = 0, {}
-                    while True:
+                # fill free workers with new configurations
+                while (len(running) < self.num_workers
+                       and started < self.num_configs
+                       and time.time() - start_time < self.timeout_tuning):
+                    trial = study.ask(distributions)
+                    config_params = self.search_to_config_params(trial.params)
+                    reader, writer = context.Pipe(duplex=False)
+                    process = context.Process(
+                        target=JaxParameterTuning._worker,
+                        args=(writer, self.config_from_template(config_params),
+                              trial.number, trial._trial_id if pruning else None, seeds,
+                              obj_kwargs, render_queue),
+                        daemon=True)
+                    process.start()
+                    writer.close()
+                    running[trial.number] = _ConfigProcess(
+                        trial, process, reader, config_params)
+                    progress.config_started(trial.number)
+                    started += 1
+                if not running:
+                    break
 
-                        # fill free workers with new configurations
-                        while (len(running) < self.num_workers
-                               and started < self.num_configs
-                               and time.time() - start_time < self.timeout_tuning):
-                            trial = study.ask(distributions)
-                            config_params = self.search_to_config_params(trial.params)
-                            pool.apply_async(
-                                JaxParameterTuning.objective_function,
-                                (self.config_from_template(config_params), trial.number,
-                                 trial._trial_id if pruning else None, seeds, obj_kwargs,
-                                 render_queue),
-                                callback=lambda result, n=trial.number: done.put((n, result)),
-                                error_callback=lambda error, n=trial.number: done.put((n, error)))
-                            running[trial.number] = config_params
-                            progress.config_started(trial.number)
-                            started += 1
-                        if not running:
-                            break
+                # wait for messages and exits of workers: the timeout checks the time
+                # limit, and keeps the wait interruptible on all platforms
+                handles = [config.process.sentinel for config in running.values()]
+                handles += [config.reader for config in running.values()
+                            if config.reader is not None]
+                multiprocessing.connection.wait(handles, timeout=1.)
 
-                        # record the next configuration to finish
-                        number, result = done.get()
-                        config_params = running.pop(number)
-                        error = None
-                        if isinstance(result, BaseException):
-                            frozen = study.tell(number, state=TrialState.FAIL)
-                            error = self._describe_error(result)
-                            result = None
-                        elif len(result) < len(seeds):
-                            frozen = study.tell(number, state=TrialState.PRUNED)
-                        else:
-                            frozen = study.tell(number, float(np.mean(result)))
-                        is_best = self._log(study, frozen, config_params, log_file)
-                        if self.verbose:
-                            seconds = (frozen.datetime_complete -
-                                       frozen.datetime_start).total_seconds()
-                            state = {TrialState.COMPLETE: 'complete',
-                                     TrialState.PRUNED: 'pruned'}.get(frozen.state, 'failed')
-                            progress.config_finished(
-                                number, state, result, seconds, list(config_params.values()),
-                                is_best, error)
-            finally:
-                progress.stop()
+                # record the configurations that finished, died or ran out of time:
+                # liveness is checked first, since a worker exits right after its result
+                for (number, config) in list(running.items()):
+                    alive = config.process.is_alive()
+                    config.receive(number, progress)
+                    if config.outcome is None and not alive:
+                        config.outcome = ('error', self._describe_exit(config.process.exitcode))
+                    elif (config.outcome is None
+                          and time.time() - config.start > self.timeout_config):
+                        config.outcome = ('error', f'exceeded the time limit of '
+                                                   f'{self.timeout_config:g} seconds')
+                    if config.outcome is not None:
+                        del running[number]
+                        config.stop(grace=5. if config.outcome[0] == 'done' else 0.)
+                        self._finish(study, config, seeds, log_file, progress)
+        finally:
+            for config in running.values():
+                config.stop(grace=0.)
+            progress.stop()
 
-            # stop the queue listener threads
-            seed_queue.put(None)
-            seed_thread.join()
-            if dashboard is not None:
-                render_queue.put(None)
-                dashboard_thread.join()
+        # stop the queue listener thread
+        if dashboard is not None:
+            render_queue.put(None)
+            dashboard_thread.join()
         return started
 
-    def _log(self, study, frozen, config_params, log_file) -> bool:
+    def _finish(self, study, config, seeds, log_file, progress) -> None:
+        '''Tells the study the outcome of a finished configuration, and records it: the
+        return and training iterations of each run are kept as attributes of the trial.'''
+        trial = config.trial
+        error, rewards = None, None
+        if config.outcome[0] == 'error':
+            error = config.outcome[1]
+        else:
+            (rewards, iterations) = config.outcome[1:]
+            # non-finite values are not valid JSON in the storage
+            trial.set_user_attr('returns', [float(reward) if np.isfinite(reward)
+                                            else str(float(reward)) for reward in rewards])
+            trial.set_user_attr('iterations', iterations)
+            if np.isnan(np.mean(rewards)):
+                error = 'return is NaN'
+        if error is not None:
+            trial.set_user_attr('error', error)
+            frozen = study.tell(trial, state=TrialState.FAIL)
+        elif len(rewards) < len(seeds):
+            frozen = study.tell(trial, state=TrialState.PRUNED)
+        else:
+            frozen = study.tell(trial, float(np.mean(rewards)))
+        is_best = self._log(study, frozen, log_file)
+        if self.verbose:
+            seconds = (frozen.datetime_complete - frozen.datetime_start).total_seconds()
+            state = {TrialState.COMPLETE: 'complete',
+                     TrialState.PRUNED: 'pruned'}.get(frozen.state, 'failed')
+            progress.config_finished(
+                trial.number, state, rewards, seconds, list(config.config_params.values()),
+                is_best, error)
+
+    @staticmethod
+    def _best_trial(study) -> Optional[optuna.trial.FrozenTrial]:
+        try:
+            return study.best_trial
+        except ValueError:
+            return None
+
+    def _log_columns(self) -> List[str]:
+        return (COLUMNS + [f'return_{i}' for i in range(self.num_seeds)] +
+                [f'iterations_{i}' for i in range(self.num_seeds)] +
+                list(self.hyperparams_dict.keys()) + ['error'])
+
+    def _log_row(self, frozen, best_value) -> List[Any]:
+        '''The row of the output file of a finished configuration, with a column for
+        each training run.'''
+        seconds = (frozen.datetime_complete - frozen.datetime_start).total_seconds()
+        returns = frozen.user_attrs.get('returns', [])
+        std = float(np.std(returns)) if len(returns) > 1 else None
+
+        def per_seed(values):
+            values = list(values)[:self.num_seeds]
+            return values + [None] * (self.num_seeds - len(values))
+
+        config_values = [param.to_config(frozen.params[tag]) if tag in frozen.params else None
+                         for (tag, param) in self.hyperparams_dict.items()]
+        return ([frozen.number, frozen.state.name, frozen.value, best_value, seconds, std] +
+                per_seed(returns) + per_seed(frozen.user_attrs.get('iterations', [])) +
+                config_values + [frozen.user_attrs.get('error')])
+
+    def _log(self, study, frozen, log_file) -> bool:
         '''Saves the result of a finished configuration, and returns whether it is the
         best so far.'''
-        try:
-            best = study.best_trial
-        except ValueError:
-            best = None
+        best = self._best_trial(study)
         if log_file is not None:
-            seconds = (frozen.datetime_complete - frozen.datetime_start).total_seconds()
-            row = [frozen.number, frozen.state.name, frozen.value,
-                   None if best is None else best.value, seconds]
             with open(log_file, 'a', newline='') as file:
-                csv.writer(file).writerow(row + list(config_params.values()))
+                csv.writer(file).writerow(
+                    self._log_row(frozen, None if best is None else best.value))
         return best is not None and best.number == frozen.number

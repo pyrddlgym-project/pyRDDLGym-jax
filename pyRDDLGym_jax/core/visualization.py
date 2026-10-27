@@ -22,7 +22,7 @@ import io
 import pickle
 import time
 import threading
-from typing import Any, Dict, Optional, TYPE_CHECKING
+from typing import Any, Dict, Iterable, Optional, TYPE_CHECKING
 import webbrowser
 
 # prevent endless console prints
@@ -44,6 +44,7 @@ from pyRDDLGym.core.debug.decompiler import RDDLDecompiler
 
 from pyRDDLGym_jax import __version__
 if TYPE_CHECKING:
+    from pyRDDLGym.core.compiler.model import RDDLLiftedModel
     from pyRDDLGym_jax.core.planner import JaxPlanner
     
     
@@ -1385,6 +1386,31 @@ class JaxPlannerDashboard:
                 break
             centroids = new_centroids
         return np.unique(np.argmin(distances, axis=0))
+
+    @staticmethod
+    def _compact_log(log: Dict[str, Any], fluents: Iterable[str]) -> Dict[str, Any]:
+        compact = {}
+        if 'reward' in log:
+            compact['reward'] = np.asarray(log['reward'])
+        if 'fluents' in log:
+            compact['fluents'] = {name: np.asarray(log['fluents'][name])[:1]
+                                  for name in fluents}
+        return compact
+
+    @staticmethod
+    def compact_callback(callback: Dict[str, Any], rddl: 'RDDLLiftedModel') -> Dict[str, Any]:
+        '''The part of a training callback read by update_experiment(), to send it from
+        another process: the rollouts keep the first parallel run, and only the fluents
+        shown (states of train rollouts, and states and actions of test rollouts).'''
+        keys = ('iteration', 'progress', 'elapsed_time', 'status', 'train_return',
+                'best_return', 'best_violations', 'best_params', 'model_params',
+                'auxiliary_return', 'auxiliary_violations', 'best_found_by')
+        compact = {key: callback[key] for key in keys if key in callback}
+        states = list(rddl.state_fluents)
+        compact['train_log'] = JaxPlannerDashboard._compact_log(callback['train_log'], states)
+        compact['test_log'] = JaxPlannerDashboard._compact_log(
+            callback['test_log'], states + list(rddl.action_fluents))
+        return compact
 
     def update_experiment(self, experiment_id: str, callback: Dict[str, Any]) -> None:
         '''Pass new information and update the dashboard for a given experiment.'''

@@ -300,8 +300,10 @@ class JaxTuningProgress:
             console.print(text)
 
         # search space aligned in columns
-        names = ('hyper-parameter', 'range', 'scale', 'transform')
-        widths = [max(len(row[i]) for row in [names] + space) for i in range(4)]
+        names = ('hyper-parameter', 'range', 'scale', 'config range')
+        if not any(row[3] for row in space):
+            names, space = names[:3], [row[:3] for row in space]
+        widths = [max(len(row[i]) for row in [names] + space) for i in range(len(names))]
         console.print()
         console.print(Text('  ' + '  '.join(
             name.ljust(w) for (name, w) in zip(names, widths)).rstrip(), BOLD))
