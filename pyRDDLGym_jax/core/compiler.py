@@ -2415,29 +2415,27 @@ class JaxRDDLCompiler:
         jax_df = self._jax(df, aux)
         index, = self.traced.cached_sim_info(expr)
         
-        # reparameterization trick MN(m, LL') = LZ + m, where Z ~ StudentT(0, 1)
+        # reparameterization trick MT(m, LL', df) = LZ / sqrt(W / df) + m,
+        # where Z ~ Normal(0, I) and W ~ ChiSquare(df) is shared across the vector
         def _jax_wrapped_distribution_multivariate_student(fls, nfls, params, key):
-            
+
             # sample the mean and covariance and degrees of freedom
             sample_mean, key, err1, params = jax_mean(fls, nfls, params, key)
             sample_cov, key, err2, params = jax_cov(fls, nfls, params, key)
             sample_df, key, err3, params = jax_df(fls, nfls, params, key)
             out_of_bounds = jnp.logical_not(jnp.all(sample_df > 0))
-            
-            # sample StudentT(0, 1, df) -- broadcast df to same shape as cov
-            sample_df = sample_df[..., jnp.newaxis, jnp.newaxis]
-            sample_df = jnp.broadcast_to(sample_df, shape=jnp.shape(sample_mean) + (1,))
-            key, subkey = random.split(key)
-            Z = random.t(
-                key=subkey, 
-                df=sample_df, 
-                shape=jnp.shape(sample_df),
-                dtype=self.REAL
-            )   
-            
+
+            # sample Normal(0, I) per component and one ChiSquare(df) per vector
+            key, subkey1, subkey2 = random.split(key, num=3)
+            Z = random.normal(
+                key=subkey1, shape=jnp.shape(sample_mean) + (1,), dtype=self.REAL)
+            W = random.chisquare(
+                key=subkey2, df=sample_df, shape=jnp.shape(sample_df), dtype=self.REAL)
+            scale = jnp.sqrt(W / sample_df)[..., jnp.newaxis]
+
             # compute L s.t. cov = L * L' and reparameterize
             L = jnp.linalg.cholesky(sample_cov)
-            sample = jnp.matmul(L, Z)[..., 0] + sample_mean
+            sample = jnp.matmul(L, Z)[..., 0] / scale + sample_mean
             sample = jnp.moveaxis(sample, source=-1, destination=index)
             error = err1 | err2 | err3 | (out_of_bounds * ERR)
             return sample, key, error, params        
