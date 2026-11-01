@@ -188,6 +188,12 @@ class JaxRDDLSimulator(RDDLSimulator):
         self.handle_error_code(error, 'reward function')
         return float(reward)
     
+    def reset(self) -> Tuple[Args, bool]:
+        '''Resets the state variables to their initial values.'''
+        self.fls = {var: self.init_values.get(var, values)
+                    for (var, values) in self.fls.items()}
+        return super().reset()
+
     def step(self, actions: Args) -> Tuple[Args, float, bool]:
         '''Samples and returns the next state from the cpfs.
         
