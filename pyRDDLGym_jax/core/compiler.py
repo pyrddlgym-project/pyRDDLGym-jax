@@ -1669,7 +1669,8 @@ class JaxRDDLCompiler:
         free_vars = [p for p in scope_vars if p[0] not in captured_vars]
         free_dims = self.rddl.object_counts(p for (_, p) in free_vars)
         num_free_vars = len(free_vars)
-        captured_types = [t for (p, t) in scope_vars if p in captured_vars]
+        scope_types = dict(scope_vars)
+        captured_types = [scope_types[p] for p in captured_vars]  # pyfunc output order
         require_dims = self.rddl.object_counts(captured_types)
         source_indices = [num_free_vars + i for i in range(len(require_dims))]
 
