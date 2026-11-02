@@ -546,8 +546,8 @@ class JaxStraightLinePlan(JaxPlan):
         projection method, or modified SOGBOFA projection method to satisfy
         action concurrency constraint
         :param max_constraint_iter: max iterations of projected 
-        gradient for ensuring actions satisfy constraints, only required if 
-        use_new_projection = True
+        gradient for ensuring actions satisfy constraints, only required if
+        use_new_projection = False
         '''
         super(JaxStraightLinePlan, self).__init__()
         
@@ -690,6 +690,8 @@ class JaxStraightLinePlan(JaxPlan):
                     bool_actions = _jax_unstack_bool_from_softmax(output)
                     for (bool_var, bool_action) in bool_actions.items():
                         actions[bool_var] = bool_action > 0.5
+                elif noop[var]:
+                    actions[var] = logits >= bool_threshold
                 else:
                     actions[var] = logits > bool_threshold
 
