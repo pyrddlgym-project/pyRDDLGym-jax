@@ -40,7 +40,7 @@ import jax.random as random
 import jax.scipy as scipy 
 import softjax as sj
 
-from pyRDDLGym_jax.core.compiler import JaxRDDLCompiler, safe_log
+from pyRDDLGym_jax.core.compiler import JaxRDDLCompiler, _finite, safe_log
 
 
 def enumerate_literals(shape: Tuple[int, ...], axis: int, dtype: type=jnp.int32) -> jnp.ndarray:
@@ -1010,10 +1010,23 @@ class LinearIfElse(JaxRDDLCompilerWithGrad):
             sample_pred, key, err1, params = jax_pred(fls, nfls, params, key)
             sample_true, key, err2, params = jax_true(fls, nfls, params, key)
             sample_false, key, err3, params = jax_false(fls, nfls, params, key)
+            taken = sample_pred > 0.5
             if self.use_if_else_ste:
-                hard_pred = jnp.asarray(sample_pred > 0.5, dtype=sample_pred.dtype)
-                sample_pred = sample_pred + jax.lax.stop_gradient(hard_pred - sample_pred)
-            sample = sj.where(sample_pred, sample_true, sample_false)
+                dtype = jnp.result_type(sample_pred, sample_true, sample_false)
+                sample_true = jnp.asarray(sample_true, dtype=dtype)
+                sample_false = jnp.asarray(sample_false, dtype=dtype)
+                sample = (
+                    jnp.where(taken, sample_true, sample_false) + (
+                        (sample_pred - jax.lax.stop_gradient(sample_pred)) *
+                        jax.lax.stop_gradient(_finite(sample_true - sample_false))
+                    )
+                )
+            else:
+                sample_true, sample_false = (
+                    jnp.where(jnp.isfinite(sample_true) | taken, sample_true, sample_false),
+                    jnp.where(jnp.isfinite(sample_false) | ~taken, sample_false, sample_true)
+                )
+                sample = sj.where(sample_pred, sample_true, sample_false)
             self._jax_sample_callback(
                 expr.id, 'if', sample, (sample_pred, sample_true, sample_false))
             err = err1 | err2 | err3
@@ -1063,10 +1076,19 @@ class SoftmaxSwitch(JaxRDDLCompilerWithGrad):
         def _jax_wrapped_switch_softmax(fls, nfls, params, key):
             sample_pred, sample_cases, key, err, params = jax_pred_and_cases(fls, nfls, params, key)
             
+            # a case that is not taken can be non-finite
+            literals = enumerate_literals(jnp.shape(sample_cases), axis=0, dtype=self.INT)
+            sample_pred_hard = jnp.asarray(
+                jnp.round(sample_pred[jnp.newaxis, ...]), dtype=self.INT)
+            hard_sample = jnp.take_along_axis(sample_cases, sample_pred_hard, axis=0)
+            assert jnp.shape(hard_sample)[0] == 1
+            sample_cases = jnp.where(
+                jnp.isfinite(sample_cases) | (literals == sample_pred_hard),
+                sample_cases, hard_sample)
+
             # replace integer indexing with softmax
             sample_pred_soft = jnp.broadcast_to(
                 sample_pred[jnp.newaxis, ...], shape=jnp.shape(sample_cases))
-            literals = enumerate_literals(jnp.shape(sample_cases), axis=0, dtype=self.INT)
             w = params[id_]['switch_weight']
             logits = -w * jnp.abs(sample_pred_soft - literals)
             sample = stable_softmax_weight_sum(logits, sample_cases, axis=0)
@@ -1074,12 +1096,7 @@ class SoftmaxSwitch(JaxRDDLCompilerWithGrad):
 
             # straight through estimator
             if self.use_switch_ste:
-                sample_pred_hard = jnp.asarray(
-                    jnp.round(sample_pred[jnp.newaxis, ...]), dtype=self.INT)
-                hard_sample = jnp.take_along_axis(sample_cases, sample_pred_hard, axis=0)
-                assert jnp.shape(hard_sample)[0] == 1
-                hard_sample = hard_sample[0, ...]
-                sample = sample + jax.lax.stop_gradient(hard_sample - sample)
+                sample = sample + jax.lax.stop_gradient(hard_sample[0, ...] - sample)
             return sample, key, err, params
         return _jax_wrapped_switch_softmax
     

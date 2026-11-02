@@ -64,6 +64,63 @@ def safe_log_jvp(primals, tangents):
     return val, grad
 
 
+def _finite(partial):
+    return jnp.where(jnp.isfinite(partial), partial, 0.)
+
+
+def _promote_inexact(fn, args):
+    '''Returns the arguments cast to the dtype of fn(*args), or None if it is not inexact.'''
+    dtype = jax.eval_shape(fn, *args).dtype
+    if jnp.issubdtype(dtype, jnp.inexact):
+        return tuple(jnp.asarray(arg, dtype=dtype) for arg in args)
+    return None
+
+
+def finite_grad(fn: Callable) -> Callable:
+    '''Wraps an elementwise function so that its partial derivatives are zero wherever
+    they are not finite, leaving its values unchanged.'''
+
+    @jax.custom_jvp
+    def _fn(*args):
+        return fn(*args)
+
+    @_fn.defjvp
+    def _fn_jvp(args, tangents):
+        out = 0.
+        for (i, tangent) in enumerate(tangents):
+            fn_i = lambda arg: fn(*args[:i], arg, *args[i + 1:])
+            _, partial = jax.jvp(fn_i, (args[i],), (jnp.ones_like(args[i]),))
+            out = out + _finite(partial) * tangent
+        return fn(*args), out
+
+    def _wrapped(*args):
+        promoted = _promote_inexact(fn, args)
+        return fn(*args) if promoted is None else _fn(*promoted)
+    return _wrapped
+
+
+# d/dy is computed as -(x / y) / y
+@jax.custom_jvp
+def _safe_divide(x, y):
+    return jnp.divide(x, y)
+
+
+@_safe_divide.defjvp
+def _safe_divide_jvp(primals, tangents):
+    (x, y), (x_dot, y_dot) = primals, tangents
+    val = jnp.divide(x, y)
+    return val, _finite(jnp.divide(1., y)) * x_dot + _finite(-jnp.divide(val, y)) * y_dot
+
+
+def safe_divide(x, y):
+    return _safe_divide(*_promote_inexact(jnp.divide, (x, y)))
+
+
+safe_multiply = finite_grad(jnp.multiply)
+safe_power = finite_grad(jnp.power)
+safe_hypot = finite_grad(jnp.hypot)
+
+
 @flax.struct.dataclass
 class JaxRDDLSimState:
     '''The state of a Jax RDDL simulator.'''
@@ -1303,11 +1360,11 @@ class JaxRDDLCompiler:
     
     def _jax_multiply(self, expr, aux):
         aux['exact'].add(expr.id)
-        return self._jax_nary_helper(expr, aux, jnp.multiply, at_least_int=True)
+        return self._jax_nary_helper(expr, aux, safe_multiply, at_least_int=True)
     
     def _jax_divide(self, expr, aux):
         aux['exact'].add(expr.id)
-        return self._jax_binary_helper(expr, aux, jnp.divide, at_least_int=True)
+        return self._jax_binary_helper(expr, aux, safe_divide, at_least_int=True)
     
     # ===========================================================================
     # relational
@@ -1575,7 +1632,7 @@ class JaxRDDLCompiler:
     
     def _jax_tan(self, expr, aux):
         aux['exact'].add(expr.id)
-        return self._jax_unary_helper(expr, aux, jnp.tan, at_least_int=True)
+        return self._jax_unary_helper(expr, aux, finite_grad(jnp.tan), at_least_int=True)
     
     def _jax_acos(self, expr, aux):
         aux['exact'].add(expr.id)
@@ -1591,11 +1648,11 @@ class JaxRDDLCompiler:
     
     def _jax_cosh(self, expr, aux):
         aux['exact'].add(expr.id)
-        return self._jax_unary_helper(expr, aux, jnp.cosh, at_least_int=True)
+        return self._jax_unary_helper(expr, aux, finite_grad(jnp.cosh), at_least_int=True)
     
     def _jax_sinh(self, expr, aux):
         aux['exact'].add(expr.id)
-        return self._jax_unary_helper(expr, aux, jnp.sinh, at_least_int=True)
+        return self._jax_unary_helper(expr, aux, finite_grad(jnp.sinh), at_least_int=True)
     
     def _jax_tanh(self, expr, aux):
         aux['exact'].add(expr.id)
@@ -1603,11 +1660,11 @@ class JaxRDDLCompiler:
     
     def _jax_exp(self, expr, aux):
         aux['exact'].add(expr.id)
-        return self._jax_unary_helper(expr, aux, jnp.exp, at_least_int=True)
+        return self._jax_unary_helper(expr, aux, finite_grad(jnp.exp), at_least_int=True)
     
     def _jax_ln(self, expr, aux):
         aux['exact'].add(expr.id)
-        return self._jax_unary_helper(expr, aux, jnp.log, at_least_int=True)
+        return self._jax_unary_helper(expr, aux, finite_grad(jnp.log), at_least_int=True)
     
     def _jax_sqrt(self, expr, aux):
         aux['exact'].add(expr.id)
@@ -1615,11 +1672,11 @@ class JaxRDDLCompiler:
     
     def _jax_lngamma(self, expr, aux):
         aux['exact'].add(expr.id)
-        return self._jax_unary_helper(expr, aux, scipy.special.gammaln, at_least_int=True)
+        return self._jax_unary_helper(expr, aux, finite_grad(scipy.special.gammaln), at_least_int=True)
     
     def _jax_gamma_func(self, expr, aux):
         aux['exact'].add(expr.id)
-        return self._jax_unary_helper(expr, aux, scipy.special.gamma, at_least_int=True)
+        return self._jax_unary_helper(expr, aux, finite_grad(scipy.special.gamma), at_least_int=True)
 
     def _jax_div(self, expr, aux):
         aux['exact'].add(expr.id)
@@ -1627,11 +1684,11 @@ class JaxRDDLCompiler:
     
     def _jax_mod(self, expr, aux):
         aux['exact'].add(expr.id)
-        return self._jax_binary_helper(expr, aux, jnp.mod, at_least_int=True)
+        return self._jax_binary_helper(expr, aux, finite_grad(jnp.mod), at_least_int=True)
     
     def _jax_fmod(self, expr, aux):
         aux['exact'].add(expr.id)
-        return self._jax_binary_helper(expr, aux, jnp.fmod, at_least_int=True)
+        return self._jax_binary_helper(expr, aux, finite_grad(jnp.fmod), at_least_int=True)
     
     def _jax_min(self, expr, aux):
         aux['exact'].add(expr.id)
@@ -1643,17 +1700,17 @@ class JaxRDDLCompiler:
     
     def _jax_pow(self, expr, aux):
         aux['exact'].add(expr.id)
-        return self._jax_binary_helper(expr, aux, jnp.power, at_least_int=True)
+        return self._jax_binary_helper(expr, aux, safe_power, at_least_int=True)
     
     def _jax_log(self, expr, aux):
         aux['exact'].add(expr.id)
         def log_op(x, y):
             return jnp.divide(jnp.log(x), jnp.log(y))
-        return self._jax_binary_helper(expr, aux, log_op, at_least_int=True)
+        return self._jax_binary_helper(expr, aux, finite_grad(log_op), at_least_int=True)
     
     def _jax_hypot(self, expr, aux):
         aux['exact'].add(expr.id)
-        return self._jax_binary_helper(expr, aux, jnp.hypot, at_least_int=True)
+        return self._jax_binary_helper(expr, aux, safe_hypot, at_least_int=True)
     
     # ===========================================================================
     # external function
@@ -2249,7 +2306,7 @@ class JaxRDDLCompiler:
             scale, key, err2, params = jax_scale(fls, nfls, params, key)
             key, subkey = random.split(key)
             exp1 = random.exponential(key=subkey, shape=jnp.shape(scale), dtype=self.REAL)
-            sample = sj.div(sj.div(jnp.log(1. + exp1), shape), scale)
+            sample = sj.div(jnp.log1p(sj.div(exp1, shape)), scale)
             out_of_bounds = jnp.logical_not(jnp.all(jnp.logical_and(shape > 0, scale > 0)))
             err = err1 | err2 | (out_of_bounds * ERR)
             return sample, key, err, params        
