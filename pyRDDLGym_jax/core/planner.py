@@ -410,30 +410,35 @@ class JaxActionRepair:
                 active = flat != flat_default
                 order = jnp.argsort(jnp.where(active, jnp.abs(score - 0.5), jnp.inf))
 
-                def _jax_wrapped_targeted_reset(i, carry):
-                    flat, violations = carry
+                def _jax_wrapped_targeted_reset(carry):
+                    i, flat, violations = carry
                     index = order[i]
                     candidate = flat.at[index].set(flat_default[index])
                     unflat = _jax_wrapped_unflatten(candidate, bool_splits, bool_vars)
                     cand_violations = _jax_wrapped_violations(sim_state, fls, unflat)
-                    reset = active[index] & (violations > 0) & (cand_violations < violations)
-                    return (jnp.where(reset, candidate, flat),
+                    reset = active[index] & (cand_violations < violations)
+                    return (i + 1, jnp.where(reset, candidate, flat),
                             jnp.where(reset, cand_violations, violations))
 
-                def _jax_wrapped_reset(i, flat):
+                def _jax_wrapped_reset(carry):
+                    i, flat, _ = carry
                     index = order[i]
-                    unflat = _jax_wrapped_unflatten(flat, bool_splits, bool_vars)
-                    unflat_feas = _jax_wrapped_feasible(sim_state, fls, unflat)
-                    reset = active[index] & jnp.logical_not(unflat_feas)
                     candidate = flat.at[index].set(flat_default[index])
-                    return jnp.where(reset, candidate, flat)
+                    flat = jnp.where(active[index], candidate, flat)
+                    unflat = _jax_wrapped_unflatten(flat, bool_splits, bool_vars)
+                    return (i + 1, flat, _jax_wrapped_feasible(sim_state, fls, unflat))
 
                 initial = flat
                 unflats = _jax_wrapped_unflatten(flat, bool_splits, bool_vars)
                 violations = _jax_wrapped_violations(sim_state, fls, unflats)
-                flat, _ = jax.lax.fori_loop(
-                    0, flat.size, _jax_wrapped_targeted_reset, (flat, violations))
-                flat = jax.lax.fori_loop(0, flat.size, _jax_wrapped_reset, flat)
+                _, flat, _ = jax.lax.while_loop(
+                    lambda carry: (carry[0] < flat.size) & (carry[2] > 0),
+                    _jax_wrapped_targeted_reset, (0, flat, violations))
+                unflats = _jax_wrapped_unflatten(flat, bool_splits, bool_vars)
+                _, flat, _ = jax.lax.while_loop(
+                    lambda carry: (carry[0] < flat.size) & jnp.logical_not(carry[2]),
+                    _jax_wrapped_reset,
+                    (0, flat, _jax_wrapped_feasible(sim_state, fls, unflats)))
                 resets = jnp.sum(flat != initial).astype(REAL)
                 kept = _jax_wrapped_unflatten(flat == initial, bool_splits, bool_vars)
                 fls = {**fls, **_jax_wrapped_unflatten(flat, bool_splits, bool_vars)}
@@ -462,13 +467,14 @@ class JaxActionRepair:
                     return _jax_wrapped_violations(sim_state, fls, interp_0)
 
                 # the bisection keeps the last candidate found feasible
-                def _jax_wrapped_bisect(_, bounds):
-                    low, high, best = bounds
+                def _jax_wrapped_bisect(bounds):
+                    i, low, high, best = bounds
                     mid = 0.5 * (low + high)
                     candidate = _jax_wrapped_interpolate(mid, involved)
                     cand_flat = _jax_wrapped_flat_actions(candidate)
                     feasible = _jax_wrapped_feasible(sim_state, fls, cand_flat)
-                    return (jnp.where(feasible, mid, low), 
+                    return (i + 1,
+                            jnp.where(feasible, mid, low), 
                             jnp.where(feasible, high, mid),
                             jnp.where(feasible, candidate, best))
 
@@ -480,10 +486,13 @@ class JaxActionRepair:
                 feasible_0 = _jax_wrapped_feasible(sim_state, fls, interp_0)
                 involved = jnp.where(feasible_0, involved, True)
                 involved_0_1 = _jax_wrapped_interpolate(0., involved)
-                low, _, best = jax.lax.fori_loop(
-                    0, num_bisections, _jax_wrapped_bisect,
-                    (jnp.zeros((), dtype=REAL), jnp.ones((), dtype=REAL), involved_0_1))
+
+                # the bisection is skipped if the actions are feasible, which keeps them
                 feasible = _jax_wrapped_feasible(sim_state, fls, {})
+                _, low, _, best = jax.lax.while_loop(
+                    lambda bounds: (bounds[0] < num_bisections) & jnp.logical_not(feasible),
+                    _jax_wrapped_bisect,
+                    (0, jnp.zeros((), dtype=REAL), jnp.ones((), dtype=REAL), involved_0_1))
                 repaired = _jax_wrapped_flat_actions(best)
                 fls = {**fls, **{var: jnp.where(feasible, fls[var], repaired[var])
                                  for var in other_vars}}
@@ -528,8 +537,10 @@ class JaxActionRepair:
                     exact[var] = actions[var]
                 else:
                     exact[var] = jnp.asarray(jnp.round(actions[var]), dtype=INT)
-            _, info, kept, step = repair_fn(sim_state, {**actions, **exact}, actions)
-            kept, step = jax.lax.stop_gradient((kept, step))
+            # the repair is not differentiated (its loops are not reverse-differentiable)
+            _, info, kept, step = repair_fn(
+                sim_state.replace(fls=jax.lax.stop_gradient(sim_state.fls)),
+                *jax.lax.stop_gradient(({**actions, **exact}, actions)))
             repaired = dict(actions)
             for var in defaults:
                 if ranges[var] == 'bool':
@@ -3114,15 +3125,19 @@ class JaxBackpropPlanner(JaxPlanner):
                 log['updates'] = updates
                 return (key, model_params, params, opt_state, loss_val, converged, log)
             
-            # do a single update then an unrolled update in JAX for any remaining steps
-            # necessary to fill the log
-            carry = (sim_state.key, sim_state.model_params, 
+            # do the updates in a loop, whose initial log has the structure of the log
+            # of an update step (traced only, so the step is compiled once)
+            carry = (sim_state.key, sim_state.model_params,
                      planner_state.policy_params, planner_state.opt_state, 0., True, {})
-            carry = _jax_wrapped_plan_update_step(0, carry)
-            if self.steps_per_update > 1:
+            if self.steps_per_update <= 1:
+                carry = _jax_wrapped_plan_update_step(0, carry)
+            else:
+                shapes = jax.eval_shape(_jax_wrapped_plan_update_step, 0, carry)
+                carry = carry[:4] + tuple(jax.tree_util.tree_map(
+                    lambda s: jnp.zeros(s.shape, s.dtype), shapes[4:]))
                 carry = jax.lax.fori_loop(
-                    lower=0, upper=self.steps_per_update - 1, 
-                    body_fun=_jax_wrapped_plan_update_step, 
+                    lower=0, upper=self.steps_per_update,
+                    body_fun=_jax_wrapped_plan_update_step,
                     init_val=carry
                 )
             _, *rest, end_log = carry
