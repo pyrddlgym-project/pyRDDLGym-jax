@@ -710,8 +710,14 @@ class JaxRDDLCompiler:
             return carry, log 
         return _jax_wrapped_batched_policy_step
         
-    def _compile_unrolled_policy_step(self, batched_policy_step_fn, n_steps, history_dependent): 
-        def _jax_wrapped_batched_policy_rollout(sim_state, planner_state):    
+    def _compile_unrolled_policy_step(self, batched_policy_step_fn, n_steps, history_dependent,
+                                      remat=False):
+
+        # recompute each step in the backward pass instead of storing it for all steps
+        if remat:
+            batched_policy_step_fn = jax.checkpoint(batched_policy_step_fn)
+
+        def _jax_wrapped_batched_policy_rollout(sim_state, planner_state):
 
             # initialize history the policy sees
             fls_hist = {}
@@ -744,8 +750,9 @@ class JaxRDDLCompiler:
                          constraint_func: bool=False, 
                          cache_path_info: bool=False,
                          aux_constr: Optional[Dict[str, Any]]=None,
-                         action_repair: Optional[Callable]=None) -> Callable:
-        '''Compiles the current RDDL model into a JAX transition function that 
+                         action_repair: Optional[Callable]=None,
+                         remat: bool=False) -> Callable:
+        '''Compiles the current RDDL model into a JAX transition function that
         samples trajectories with a fixed horizon from a policy.
         
         The arguments of the returned function is:
@@ -775,12 +782,14 @@ class JaxRDDLCompiler:
         :param aux_constr: auxiliary info to pass when compiling constraint_func
         :param action_repair: optional function (sim_state, planner_state, actions) ->
         (actions, info) that repairs the actions of the policy at each step
+        :param remat: whether gradients recompute each step instead of storing it,
+        which saves memory for large models at the cost of more computation
         '''
         jax_fn = self.compile_transition(
             check_constraints, constraint_func, cache_path_info, aux_constr)
         jax_fn = self._compile_policy_step(policy, jax_fn, action_repair)
         jax_fn = self._compile_batched_policy_step(jax_fn, n_batch)
-        jax_fn = self._compile_unrolled_policy_step(jax_fn, n_steps, history_dependent)
+        jax_fn = self._compile_unrolled_policy_step(jax_fn, n_steps, history_dependent, remat)
         return jax_fn
     
     def init_fls_and_nfls(self, init_values: Dict[str, Any], 

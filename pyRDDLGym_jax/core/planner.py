@@ -630,7 +630,8 @@ class JaxPlanner(metaclass=ABCMeta):
                  preprocessor: Optional[Preprocessor]=None,
                  python_functions: Optional[Dict[str, Callable]]=None,
                  cache_full_train_rollouts: bool=False,
-                 cache_full_test_rollouts: bool=False) -> None:
+                 cache_full_test_rollouts: bool=False,
+                 remat_train_rollouts: bool=False) -> None:
         '''Creates a new planner for optimizing a policy or plan in the given RDDL.
         Some operations will be converted to their differentiable counterparts in the
         relaxed model; the specific operations can be customized by providing a
@@ -676,6 +677,9 @@ class JaxPlanner(metaclass=ABCMeta):
         :param python_functions: dictionary of external Python functions to call from RDDL
         :param cache_full_train_rollouts: whether to cache full training rollouts in log
         :param cache_full_test_rollouts: whether to cache full testing rollouts to log
+        :param remat_train_rollouts: whether gradients recompute each step of the training
+        rollouts instead of storing it, which saves memory for large models at the cost
+        of more computation
         '''
         self.rddl = rddl
         self.plan = plan
@@ -740,6 +744,7 @@ class JaxPlanner(metaclass=ABCMeta):
             ))
         self.cache_full_train_rollouts = cache_full_train_rollouts
         self.cache_full_test_rollouts = cache_full_test_rollouts
+        self.remat_train_rollouts = remat_train_rollouts
 
         # auxiliary planner shares the model of this planner: each planner owns a copy
         if auxiliary is not None:
@@ -908,7 +913,8 @@ class JaxPlanner(metaclass=ABCMeta):
             n_batch=self.batch_size_train,
             history_dependent=self.plan.history_dependent,
             cache_path_info=self.cache_full_train_rollouts,
-            action_repair=self._jax_train_action_repair()
+            action_repair=self._jax_train_action_repair(),
+            remat=self.remat_train_rollouts
         )
         test_rollouts = self.test_compiled.compile_rollouts(
             policy=self.plan.test_policy,
