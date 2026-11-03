@@ -20,7 +20,6 @@ from typing import Any, Dict, Tuple
 import jax
 import jax.nn.initializers as initializers
 import jax.random as random
-import flax.linen as nn
 import optax
 
 from pyRDDLGym.core.debug.exception import raise_warning
@@ -85,7 +84,7 @@ def _load_config(config, args):
     plan_initializer = plan_kwargs.get('initializer', None)
     if plan_initializer is not None:
         initializer = _getattr_any(
-            packages=[initializers, nn.initializers], item=plan_initializer)
+            packages=[initializers], item=plan_initializer)
         if initializer is None:
             raise ValueError(f'Invalid initializer <{plan_initializer}>.')
         else:
