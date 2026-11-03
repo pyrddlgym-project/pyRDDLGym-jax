@@ -34,7 +34,6 @@ setup(
           'jax>=0.9.0',
           'softjax>=0.1.1',
           'optax>=0.2.7',
-          'flax>=0.12.3',
           'tensorflow-probability>=0.25.0'
       ],
       extras_require={

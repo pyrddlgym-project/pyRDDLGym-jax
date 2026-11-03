@@ -77,7 +77,6 @@ import jax
 import jax.flatten_util
 import jax.numpy as jnp
 import jax.random as random
-import flax
 import numpy as np
 import optax
 import termcolor
@@ -86,7 +85,7 @@ from pyRDDLGym.core.compiler.model import RDDLPlanningModel, RDDLLiftedModel
 from pyRDDLGym.core.debug.logger import Logger
 
 from pyRDDLGym_jax import __version__
-from pyRDDLGym_jax.core.compiler import JaxRDDLCompiler, JaxRDDLSimState
+from pyRDDLGym_jax.core.compiler import JaxRDDLCompiler, JaxRDDLSimState, pytree_dataclass
 from pyRDDLGym_jax.core.logic import JaxRDDLCompilerWithGrad, DefaultJaxRDDLCompilerWithGrad
 from pyRDDLGym_jax.core.plan import Preprocessor, JaxPlan
 from pyRDDLGym_jax.core.progress import JaxPlannerProgress
@@ -110,7 +109,7 @@ Pytree = Any
 # ***********************************************************************
 
 
-@flax.struct.dataclass
+@pytree_dataclass
 class JaxPlannerState:
     '''The JAX planner state representation.'''
     policy_params: Pytree=None

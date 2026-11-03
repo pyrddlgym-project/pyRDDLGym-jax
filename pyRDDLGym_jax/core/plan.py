@@ -21,13 +21,13 @@
 
 from abc import ABCMeta, abstractmethod
 from functools import partial
+import itertools
 from typing import Any, Callable, Dict, Optional, Sequence, Type, Tuple
 
 import jax
 import jax.nn.initializers as initializers
 import jax.numpy as jnp
 import jax.random as random
-import flax.linen as nn
 import numpy as np
 import termcolor
 
@@ -856,90 +856,98 @@ class JaxStraightLinePlan(JaxPlan):
 # ***********************************************************************
 
 
-class GumbelSoftmaxTopK(nn.Module):
+def gumbel_softmax_top_k(key, logits, weight, train, k, dtype):
     '''A differentiable top-k generalization of gumbel-softmax.'''
 
-    allowed_actions: int
-    dtype: Any
-    name: str='topk'
+    # forward relaxation (for k = 1 this is the gumbel-softmax)
+    def soft_top_k(key, logits, w):
+        logits = logits + random.gumbel(key=key, shape=jnp.shape(logits), dtype=dtype)
+        def body_fun(i, carry):
+            khot, logits_i = carry
+            logits_new = logits_i + safe_log(1.0 - khot)
+            khot_new = khot + jax.nn.softmax(w * logits_new)
+            return (khot_new, logits_new)
+        return jax.lax.fori_loop(0, k, body_fun, (jnp.zeros_like(logits), logits))[0]
 
-    @nn.compact
-    def __call__(self, rng_key, action_logits, weight: float, train: bool):
-        
-        # forward relaxation (for k = 1 this is the gumbel-softmax)
-        def soft_top_k(key, logits, w):
-            g = random.gumbel(key=key, shape=jnp.shape(logits), dtype=self.dtype)
-            logits = logits + g
-            def body_fun(i, carry):
-                khot, logits_i = carry
-                logits_new = logits_i + safe_log(1.0 - khot)
-                khot_new = khot + jax.nn.softmax(w * logits_new)
-                return (khot_new, logits_new)
-            khot0 = jnp.zeros_like(logits)
-            khot_final, _ = jax.lax.fori_loop(
-                lower=0, upper=self.allowed_actions, 
-                body_fun=body_fun, 
-                init_val=(khot0, logits)
-            )
-            return khot_final
-        
-        # forward exact evaluation
-        def hard_top_k(key, logits, w):
-            def body_fun(i, carry):
-                khot, logits_i = carry
-                idx = jnp.argmax(logits_i)
-                logits_new = logits_i.at[idx].set(-jnp.inf)
-                khot_new = khot.at[idx].set(1.0)
-                return (khot_new, logits_new)
-            khot0 = jnp.zeros_like(logits)
-            khot_final, _ = jax.lax.fori_loop(
-                lower=0, upper=self.allowed_actions, 
-                body_fun=body_fun, 
-                init_val=(khot0, logits)
-            )
-            return khot_final
+    # forward exact evaluation
+    def hard_top_k(key, logits, w):
+        def body_fun(i, carry):
+            khot, logits_i = carry
+            idx = jnp.argmax(logits_i)
+            return (khot.at[idx].set(1.0), logits_i.at[idx].set(-jnp.inf))
+        return jax.lax.fori_loop(0, k, body_fun, (jnp.zeros_like(logits), logits))[0]
 
-        return jax.lax.switch(train, [hard_top_k, soft_top_k], rng_key, action_logits, weight)
+    return jax.lax.switch(train, [hard_top_k, soft_top_k], key, logits, weight)
 
 
-class FiLM(nn.Module):
-    '''FiLM layer for time conditioning a dense layer.'''
-    hidden_dim: int
-    name: str
-
-    @nn.compact
-    def __call__(self, h, cond):
-        gamma = nn.Dense(self.hidden_dim, name='gamma')(cond)
-        beta = nn.Dense(self.hidden_dim, name='beta')(cond)
-        return gamma * h + beta
+def dense_init(key, in_dim, out_dim, kernel_init=initializers.lecun_normal()):
+    return {'kernel': kernel_init(key, (in_dim, out_dim), jnp.float32),
+            'bias': jnp.zeros((out_dim,), dtype=jnp.float32)}
 
 
-class FixedTimeEmbedding(nn.Module):
+def dense(params, x):
+    return jnp.dot(x, params['kernel']) + params['bias']
+
+
+class LayerNorm:
+    '''Layer normalization (https://arxiv.org/abs/1607.06450).'''
+
+    def __init__(self, epsilon: float=1e-6, use_bias: bool=True, use_scale: bool=True):
+        self.epsilon = epsilon
+        self.use_bias = use_bias
+        self.use_scale = use_scale
+
+    def init(self, dim):
+        params = {}
+        if self.use_scale:
+            params['scale'] = jnp.ones((dim,), dtype=jnp.float32)
+        if self.use_bias:
+            params['bias'] = jnp.zeros((dim,), dtype=jnp.float32)
+        return params
+
+    def __call__(self, params, x):
+        x = jnp.asarray(x, dtype=jnp.promote_types(x.dtype, jnp.float32))
+        mean = jnp.mean(x)
+        var = jnp.maximum(0.0, jnp.mean(jnp.square(x)) - jnp.square(mean))
+        mul = jax.lax.rsqrt(var + self.epsilon)
+        if self.use_scale:
+            mul = mul * params['scale']
+        y = (x - mean) * mul
+        if self.use_bias:
+            y = y + params['bias']
+        return y
+
+
+class FixedTimeEmbedding:
     '''Learnable fixed time embedding layer.'''
-    max_t: int=500
-    dim: int=8
-    init: object=nn.initializers.normal()
-    name: str='fixed_time_embed'
 
-    @nn.compact
-    def __call__(self, t):
-        emb = self.param("kernel", self.init, (self.max_t + 1, self.dim))
-        return emb[t]
-    
+    def __init__(self, max_t: int=500, dim: int=8, init=initializers.normal()):
+        self.max_t = max_t
+        self.dim = dim
+        self.kernel_init = init
 
-class SinusoidalTimeEmbedding(nn.Module):
+    def init(self, key):
+        return {'kernel': self.kernel_init(key, (self.max_t + 1, self.dim), jnp.float32)}
+
+    def __call__(self, params, t):
+        return params['kernel'][t]
+
+
+class SinusoidalTimeEmbedding:
     '''Sinusoidal positional encoding for time.'''
-    dim: int=8
-    name: str = 'sin_time_embed'
 
-    @nn.compact
-    def __call__(self, t):
+    def __init__(self, dim: int=8):
+        self.dim = dim
+
+    def init(self, key):
+        return None
+
+    def __call__(self, params, t):
         t = jnp.asarray(t, dtype=jnp.float32)
-        freqs = 10000.0 ** (-2.0 * jnp.arange(self.dim) / self.dim)
-        angles = t * freqs
+        angles = t * 10000.0 ** (-2.0 * jnp.arange(self.dim) / self.dim)
         emb = jnp.stack([jnp.sin(angles), jnp.cos(angles)], axis=-1)
         return jnp.ravel(emb)[:self.dim]
-    
+
             
 class JaxDeepReactivePolicy(JaxPlan):
     '''A deep reactive policy network implementation in JAX.'''
@@ -948,7 +956,7 @@ class JaxDeepReactivePolicy(JaxPlan):
     
     def __init__(self, topology: Optional[Sequence[int]]=None,
                  activation: Activation=jnp.tanh,
-                 initializer: nn.initializers.Initializer=nn.initializers.variance_scaling(
+                 initializer: initializers.Initializer=initializers.variance_scaling(
                     scale=2.0, mode="fan_in", distribution="truncated_normal"),
                  normalize: bool=False,
                  normalize_per_layer: bool=False,
@@ -1084,44 +1092,34 @@ class JaxDeepReactivePolicy(JaxPlan):
                     ))
                 normalize = False
         
-        # convert fluents dictionary into a state vector to feed to the MLP
-        normalizer_kwargs = self._normalizer_kwargs
+        # observed fluents (after optional preprocessing) feed into the MLP
+        def _jax_wrapped_drp_observed(fls, hyperparams):
+            if preprocessor is not None:
+                fls = preprocessor.transform(fls, hyperparams[Preprocessor.HYPERPARAMS_KEY])
+            return {var: jnp.ravel(value) for (var, value) in fls.items()
+                    if var in observed_vars}
 
-        class DRPStateLayer(nn.Module):
-            name: str='inputs'
+        # convert fluents dictionary into a state vector to feed to the MLP:
+        # optionally apply layer norm to each non-bool input or all non-bool inputs
+        norm = LayerNorm(**self._normalizer_kwargs)
 
-            @nn.compact
-            def __call__(self, fls, hyperparams):
+        def _jax_wrapped_drp_inputs(params, fls, hyperparams):
+            observed = _jax_wrapped_drp_observed(fls, hyperparams)
+            states_bool, states_non_bool = [], []
+            for (var, state) in observed.items():
+                if ranges[var] == 'bool':
+                    states_bool.append(state)
+                else:
+                    if normalize and normalize_per_layer:
+                        state = norm(params['inputs'][f'norm_{input_names[var]}'], state)
+                    states_non_bool.append(state)
+            non_bool_dims = sum(state.size for state in states_non_bool)
+            state = jnp.concatenate(states_non_bool + states_bool)
+            if normalize and not normalize_per_layer and non_bool_dims:
+                normalized = norm(params['inputs']['norm'], state[:non_bool_dims])
+                state = state.at[:non_bool_dims].set(normalized)
+            return state
 
-                # optional state preprocessing
-                if preprocessor is not None:
-                    stats = hyperparams[Preprocessor.HYPERPARAMS_KEY]
-                    fls = preprocessor.transform(fls, stats)
-                
-                # concatenate all state variables into a single vector
-                # optionally apply layer norm to each input tensor
-                states_bool, states_non_bool = [], []
-                non_bool_dims = 0
-                for (var, value) in fls.items():
-                    if var in observed_vars:
-                        state = jnp.ravel(value)
-                        if ranges[var] == 'bool':
-                            states_bool.append(state)
-                        else:
-                            if normalize and normalize_per_layer:
-                                name = f'norm_{input_names[var]}'
-                                state = nn.LayerNorm(name=name, **normalizer_kwargs)(state)
-                            states_non_bool.append(state)
-                            non_bool_dims = non_bool_dims + state.size
-                state = jnp.concatenate(states_non_bool + states_bool)
-                
-                # optionally perform layer normalization on the non-bool inputs
-                if normalize and not normalize_per_layer and non_bool_dims:
-                    norm_layer = nn.LayerNorm(name='norm', **normalizer_kwargs)
-                    normalized = norm_layer(state[:non_bool_dims])
-                    state = state.at[:non_bool_dims].set(normalized)
-                return state
-        
         # enable constraint satisfaction subroutines during optimization 
         # if there are nontrivial concurrency constraints in the problem description
         bool_action_count = sum(np.size(values)
@@ -1134,87 +1132,100 @@ class JaxDeepReactivePolicy(JaxPlan):
         # predict actions from the policy network for current state
         wrap_non_bool = self._wrap_non_bool
         time_dependent = self._time_dependent
-        time_embedding = self._time_embedding
-        time_embedding_kwargs = self._time_embedding_kwargs
+        time_embed = self._time_embedding(**self._time_embedding_kwargs)
         init = self._initializer
 
-        class DRP(nn.Module):
-            name: str='drp'
+        # one noop slot is added per allowed action so that up to k actions are
+        # selected by the top-k, and the noop slots are dropped after selection
+        num_topk_outputs = bool_action_count + rddl.max_allowed_actions
 
-            @nn.compact
-            def __call__(self, fls, hyperparams, step, train):
-                key = self.make_rng("policy")
+        def _jax_wrapped_drp_init_params(key, fls, hyperparams):
+            keys = (random.fold_in(key, i) for i in itertools.count())
+            observed = _jax_wrapped_drp_observed(fls, hyperparams)
+            non_bool = {var: state.size for (var, state) in observed.items()
+                        if ranges[var] != 'bool'}
+            params = {}
 
-                # input layer
-                state = DRPStateLayer(name='inputs')(fls, hyperparams)
-                
-                # time embedding
+            # input layer norm
+            if normalize and normalize_per_layer:
+                params['inputs'] = {f'norm_{input_names[var]}': norm.init(size)
+                                    for (var, size) in non_bool.items()}
+            elif normalize and non_bool:
+                params['inputs'] = {'norm': norm.init(sum(non_bool.values()))}
+
+            # time embedding
+            if time_dependent:
+                time_params = time_embed.init(next(keys))
+                if time_params is not None:
+                    params['time_embed'] = time_params
+
+            # hidden layers, each optionally conditioned on time (FiLM)
+            in_dim = sum(state.size for state in observed.values())
+            for (i, (num_neuron, _)) in layers:
+                params[f'dense_{i}'] = dense_init(next(keys), in_dim, num_neuron, init)
                 if time_dependent:
-                    t_emb = time_embedding(**time_embedding_kwargs)(step)
+                    params[f'film_{i}'] = {
+                        'gamma': dense_init(next(keys), time_embed.dim, num_neuron),
+                        'beta': dense_init(next(keys), time_embed.dim, num_neuron)
+                    }
+                in_dim = num_neuron
 
-                # feed state vector through hidden layers
-                hidden = state
-                for (i, (num_neuron, activation)) in layers:
-                    name = f'dense_{i}'
-                    linear = nn.Dense(features=num_neuron, kernel_init=init, name=name)
-                    hidden = activation(linear(hidden))
-                    if time_dependent:
-                        hidden = FiLM(num_neuron, name=f'film_{i}')(hidden, t_emb)
-                
-                # each output is a linear layer reshaped to original lifted shape
-                actions = {}
-                for (var, size) in layer_sizes.items():
-                    
-                    # for bool action, create logit head with sigmoid activation
-                    if ranges[var] == 'bool':
-                        if not use_constraint_satisfaction:
+            # output heads
+            for (var, size) in layer_sizes.items():
+                if ranges[var] != 'bool':
+                    name = f'dense_{layer_names[var]}_mu'
+                    params[name] = dense_init(next(keys), in_dim, size, init)
+                elif not use_constraint_satisfaction:
+                    name = f'dense_{layer_names[var]}_logit'
+                    params[name] = dense_init(next(keys), in_dim, size, init)
+            if use_constraint_satisfaction:
+                params['dense_topk'] = dense_init(next(keys), in_dim, num_topk_outputs, init)
+            return {'params': params}
 
-                            # linear head for logits
-                            name = f'dense_{layer_names[var]}_logit'
-                            linear = nn.Dense(features=size, kernel_init=init, name=name)
-                            logits = linear(hidden)
-                            logits = jnp.reshape(logits, logits.shape[:-1] + shapes[var])
-                            if not shapes[var]:
-                                logits = jnp.squeeze(logits)
-                            actions[var] = jax.nn.sigmoid(hyperparams[SIGMOID_KEY] * logits)
-                    
-                    # for real and int action, create mean head
-                    # project to valid ranges using Bueno et al. 2019 method
-                    else:
-                        # linear head for mean action
-                        name = f'dense_{layer_names[var]}_mu'
-                        linear = nn.Dense(features=size, kernel_init=init, name=name)
-                        action = linear(hidden)
-                        action = jnp.reshape(action, action.shape[:-1] + shapes[var])
-                        if not shapes[var]:
-                            action = jnp.squeeze(action)
+        def _jax_wrapped_drp_forward(params, fls, hyperparams, step, train, key):
+            params = params['params']
+            hidden = _jax_wrapped_drp_inputs(params, fls, hyperparams)
 
-                        # project to valid ranges using Bueno et al. 2019 method
-                        if wrap_non_bool:
-                            lower, upper = bounds[var]
-                            branches = [jnp.asarray(mask, dtype=compiled.REAL) 
-                                        for mask in cond_lists[var]]       
-                            actions[var] = _jax_bound_action(branches, lower, upper, action)
-                        else:
-                            actions[var] = action
-                
-                # for constraint satisfaction wrap bool actions with softmax
-                # one noop slot is added per allowed action so that up to k actions are
-                # selected, and the noop slots are dropped after selection
-                if use_constraint_satisfaction:
-                    num_noop_slots = rddl.max_allowed_actions
-                    linear = nn.Dense(
-                        features=bool_action_count + num_noop_slots, kernel_init=init,
-                        name='dense_topk')
-                    logits = linear(hidden)
-                    weight = hyperparams[SOFTMAX_KEY]
-                    topk = GumbelSoftmaxTopK(
-                        allowed_actions=rddl.max_allowed_actions, dtype=compiled.REAL)
-                    output = topk(key, logits, weight, train)
-                    actions[BOOL_KEY] = output[..., :bool_action_count]
-                return actions
-        predict_fn = DRP(name='drp')       
-        
+            # feed state vector through hidden layers
+            if time_dependent:
+                t_emb = time_embed(params.get('time_embed'), step)
+            for (i, (_, activation)) in layers:
+                hidden = activation(dense(params[f'dense_{i}'], hidden))
+                if time_dependent:
+                    film = params[f'film_{i}']
+                    hidden = dense(film['gamma'], t_emb) * hidden + dense(film['beta'], t_emb)
+
+            # each output is a linear layer reshaped to original lifted shape
+            actions = {}
+            for var in layer_sizes:
+
+                # for real and int action, create mean head
+                # project to valid ranges using Bueno et al. 2019 method
+                if ranges[var] != 'bool':
+                    action = dense(params[f'dense_{layer_names[var]}_mu'], hidden)
+                    action = jnp.reshape(action, shapes[var])
+                    if wrap_non_bool:
+                        lower, upper = bounds[var]
+                        branches = [jnp.asarray(mask, dtype=compiled.REAL)
+                                    for mask in cond_lists[var]]
+                        action = _jax_bound_action(branches, lower, upper, action)
+                    actions[var] = action
+
+                # for bool action, create logit head with sigmoid activation
+                elif not use_constraint_satisfaction:
+                    logits = dense(params[f'dense_{layer_names[var]}_logit'], hidden)
+                    logits = jnp.reshape(logits, shapes[var])
+                    actions[var] = jax.nn.sigmoid(hyperparams[SIGMOID_KEY] * logits)
+
+            # for constraint satisfaction wrap bool actions with top-k softmax
+            if use_constraint_satisfaction:
+                logits = dense(params['dense_topk'], hidden)
+                output = gumbel_softmax_top_k(
+                    key, logits, hyperparams[SOFTMAX_KEY], train,
+                    rddl.max_allowed_actions, compiled.REAL)
+                actions[BOOL_KEY] = output[..., :bool_action_count]
+            return actions
+
         # given a softmax output, this simply unpacks the result of the softmax back into
         # the original action fluent dictionary
         def _jax_unstack_bool_from_softmax(output):
@@ -1233,9 +1244,9 @@ class JaxDeepReactivePolicy(JaxPlan):
         # the main subroutine to compute the trainable rddl actions from the trainable
         # parameters and the current state/obs dictionary       
         def _jax_wrapped_drp_predict_train(sim_state, planner_state, train=1):
-            actions = predict_fn.apply(
-                planner_state.policy_params, sim_state.fls, planner_state.hyperparams, 
-                sim_state.step, train=train, rngs={"policy": sim_state.key})
+            actions = _jax_wrapped_drp_forward(
+                planner_state.policy_params, sim_state.fls, planner_state.hyperparams,
+                sim_state.step, train, sim_state.key)
             if not wrap_non_bool:
                 for (var, action) in actions.items():
                     if var != BOOL_KEY and ranges[var] != 'bool':
@@ -1292,7 +1303,7 @@ class JaxDeepReactivePolicy(JaxPlan):
             obs_vars = {var: value[0, ...] 
                         for (var, value) in sim_state.fls.items()
                         if var in observed_vars}
-            params = predict_fn.init(sim_state.key, obs_vars, hyperparams, 0, train=1)
+            params = _jax_wrapped_drp_init_params(sim_state.key, obs_vars, hyperparams)
             return params, hyperparams
         self.initializer = _jax_wrapped_drp_init
         

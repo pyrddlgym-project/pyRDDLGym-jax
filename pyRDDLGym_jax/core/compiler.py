@@ -13,6 +13,7 @@
 # ***********************************************************************
 
 
+import dataclasses
 from functools import partial
 import numpy as np
 import termcolor
@@ -23,7 +24,6 @@ import jax
 import jax.numpy as jnp
 import jax.random as random
 import jax.scipy as scipy 
-import flax
 import softjax as sj
 
 from pyRDDLGym.core.compiler.initializer import RDDLValueInitializer
@@ -121,7 +121,14 @@ safe_power = finite_grad(jnp.power)
 safe_hypot = finite_grad(jnp.hypot)
 
 
-@flax.struct.dataclass
+def pytree_dataclass(cls):
+    '''Frozen dataclass registered as a JAX pytree, with a replace method.'''
+    cls = dataclasses.dataclass(frozen=True)(cls)
+    cls.replace = dataclasses.replace
+    return jax.tree_util.register_dataclass(cls)
+
+
+@pytree_dataclass
 class JaxRDDLSimState:
     '''The state of a Jax RDDL simulator.'''
     key: jax.random.PRNGKey=None
