@@ -251,14 +251,15 @@ tuning = JaxParameterTuning(env=env,
 tuning.tune(key=42, log_file='path/to/log.csv')
 ```
 
-Hyper-parameters can also be integer (``Hyperparameter.integer``) or categorical (``Hyperparameter.categorical``), 
-and an optional ``transform`` maps the searched value to the value in the config (e.g. ``transform=lambda x: 2 ** x``).
-Values are substituted as written, so the tag of a string choice must be quoted in the template (e.g. ``optimizer='OPTIMIZER_TUNE'``).
-By default, configurations are suggested by Optuna's ``GPSampler`` if ``torch`` is installed (otherwise ``TPESampler``); any other Optuna ``sampler`` can be passed, 
+Details:
+- Hyper-parameters can be ``Hyperparameter.real``, ``Hyperparameter.integer`` or ``Hyperparameter.categorical``. 
+- An optional ``transform`` argument maps the searched value to the value in the config (e.g. ``transform=lambda x: 2 ** x``).
+- Values are substituted as written, so the tag of a string choice must be quoted in the template (e.g. ``optimizer='OPTIMIZER_TUNE'``).
+- By default, configurations are suggested by Optuna's ``GPSampler`` if ``torch`` is installed (otherwise ``TPESampler``); any other Optuna ``sampler`` can be passed, 
 as well as a ``pruner`` (e.g. ``optuna.pruners.WilcoxonPruner()``) to stop evaluating unpromising configurations early, 
 and a ``storage`` journal file to save and resume the study. The Optuna study is available afterwards as ``tuning.study``,
 where the return and training iterations of each run are kept in the ``user_attrs`` of each trial, and also saved in the ``log_file``.
-With ``show_dashboard=True``, the study is shown live in [optuna-dashboard](https://github.com/optuna/optuna-dashboard) (history, parameter importances, contours, etc.),
+- With ``show_dashboard=True``, the study is shown live in [optuna-dashboard](https://github.com/optuna/optuna-dashboard) (history, parameter importances, contours, etc.),
 and the training curves of each run in the JaxPlan dashboard, where run ``config=N`` is Optuna trial ``N``.
   
 
@@ -301,10 +302,12 @@ Some of the implementation details derive from the following literature, which y
 - [A Distributional Framework for Risk-Sensitive End-to-End Planning in Continuous MDPs, AAAI 2022](https://ojs.aaai.org/index.php/AAAI/article/view/21226)
 - [Deep reactive policies for planning in stochastic nonlinear domains, AAAI 2019](https://ojs.aaai.org/index.php/AAAI/article/view/4744)
 - [Stochastic Planning with Lifted Symbolic Trajectory Optimization, AAAI 2019](https://ojs.aaai.org/index.php/ICAPS/article/view/3467/3335)
+- [Large Scale Black-Box Optimization by Limited-Memory Matrix Adaptation, IEEE 2018](https://ieeexplore.ieee.org/document/8410043)
 - [Scalable planning with tensorflow for hybrid nonlinear domains, NeurIPS 2017](https://proceedings.neurips.cc/paper/2017/file/98b17f068d5d9b7668e19fb8ae470841-Paper.pdf)
 - [Baseline-Free Sampling in Parameter Exploring Policy Gradients: Super Symmetric PGPE, ANN 2015](https://link.springer.com/chapter/10.1007/978-3-319-09903-3_13)
 
 The model relaxations in JaxPlan are based on the following works:
+- [SoftJAX & SoftTorch: Empowering Automatic Differentiation Libraries with Informative Gradients, ICML 2026](https://openreview.net/forum?id=RKHDV40omz)
 - [Poisson Variational Autoencoder, NeurIPS 2025](https://proceedings.neurips.cc/paper_files/paper/2024/file/4f3cb9576dc99d62b80726690453716f-Paper-Conference.pdf)
 - [Analyzing Differentiable Fuzzy Logic Operators, AI 2022](https://www.sciencedirect.com/science/article/pii/S0004370221001533)
 - [Learning with algorithmic supervision via continuous relaxations, NeurIPS 2021](https://proceedings.neurips.cc/paper_files/paper/2021/file/89ae0fe22c47d374bc9350ef99e01685-Paper.pdf)
