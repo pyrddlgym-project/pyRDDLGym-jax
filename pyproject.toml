@@ -1,0 +1,55 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pyRDDLGym-jax"
+dynamic = ["version"]
+description = "pyRDDLGym-jax: automatic differentiation for solving sequential planning problems in JAX."
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.12"
+authors = [
+    {name = "Michael Gimelfarb", email = "mgimelfarb@yahoo.ca"},
+    {name = "Ayal Taitler", email = "ataitler@gmail.com"},
+    {name = "Scott Sanner", email = "ssanner@mie.utoronto.ca"},
+]
+dependencies = [
+    "pyRDDLGym>=2.7",
+    "rich>=14.0",
+    "jax>=0.9.0",
+    "softjax>=0.1.1",
+    "optax>=0.2.7",
+    "tensorflow-probability>=0.25.0",
+]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Intended Audience :: Science/Research",
+    "Natural Language :: English",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+[project.optional-dependencies]
+extra = ["optuna>=5.0", "optuna-dashboard", "rddlrepository>=2.0"]
+dashboard = ["dash>=4.0.0", "dash-bootstrap-components>=2.0.4"]
+
+[project.urls]
+Homepage = "https://github.com/pyrddlgym-project/pyRDDLGym-jax"
+
+[project.scripts]
+jaxplan = "pyRDDLGym_jax.entry_point:main"
+
+[tool.setuptools.dynamic]
+version = {attr = "pyRDDLGym_jax.__version__"}
+
+[tool.setuptools.packages.find]
+include = ["pyRDDLGym_jax*"]
+
+[tool.setuptools.package-data]
+"*" = ["*.cfg", "*.ico"]
