@@ -2566,8 +2566,8 @@ class JaxLMMAESPlanner(JaxPlanner):
             jnp.logical_not(state['initialized']) | (iteration == 2))
         gamma = jnp.where(initialize, 2. * median, gamma)
         initialized = state['initialized'] | initialize
-        damp = min(1., mu_eff / 10. / dim)
-        excess = relative - 3. * max(1., dim ** 0.5 / mu_eff)
+        damp = jnp.minimum(1., mu_eff / 10. / dim)
+        excess = relative - 3. * jnp.maximum(1., dim ** 0.5 / mu_eff)
         grow = jnp.exp(jnp.where(excess > 0, jnp.tanh(excess / 3.) / 2., 0.)) ** damp
         grown = gamma * grow
         grown = jnp.where(grown > 5. * median, grown * np.exp(-1. / 3.) ** damp, grown)
@@ -2683,7 +2683,7 @@ class JaxLMMAESPlanner(JaxPlanner):
             random.PRNGKey(0), None, self.batch_size_train, print_warnings=False)
         param_shapes, _ = jax.eval_shape(self.plan.initializer, sim_state)
         param_template = jax.tree_util.tree_map(
-            lambda leaf: jnp.zeros(leaf.shape, dtype=leaf.dtype), param_shapes)
+            lambda leaf: np.zeros(leaf.shape, dtype=leaf.dtype), param_shapes)
         _, unravel = jax.flatten_util.ravel_pytree(param_template)
         ravel = lambda params: jax.flatten_util.ravel_pytree(params)[0]
         n = max(sum(int(np.prod(leaf.shape))
@@ -2698,6 +2698,8 @@ class JaxLMMAESPlanner(JaxPlanner):
         num_directions = self.num_directions
         if num_directions is None:
             num_directions = 4 + int(3 * np.log(n))
+        if n == 1:
+            num_directions = 0
 
         # recombination weights of the samples sorted from best to worst
         ranks = np.arange(1, population_size + 1)
@@ -2727,16 +2729,16 @@ class JaxLMMAESPlanner(JaxPlanner):
             history_size = int(np.floor(20 + 3 * n / population_size))
 
         # learning rates of the step size and of the directions
-        c_sigma = 2. * population_size / n
+        c_sigma = min(1., 2. * population_size / n)
         powers = np.arange(num_directions)
         c_d = 1. / (np.power(1.5, powers) * n)
-        c_c = population_size / (np.power(4., powers) * n)
+        c_c = np.minimum(1., population_size / (np.power(4., powers) * n))
         path_scale_sigma = np.sqrt(mu_eff * c_sigma * (2. - c_sigma))
         path_scale_c = np.sqrt(mu_eff * c_c * (2. - c_c))
-        weights = jnp.asarray(weights, dtype=real_dtype)
-        c_d = jnp.asarray(c_d, dtype=real_dtype)
-        c_c = jnp.asarray(c_c, dtype=real_dtype)
-        path_scale_c = jnp.asarray(path_scale_c, dtype=real_dtype)
+        weights = np.asarray(weights, dtype=real_dtype)
+        c_d = np.asarray(c_d, dtype=real_dtype)
+        c_c = np.asarray(c_c, dtype=real_dtype)
+        path_scale_c = np.asarray(path_scale_c, dtype=real_dtype)
 
         # rank-based utilities of the samples for the diagonal scaling as in SNES
         lr_diagonal = self.learning_rate_diagonal
@@ -2744,7 +2746,7 @@ class JaxLMMAESPlanner(JaxPlanner):
             lr_diagonal = (3 + np.log(n)) / (5 * np.sqrt(n))
         utilities = np.maximum(0., np.log(population_size / 2 + 1) - np.log(ranks))
         utilities = utilities / np.sum(utilities) - 1. / population_size
-        utilities = jnp.asarray(utilities, dtype=real_dtype)
+        utilities = np.asarray(utilities, dtype=real_dtype)
 
         # ***********************************************************************
         # INITIALIZATION OF POLICY
@@ -2791,8 +2793,8 @@ class JaxLMMAESPlanner(JaxPlanner):
             if num_directions == 0:
                 return z
             def _jax_wrapped_apply_direction(j, d):
-                v = directions[j]
-                d_new = (1. - c_d[j]) * d + c_d[j] * jnp.outer(d @ v, v)
+                v, c = directions[j], jnp.asarray(c_d)[j]
+                d_new = (1. - c) * d + c * jnp.outer(d @ v, v)
                 return jnp.where(j < iteration, d_new, d)
             return jax.lax.fori_loop(0, num_directions, _jax_wrapped_apply_direction, z)
 
@@ -2801,7 +2803,7 @@ class JaxLMMAESPlanner(JaxPlanner):
             if num_directions == 0:
                 return z
             def _jax_wrapped_invert_direction(j, e):
-                v, c = directions[j], c_d[j]
+                v, c = directions[j], jnp.asarray(c_d)[j]
                 denom = (1. - c) + c * jnp.sum(jnp.square(v))
                 e_new = (e - c * jnp.outer(e @ v, v) / denom) / (1. - c)
                 return jnp.where(j < iteration, e_new, e)
@@ -2814,7 +2816,7 @@ class JaxLMMAESPlanner(JaxPlanner):
                 return z
             def _jax_wrapped_invert_direction(i, e):
                 j = num_directions - 1 - i
-                v, c = directions[j], c_d[j]
+                v, c = directions[j], jnp.asarray(c_d)[j]
                 denom = (1. - c) + c * jnp.sum(jnp.square(v))
                 e_new = (e - c * jnp.outer(e @ v, v) / denom) / (1. - c)
                 return jnp.where(j < iteration, e_new, e)
@@ -2822,9 +2824,11 @@ class JaxLMMAESPlanner(JaxPlanner):
 
         # samples z ~ N(0, I) made orthogonal in blocks of at most n: each sample keeps
         # its length, which is independent of its direction
-        def _jax_wrapped_orthogonal_normal(key, num_samples):
-            block = min(num_samples, n)
-            num_blocks = -(-num_samples // block)
+        num_samples = population_size // 2 if mirrored else population_size
+        block = min(num_samples, n)
+        num_blocks = int(np.ceil(num_samples / block))
+
+        def _jax_wrapped_orthogonal_normal(key):
             g = random.normal(key, shape=(num_blocks, block, n), dtype=real_dtype)
             q, r = jnp.linalg.qr(jnp.swapaxes(g, 1, 2))
             signs = jnp.sign(jnp.diagonal(r, axis1=1, axis2=2))
@@ -2834,9 +2838,8 @@ class JaxLMMAESPlanner(JaxPlanner):
 
         # samples z ~ N(0, I) and the transformed samples d = M z (optionally mirrored)
         def _jax_wrapped_sample(key, opt_state):
-            num_samples = population_size // 2 if mirrored else population_size
             if orthogonal:
-                z = _jax_wrapped_orthogonal_normal(key, num_samples)
+                z = _jax_wrapped_orthogonal_normal(key)
             else:
                 z = random.normal(key, shape=(num_samples, n), dtype=real_dtype)
             d = _jax_wrapped_transform(z, opt_state['directions'], opt_state['iteration'])
