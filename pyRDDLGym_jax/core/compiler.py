@@ -1695,7 +1695,7 @@ class JaxRDDLCompiler:
     
     def _jax_fmod(self, expr, aux):
         aux['exact'].add(expr.id)
-        return self._jax_binary_helper(expr, aux, finite_grad(jnp.fmod), at_least_int=True)
+        return self._jax_binary_helper(expr, aux, finite_grad(jnp.mod), at_least_int=True)
     
     def _jax_min(self, expr, aux):
         aux['exact'].add(expr.id)
