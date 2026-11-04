@@ -118,12 +118,15 @@ class JaxPlannerProgress:
 
     def update(self, iteration, progress, elapsed, status, train_loss, test_loss,
                test_violations, test_index, best_loss, best_violations, best_found_by,
-               aux_loss, aux_violations, aux_index) -> None:
+               aux_loss, aux_violations, aux_index, statistics, aux_statistics) -> None:
         '''Records references to the latest statistics: arrays must not be modified in
-        place afterwards. The aux arguments are None without an auxiliary planner.'''
+        place afterwards. The aux arguments are None without an auxiliary planner, and
+        statistics map the names of any other values to show to one value per parallel
+        policy.'''
         self._state = (iteration, progress, elapsed, status, train_loss, test_loss,
                        test_violations, test_index, best_loss, best_violations,
-                       best_found_by, aux_loss, aux_violations, aux_index)
+                       best_found_by, aux_loss, aux_violations, aux_index, statistics,
+                       aux_statistics)
         if self._live is None:
             now = time.monotonic()
             if now - self._last_plain >= self.plain_interval:
@@ -145,26 +148,40 @@ class JaxPlannerProgress:
         else:
             return 'F' if violations == 0 else ' '
 
-    def _columns(self, state):
-        (_, _, _, _, train_loss, test_loss, test_violations, test_index, best_loss,
-         best_violations, best_found_by, aux_loss, aux_violations, aux_index) = state
-        names = ['train', 'test']
-        values = [f'{-train_loss[test_index]:.5f}',
-                  f'{-test_loss[test_index]:.5f}{self._marker(test_violations[test_index])}']
+    def _groups(self, state):
+        '''Returns the groups of columns (name, value, style) to show: the returns and
+        status, the statistics of the planner, and those of the auxiliary planner.'''
+        (_, _, _, status, train_loss, test_loss, test_violations, test_index, best_loss,
+         best_violations, best_found_by, aux_loss, aux_violations, aux_index,
+         statistics, aux_statistics) = state
+        returns = [
+            ('train', f'{-train_loss[test_index]:.5f}', None),
+            ('test', f'{-test_loss[test_index]:.5f}'
+                     f'{self._marker(test_violations[test_index])}', None)
+        ]
         if aux_loss is not None:
-            names.append('aux')
-            values.append(f'{-aux_loss[aux_index]:.5f}'
-                          f'{self._marker(aux_violations[aux_index])}')
-        names.append('best')
-        values.append(f'{best_found_by} {-best_loss:.5f}{self._marker(best_violations)}')
-        return names, values
+            returns.append(('aux', f'{-aux_loss[aux_index]:.5f}'
+                                   f'{self._marker(aux_violations[aux_index])}', None))
+        returns.append(('best', f'{best_found_by} {-best_loss:.5f}'
+                                f'{self._marker(best_violations)}', None))
+        returns.append(('status', status.name, STATUS_STYLES.get(status.get_type())))
+        groups = [returns]
+
+        # statistics of the policies whose returns are shown
+        if statistics:
+            groups.append([(name, f'{value[test_index]:.4g}', None)
+                           for (name, value) in statistics.items()])
+        if aux_statistics:
+            groups.append([(f'aux {name}', f'{value[aux_index]:.4g}', None)
+                           for (name, value) in aux_statistics.items()])
+        return groups
 
     def _plain_line(self, state) -> str:
-        it, progress, elapsed, status = state[:4]
-        names, values = self._columns(state)
-        stats = ' | '.join(f'{value} {name}' for (name, value) in zip(names, values))
+        it, progress, elapsed = state[:3]
+        stats = ' || '.join(' | '.join(f'{value} {name}' for (name, value, _) in group)
+                            for group in self._groups(state))
         return (f'{self.label}{progress:5.1f}% {_format_seconds(elapsed)} | {it} it | '
-                f'{stats} | {status.name} status | {(it + 1) / (elapsed + 1e-6):.2f} it/s')
+                f'{stats} | {(it + 1) / (elapsed + 1e-6):.2f} it/s')
 
     def __rich_console__(self, console, options):
         state = self._state
@@ -172,7 +189,7 @@ class JaxPlannerProgress:
             yield Segment(f'{self.label}compiling...', DIM)
             yield NEWLINE
             return
-        it, progress, elapsed, status = state[:4]
+        it, progress, elapsed = state[:3]
 
         # progress bar in half cells, filling the width not used by the counters
         counters = f' {progress:3.0f}% {_format_seconds(elapsed)} {it} it '
@@ -185,17 +202,37 @@ class JaxPlannerProgress:
         yield Segment(speed, DIM)
         yield NEWLINE
 
-        # table of returns and status in columns aligned to the widest entry
-        names, values = self._columns(state)
-        widths = [max(len(name), len(value)) for (name, value) in zip(names, values)]
-        indent = ' ' * len(self.label)
-        yield Segment(indent + '  '.join(
-            name.rjust(w) for (name, w) in zip(names, widths)) + '  status', BOLD)
-        yield NEWLINE
-        yield Segment(indent + '  '.join(
-            value.rjust(w) for (value, w) in zip(values, widths)) + '  ')
-        yield Segment(status.name, STATUS_STYLES.get(status.get_type()))
-        yield NEWLINE
+        # table of columns aligned to their widest entry, with groups separated by a
+        # divider and wrapped into rows that fit the width of the console: a group starts
+        # a new row if it does not fit in the current row but fits in a row of its own
+        indent = len(self.label)
+        divider = ' | ' if options.ascii_only or options.legacy_windows else ' │ '
+        rows, row, used = [], [], indent
+        for group in self._groups(state):
+            widths = [max(len(name), len(value)) for (name, value, _) in group]
+            group_width = sum(widths) + 2 * (len(widths) - 1)
+            if row and used + 3 + group_width > options.max_width \
+            and indent + group_width <= options.max_width:
+                rows.append(row)
+                row, used = [], indent
+            for (k, ((name, value, style), width)) in enumerate(zip(group, widths)):
+                separator = '' if not row else ('  ' if k else divider)
+                if row and used + len(separator) + width > options.max_width:
+                    rows.append(row)
+                    row, used, separator = [], indent, ''
+                row.append((separator, name.rjust(width), value.rjust(width), style))
+                used += len(separator) + width
+        rows.append(row)
+        for row in rows:
+            for line in (1, 2):
+                yield Segment(' ' * indent)
+                for (separator, name, value, style) in row:
+                    yield Segment(separator, DIM)
+                    if line == 1:
+                        yield Segment(name, BOLD)
+                    else:
+                        yield Segment(value, style)
+                yield NEWLINE
 
 
 def format_value(value: Any) -> str:

@@ -305,6 +305,12 @@ def _jax_zero_tree(tree: Pytree) -> bool:
     return jnp.all(jnp.asarray(leaves))
 
 
+def _jax_tree_mean(tree: Pytree) -> jnp.ndarray:
+    '''Returns the mean of all entries of the leaves of a tree.'''
+    leaves = jax.tree_util.tree_leaves(tree)
+    return sum(jnp.sum(leaf) for leaf in leaves) / sum(jnp.size(leaf) for leaf in leaves)
+
+
 class JaxActionRepair:
     '''Repairs actions to satisfy the action preconditions of the exact model by moving
     them towards the default actions.'''
@@ -618,8 +624,9 @@ class JaxPlanner(metaclass=ABCMeta):
             -> (train_sim_state, test_sim_state, planner_state, loss, converged, log,
                 zero_grads)
             performs one update of all parallel policies; the log is a dictionary that
-            may contain the 'grad' (descent direction) of the update, as well as the
-            'fluents' and 'error' codes of the rollouts on the relaxed model
+            may contain the 'grad' (descent direction) of the update, the 'fluents' and
+            'error' codes of the rollouts on the relaxed model, and 'statistics' of the
+            optimizer to report (a dictionary of name to one value per parallel policy)
 
     A planner can run another planner alongside it as an auxiliary planner, which then
     shares the models, policy and losses of the planner it is passed to: the policy
@@ -973,13 +980,27 @@ class JaxPlanner(metaclass=ABCMeta):
             self.test_rollouts, self.test_compiled, use_symlog=False)
         vmap_axes = (JaxRDDLSimState(model_params=0), JaxPlannerState(policy_params=0))
         batched_test_loss = jax.vmap(self.single_test_loss, in_axes=vmap_axes)
+        batch_size_test = self.batch_size_test
+        check_preconditions = self.check_preconditions
+
+        # statistics of the test rollouts to report
+        def _jax_wrapped_test_statistics(log):
+            statistics = {}
+            if batch_size_test > 1:
+                statistics['test SE'] = jnp.std(log['returns'], axis=1, ddof=1) / np.sqrt(
+                    batch_size_test)
+            if check_preconditions:
+                statistics['repaired'] = jnp.mean(log['repair']['infeasible'], axis=(1, 2))
+            return statistics
 
         # the test loss of a policy with non-finite parameters is invalid
         def _jax_wrapped_test_loss(sim_state, planner_state):
-            loss, aux = batched_test_loss(sim_state, planner_state)
+            loss, (log, model_params) = batched_test_loss(sim_state, planner_state)
+            log['statistics'] = _jax_wrapped_test_statistics(log)
             finite = [jnp.all(jnp.isfinite(leaf), axis=tuple(range(1, jnp.ndim(leaf))))
                       for leaf in jax.tree_util.tree_leaves(planner_state.policy_params)]
-            return jnp.where(jnp.all(jnp.stack(finite), axis=0), loss, jnp.inf), aux
+            loss = jnp.where(jnp.all(jnp.stack(finite), axis=0), loss, jnp.inf)
+            return loss, (log, model_params)
         self.test_loss = jax.jit(_jax_wrapped_test_loss)
 
     @abstractmethod
@@ -1116,6 +1137,7 @@ class JaxPlanner(metaclass=ABCMeta):
 
             # evaluate cumulative return per rollout
             returns = _jax_wrapped_returns(rewards, critic_values)
+            log['returns'] = returns
             loss = -utility_fn(returns, **utility_kwargs)
             aux = (log, model_params)
             return loss, aux
@@ -1151,6 +1173,13 @@ class JaxPlanner(metaclass=ABCMeta):
         fewer violations, or as many violations and a smaller loss.'''
         return np.less(violations, best_violations) | (
             np.equal(violations, best_violations) & np.less(loss, best_loss))
+
+    @staticmethod
+    def _statistics(train_log, test_log):
+        '''Returns the statistics to report of the optimizer and of the test rollouts in
+        the given logs, each with one value per parallel policy.'''
+        return {name: np.asarray(value) for (name, value) in {
+            **train_log.get('statistics', {}), **test_log['statistics']}.items()}
 
     def _batched_pytree(self, pytree):
         def make_batched(x):
@@ -1570,6 +1599,9 @@ class JaxPlanner(metaclass=ABCMeta):
             test_violations = np.where(np.isfinite(test_loss), test_violations, np.inf)
             test_violations_smooth = rolling_test_violations.update(test_violations)
 
+            # statistics to report of the optimizer and of the test rollouts
+            statistics = self._statistics(train_log, test_log)
+
             # ==================================================================
             # AUXILIARY PLANNER UPDATE STEP
             # ==================================================================
@@ -1583,7 +1615,8 @@ class JaxPlanner(metaclass=ABCMeta):
                     opt_state=aux_state.opt_state,
                     opt_aux=aux_state.opt_aux
                 )
-                _, test_sim_state, aux_state, _, aux_converged, _, _ = auxiliary.update(
+                (_, test_sim_state, aux_state, _, aux_converged, aux_train_log,
+                 _) = auxiliary.update(
                     train_sim_state.replace(key=aux_key),
                     test_sim_state.replace(key=aux_key), aux_state)
                 
@@ -1595,6 +1628,7 @@ class JaxPlanner(metaclass=ABCMeta):
                 aux_violations = np.mean(np.asarray(aux_log['violations']), axis=1)
                 aux_violations = np.where(np.isfinite(aux_loss), aux_violations, np.inf)
                 aux_violations_smooth = rolling_aux_violations.update(aux_violations)
+                aux_statistics = self._statistics(aux_train_log, aux_log)
 
                 # each planner stalls when its own plans did not improve over the patience
                 patience = 100 * self.auxiliary_patience
@@ -1655,6 +1689,7 @@ class JaxPlanner(metaclass=ABCMeta):
                         total_primary_it += 1
             else:
                 aux_loss = aux_loss_smooth = aux_violations = aux_violations_smooth = None
+                aux_statistics = None
 
             # ==================================================================
             # STATUS CHECKS AND LOGGING
@@ -1793,7 +1828,9 @@ class JaxPlanner(metaclass=ABCMeta):
                 'auxiliary_improved': aux_improve,
                 'auxiliary_adopted': total_aux_it,
                 'auxiliary_given': total_primary_it,
-                'auxiliary_params': None if aux_state is None else aux_state.policy_params,                
+                'auxiliary_params': None if aux_state is None else aux_state.policy_params,
+                'statistics': statistics,
+                'auxiliary_statistics': aux_statistics
             }
 
             # stopping condition reached
@@ -1810,7 +1847,8 @@ class JaxPlanner(metaclass=ABCMeta):
                     it, progress_percent, elapsed, status, train_loss, test_loss_smooth,
                     test_violations_smooth, test_index, best_loss, best_violations,
                     best_found_by, aux_loss_smooth, aux_violations_smooth,
-                    aux_index if auxiliary is not None else None)
+                    aux_index if auxiliary is not None else None, statistics,
+                    aux_statistics)
         
             # dashboard
             if dashboard is not None:            
@@ -1846,13 +1884,15 @@ class JaxPlanner(metaclass=ABCMeta):
             _, (final_log, _) = self.test_loss(test_sim_state, final_planner_state)
             final_returns = np.sum(final_log['reward'], axis=2)
             best_returns = np.ravel(final_returns[best_index])
+
+            # calculate other statistics for summary
             mean, rlo, rhi = self._ci_bootstrap(best_returns, key[0].item())            
             if self.check_preconditions:
                 final_violations = np.mean(final_log['violations'][best_index])
                 repairs = JaxActionRepair.statistics(final_log)
-                violations_info = (f'    best violations:  {final_violations:.5f} '
+                violations_info = (f'    best violations:    {final_violations:.5f} '
                                    f'steps per rollout\n'
-                                   f'    best repairs:     {repairs["repaired"]:.1%} of '
+                                   f'    best repairs:       {repairs["repaired"]:.1%} of '
                                    f'steps, {repairs["resets_per_repair"]:.2f} resets '
                                    f'per repair, {repairs["failed"]:.1%} of steps '
                                    f'infeasible after repair\n')
@@ -2466,16 +2506,17 @@ class JaxPGPEPlanner(JaxPlanner):
             planner_state = planner_state.replace(policy_params=params, opt_state=opt_state)
             sim_state = sim_state.replace(key=keys[0])
             zero_grads = jax.vmap(_jax_zero_tree)(grad)
-            return sim_state, planner_state, loss, converged, grad, zero_grads
+            statistics = {'mean sigma': jax.vmap(_jax_tree_mean)(opt_state['sigma'])}
+            return sim_state, planner_state, loss, converged, grad, zero_grads, statistics
         update_fn = jax.jit(_jax_wrapped_batched_pgpe_updates)
 
         # the exact model is optimized, which advances the test simulation state: the
         # key of the train simulation state is advanced with it
         def _jax_wrapped_update(train_sim_state, test_sim_state, planner_state):
-            test_sim_state, planner_state, loss, converged, grad, zero_grads = update_fn(
-                test_sim_state, planner_state)
+            (test_sim_state, planner_state, loss, converged, grad, zero_grads,
+             statistics) = update_fn(test_sim_state, planner_state)
             train_sim_state = train_sim_state.replace(key=test_sim_state.key)
-            log = {'grad': grad}
+            log = {'grad': grad, 'statistics': statistics}
             return (train_sim_state, test_sim_state, planner_state, loss, converged, log,
                     zero_grads)
         self.update = _jax_wrapped_update
@@ -3014,16 +3055,17 @@ class JaxLMMAESPlanner(JaxPlanner):
             planner_state = planner_state.replace(policy_params=params, opt_state=opt_state)
             sim_state = sim_state.replace(key=keys[0])
             zero_grads = jax.vmap(_jax_zero_tree)(grad)
-            return sim_state, planner_state, loss, converged, grad, zero_grads
+            statistics = {'sigma': opt_state['sigma']}
+            return sim_state, planner_state, loss, converged, grad, zero_grads, statistics
         update_fn = jax.jit(_jax_wrapped_batched_lmmaes_updates)
 
         # the exact model is optimized, which advances the test simulation state: the
         # key of the train simulation state is advanced with it
         def _jax_wrapped_update(train_sim_state, test_sim_state, planner_state):
-            test_sim_state, planner_state, loss, converged, grad, zero_grads = update_fn(
-                test_sim_state, planner_state)
+            (test_sim_state, planner_state, loss, converged, grad, zero_grads,
+             statistics) = update_fn(test_sim_state, planner_state)
             train_sim_state = train_sim_state.replace(key=test_sim_state.key)
-            log = {'grad': grad}
+            log = {'grad': grad, 'statistics': statistics}
             return (train_sim_state, test_sim_state, planner_state, loss, converged, log,
                     zero_grads)
         self.update = _jax_wrapped_update
@@ -3187,6 +3229,7 @@ class JaxBackpropPlanner(JaxPlanner):
                 )
             _, *rest, end_log = carry
             zero_grads = _jax_zero_tree(end_log['grad'])
+            end_log['statistics'] = {'grad norm': optax.tree.norm(end_log['grad'])}
             return (*rest, end_log, zero_grads)
         
         # for parallel policy update, just do each policy update in parallel
