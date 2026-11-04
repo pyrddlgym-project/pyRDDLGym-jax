@@ -110,11 +110,12 @@ class JaxOfflineController(BaseAgent):
         self.callback = None
         self.fls_hist = _init_fls_hist(self.planner)
         if not self.train_on_reset and not self.params_given:
-            callback = self.planner.optimize(key=self.key, **self.train_kwargs)
+            self.key, subkey = random.split(self.key)
+            callback = self.planner.optimize(key=subkey, **self.train_kwargs)
             self.callback = callback
             params = callback['best_params'] 
             if not self.hyperparams_given:
-                self.eval_hyperparams = callback['policy_hyperparams']
+                self.eval_hyperparams = callback['best_policy_hyperparams']
 
             # save the policy
             if save_path is not None:
@@ -148,11 +149,12 @@ class JaxOfflineController(BaseAgent):
 
         # train the policy if required to reset at the start of every episode
         if self.train_on_reset and not self.params_given:
-            callback = self.planner.optimize(key=self.key, **self.train_kwargs)
+            self.key, subkey = random.split(self.key)
+            callback = self.planner.optimize(key=subkey, **self.train_kwargs)
             self.callback = callback
             self.params = callback['best_params']
             if not self.hyperparams_given:
-                self.eval_hyperparams = callback['policy_hyperparams']
+                self.eval_hyperparams = callback['best_policy_hyperparams']
 
 
 class JaxOnlineController(BaseAgent):
@@ -193,14 +195,15 @@ class JaxOnlineController(BaseAgent):
 
         # we train the policy from the current state every time we step()
         planner = self.planner
+        self.key, subkey = random.split(self.key)
         callback = planner.optimize(
-            key=self.key, guess=self.guess, policy_hyperparams=self.hyperparams, 
+            key=subkey, guess=self.guess, policy_hyperparams=self.hyperparams,
             subs=state, **self.train_kwargs
         )
         self.callback = callback
         params = callback['best_params']
         if not self.hyperparams_given:
-            self.eval_hyperparams = callback['policy_hyperparams']
+            self.eval_hyperparams = callback['best_policy_hyperparams']
 
         # get the action from the parameters for the current state
         # TODO: allow history carryover between real-time actions
@@ -216,7 +219,7 @@ class JaxOnlineController(BaseAgent):
         self.step += 1
         if self.warm_start:
             self.guess = planner.plan.guess_next_epoch(params)
-            self.hyperparams = callback['policy_hyperparams']
+            self.hyperparams = callback['best_policy_hyperparams']
         return actions
         
     def reset(self) -> None:
