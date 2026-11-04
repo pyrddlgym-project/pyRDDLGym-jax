@@ -1170,6 +1170,13 @@ class JaxDeepReactivePolicy(JaxPlan):
                     }
                 in_dim = num_neuron
 
+            # without hidden layers, the inputs are conditioned on time instead
+            if time_dependent and not layers:
+                params['film_inputs'] = {
+                    'gamma': dense_init(next(keys), time_embed.dim, in_dim),
+                    'beta': dense_init(next(keys), time_embed.dim, in_dim)
+                }
+
             # output heads
             for (var, size) in layer_sizes.items():
                 if ranges[var] != 'bool':
@@ -1189,6 +1196,9 @@ class JaxDeepReactivePolicy(JaxPlan):
             # feed state vector through hidden layers
             if time_dependent:
                 t_emb = time_embed(params.get('time_embed'), step)
+                if not layers:
+                    film = params['film_inputs']
+                    hidden = dense(film['gamma'], t_emb) * hidden + dense(film['beta'], t_emb)
             for (i, (_, activation)) in layers:
                 hidden = activation(dense(params[f'dense_{i}'], hidden))
                 if time_dependent:
@@ -1304,6 +1314,8 @@ class JaxDeepReactivePolicy(JaxPlan):
                         for (var, value) in sim_state.fls.items()
                         if var in observed_vars}
             params = _jax_wrapped_drp_init_params(sim_state.key, obs_vars, hyperparams)
+            params = jax.tree_util.tree_map(
+                lambda leaf: jnp.asarray(leaf, dtype=compiled.REAL), params)
             return params, hyperparams
         self.initializer = _jax_wrapped_drp_init
         

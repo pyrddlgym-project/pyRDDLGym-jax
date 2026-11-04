@@ -391,7 +391,7 @@ class JaxParameterTuning:
                 queue.put((experiment_id,
                            JaxPlannerDashboard.compact_callback(callback, planner.rddl)))
         best_params = None if callback is None else callback['best_params']
-        hyperparams = None if callback is None else callback['policy_hyperparams']
+        hyperparams = None if callback is None else callback['best_policy_hyperparams']
 
         # evaluate the policy in the real environment with its training hyper-parameters
         policy = JaxOfflineController(

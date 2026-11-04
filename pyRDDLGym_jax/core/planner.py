@@ -288,6 +288,12 @@ def _build_optax_optimizer(optimizer, optimizer_kwargs, clip_grad, noise_kwargs,
     return optax.chain(*pipeline), injected, use_loss_metric
 
 
+def _iteration_keys(key: random.PRNGKey, num: int, chunk: int=1024):
+    while True:
+        key, subkey = random.split(key)
+        yield from np.asarray(random.split(subkey, num=(chunk, num)))
+
+
 @jax.jit
 def _unbatched_pytree(tree: Pytree, i: int) -> Pytree:
     return jax.tree_util.tree_map(lambda x: x[i], tree)
@@ -366,6 +372,9 @@ class JaxActionRepair:
         # rounding differences between evaluations of the preconditions (e.g. in float64)
         num_bisections = (np.finfo(REAL).nmant + 1) // 2
 
+        # number of coordinates of the non-bool actions whose resets are evaluated at once
+        reset_batch_size = max(1, min(64, int(sum(sizes[var] for var in other_vars))))
+
         def _jax_wrapped_feasible(sim_state, fls, actions):
             fls = {**fls, **actions}
             return precond_fn(sim_state.key, NORMAL, fls, sim_state.nfls, params)[0]
@@ -407,6 +416,7 @@ class JaxActionRepair:
                      for var in bool_vars])
                 flat_default = jnp.asarray(bool_default)
                 active = flat != flat_default
+                num_active = jnp.sum(active)
                 order = jnp.argsort(jnp.where(active, jnp.abs(score - 0.5), jnp.inf))
 
                 def _jax_wrapped_targeted_reset(carry):
@@ -431,11 +441,11 @@ class JaxActionRepair:
                 unflats = _jax_wrapped_unflatten(flat, bool_splits, bool_vars)
                 violations = _jax_wrapped_violations(sim_state, fls, unflats)
                 _, flat, _ = jax.lax.while_loop(
-                    lambda carry: (carry[0] < flat.size) & (carry[2] > 0),
+                    lambda carry: (carry[0] < num_active) & (carry[2] > 0),
                     _jax_wrapped_targeted_reset, (0, flat, violations))
                 unflats = _jax_wrapped_unflatten(flat, bool_splits, bool_vars)
                 _, flat, _ = jax.lax.while_loop(
-                    lambda carry: (carry[0] < flat.size) & jnp.logical_not(carry[2]),
+                    lambda carry: (carry[0] < num_active) & jnp.logical_not(carry[2]),
                     _jax_wrapped_reset,
                     (0, flat, _jax_wrapped_feasible(sim_state, fls, unflats)))
                 resets = jnp.sum(flat != initial).astype(REAL)
@@ -477,17 +487,26 @@ class JaxActionRepair:
                             jnp.where(feasible, high, mid),
                             jnp.where(feasible, candidate, best))
 
-                violations = _jax_wrapped_violations(sim_state, fls, {})
-                reset_violations = jax.vmap(_jax_wrapped_reset_violations)(
-                    jnp.arange(proposal.size))
-                involved = (proposal != origin) & (reset_violations < violations)
-                interp_0 = _jax_wrapped_flat_actions(_jax_wrapped_interpolate(0., involved))
-                feasible_0 = _jax_wrapped_feasible(sim_state, fls, interp_0)
-                involved = jnp.where(feasible_0, involved, True)
+                # the actions whose reset alone reduces the violations are involved
+                def _jax_wrapped_involved(carry):
+                    violations = _jax_wrapped_violations(sim_state, fls, {})
+                    reset_violations = jax.lax.map(
+                        _jax_wrapped_reset_violations, jnp.arange(proposal.size),
+                        batch_size=reset_batch_size)
+                    involved = (proposal != origin) & (reset_violations < violations)
+                    interp_0 = _jax_wrapped_flat_actions(
+                        _jax_wrapped_interpolate(0., involved))
+                    feasible_0 = _jax_wrapped_feasible(sim_state, fls, interp_0)
+                    return True, jnp.where(feasible_0, involved, True)
+
+                feasible = _jax_wrapped_feasible(sim_state, fls, {})
+                _, involved = jax.lax.while_loop(
+                    lambda carry: jnp.logical_not(carry[0] | feasible),
+                    _jax_wrapped_involved,
+                    (False, jnp.ones(proposal.shape, dtype=jnp.bool_)))
                 involved_0_1 = _jax_wrapped_interpolate(0., involved)
 
                 # the bisection is skipped if the actions are feasible, which keeps them
-                feasible = _jax_wrapped_feasible(sim_state, fls, {})
                 _, low, _, best = jax.lax.while_loop(
                     lambda bounds: (bounds[0] < num_bisections) & jnp.logical_not(feasible),
                     _jax_wrapped_bisect,
@@ -527,19 +546,27 @@ class JaxActionRepair:
         defaults = {var: np.asarray(value, dtype=self.compiled.REAL)
                     for (var, value) in self._defaults.items()}
 
-        def _jax_wrapped_repair_relaxed_actions(sim_state, planner_state, actions):
+        def _jax_wrapped_exact_values(values):
             exact = {}
-            for var in defaults:
-                if ranges[var] == 'bool':
-                    exact[var] = actions[var] > 0.5
-                elif ranges[var] == 'real':
-                    exact[var] = actions[var]
+            for (var, value) in values.items():
+                prange = ranges.get(var, 'real')
+                if prange == 'bool':
+                    exact[var] = value > 0.5
+                elif prange == 'real':
+                    exact[var] = value
                 else:
-                    exact[var] = jnp.asarray(jnp.round(actions[var]), dtype=INT)
+                    exact[var] = jnp.asarray(jnp.round(value), dtype=INT)
+            return exact
+
+        def _jax_wrapped_repair_relaxed_actions(sim_state, planner_state, actions):
+            exact = _jax_wrapped_exact_values({var: actions[var] for var in defaults})
+
             # the repair is not differentiated (its loops are not reverse-differentiable)
+            exact_sim_state = sim_state.replace(
+                fls=_jax_wrapped_exact_values(jax.lax.stop_gradient(sim_state.fls)),
+                nfls=_jax_wrapped_exact_values(jax.lax.stop_gradient(sim_state.nfls)))
             _, info, kept, step = repair_fn(
-                sim_state.replace(fls=jax.lax.stop_gradient(sim_state.fls)),
-                *jax.lax.stop_gradient(({**actions, **exact}, actions)))
+                exact_sim_state, *jax.lax.stop_gradient(({**actions, **exact}, actions)))
             repaired = dict(actions)
             for var in defaults:
                 if ranges[var] == 'bool':
@@ -746,11 +773,12 @@ class JaxPlanner(metaclass=ABCMeta):
                 '[INFO] cache_full_train_rollouts will be set to True '
                 'because state processor or dashboard requested. ', 'dark_grey'
             ))
-        if (not cache_full_test_rollouts) and self.dashboard is not None:
+        if (not cache_full_test_rollouts) \
+        and (self.preprocessor is not None or self.dashboard is not None):
             cache_full_test_rollouts = True
             print(termcolor.colored(
                 '[INFO] cache_full_test_rollouts will be set to True '
-                'because dashboard requested. ', 'dark_grey'
+                'because state processor or dashboard requested. ', 'dark_grey'
             ))
         self.cache_full_train_rollouts = cache_full_train_rollouts
         self.cache_full_test_rollouts = cache_full_test_rollouts
@@ -1439,13 +1467,19 @@ class JaxPlanner(metaclass=ABCMeta):
         # INITIALIZATION OF PLANNER STATE
         # ======================================================================
         
+        key, init_key = random.split(key)
+        iteration_keys = _iteration_keys(key, num=3)
         planner_state = JaxPlannerState(
             hyperparams=policy_hyperparams, critic_params=critic_params, progress=0.)
         if guess is not None:
             if policy_hyperparams is None:
                 raise ValueError('guess was provided without policy_hyperparams.')
             planner_state = planner_state.replace(policy_params=self._batched_pytree(guess))
-        planner_state = self.initialize(train_sim_state, planner_state, guess is None)
+        planner_state = self.initialize(
+            train_sim_state.replace(key=init_key), planner_state, guess is None)
+        if policy_hyperparams is not None:
+            planner_state = planner_state.replace(
+                hyperparams={**planner_state.hyperparams, **policy_hyperparams})
         planner_state = planner_state.replace(
             policy_params=self._shard_parallel(planner_state.policy_params, sharding),
             opt_state=self._shard_parallel(planner_state.opt_state, sharding),
@@ -1469,6 +1503,7 @@ class JaxPlanner(metaclass=ABCMeta):
         
         # initialize running statistics
         best_params = _unbatched_pytree(planner_state.policy_params, 0)
+        best_hyperparams = planner_state.hyperparams
         best_loss, pbest_loss, best_grad = np.inf, np.inf, None
         best_violations, pbest_violations = np.inf, np.inf
         best_index = 0
@@ -1477,7 +1512,7 @@ class JaxPlanner(metaclass=ABCMeta):
         rolling_test_loss = RollingMean(test_rolling_window)
         rolling_test_violations = RollingMean(test_rolling_window)
         status = JaxPlannerStatus.NORMAL
-        progress_percent = 0
+        progress_percent = 0.
         total_aux_it = total_primary_it = 0
         primary_stall = auxiliary_stall = 0.
         aux_pbest_loss = aux_pbest_violations = np.inf
@@ -1514,20 +1549,14 @@ class JaxPlanner(metaclass=ABCMeta):
             # ==================================================================
             
             # update the parameters of the plan
+            update_key, test_key, aux_key = next(iteration_keys)
             (train_sim_state, test_sim_state, planner_state, train_loss, converged,
-             train_log, zero_grads) = self.update(train_sim_state, test_sim_state, planner_state)
-
-            # update the preprocessor    
-            proc_key = Preprocessor.HYPERPARAMS_KEY
-            if self.preprocessor is not None and proc_key in planner_state.hyperparams \
-            and 'fluents' in train_log:
-                hyperparams = dict(planner_state.hyperparams)
-                hyperparams[proc_key] = self.preprocessor.update(
-                    train_log['fluents'], hyperparams[proc_key])
-                planner_state = planner_state.replace(hyperparams=hyperparams)
+             train_log, zero_grads) = self.update(
+                train_sim_state.replace(key=update_key),
+                test_sim_state.replace(key=update_key), planner_state)
 
             # evaluate
-            test_sim_state = test_sim_state.replace(key=train_sim_state.key)
+            test_sim_state = test_sim_state.replace(key=test_key)
             eval_sim_state = test_sim_state
             test_loss, (test_log, model_params_test) = self.test_loss(
                 test_sim_state, planner_state)
@@ -1555,7 +1584,8 @@ class JaxPlanner(metaclass=ABCMeta):
                     opt_aux=aux_state.opt_aux
                 )
                 _, test_sim_state, aux_state, _, aux_converged, _, _ = auxiliary.update(
-                    train_sim_state, test_sim_state, aux_state)
+                    train_sim_state.replace(key=aux_key),
+                    test_sim_state.replace(key=aux_key), aux_state)
                 
                 # evaluate with the state of this planner to reuse the compiled test loss
                 aux_loss, (aux_log, _) = self.test_loss(
@@ -1637,6 +1667,7 @@ class JaxPlanner(metaclass=ABCMeta):
                                test_loss_smooth[test_index], best_violations, best_loss):
                 best_index = test_index
                 best_params = _unbatched_pytree(planner_state.policy_params, best_index)
+                best_hyperparams = planner_state.hyperparams
                 if train_grad is not None:
                     best_grad = _unbatched_pytree(train_grad, best_index)
                 best_loss = test_loss_smooth[best_index]
@@ -1651,6 +1682,7 @@ class JaxPlanner(metaclass=ABCMeta):
                                    aux_loss_smooth[aux_index], best_violations, best_loss):
                     best_index = aux_index
                     best_params = _unbatched_pytree(aux_state.policy_params, aux_index)
+                    best_hyperparams = planner_state.hyperparams
                     best_loss = aux_loss_smooth[aux_index]
                     best_violations = aux_violations_smooth[aux_index]
                     best_found_by = 'A'
@@ -1660,7 +1692,17 @@ class JaxPlanner(metaclass=ABCMeta):
             pbest_loss = np.where(pbest_improve, test_loss_smooth, pbest_loss)
             pbest_violations = np.where(
                 pbest_improve, test_violations_smooth, pbest_violations)
-                        
+
+            # update the preprocessor after the plans are evaluated, from the rollouts of
+            # the update, or of the test if the update does not log them (e.g. ES)
+            proc_key = Preprocessor.HYPERPARAMS_KEY
+            if self.preprocessor is not None and proc_key in planner_state.hyperparams:
+                fluents = train_log.get('fluents', test_log['fluents'])
+                hyperparams = dict(planner_state.hyperparams)
+                hyperparams[proc_key] = self.preprocessor.update(
+                    fluents, hyperparams[proc_key])
+                planner_state = planner_state.replace(hyperparams=hyperparams)
+
             # no progress
             status = JaxPlannerStatus.NORMAL
             if (not aux_improve) and np.all(zero_grads):
@@ -1718,7 +1760,7 @@ class JaxPlanner(metaclass=ABCMeta):
             # measure percent of progress based on elapsed time and iterations completed
             progress_time = elapsed / train_seconds
             progress_it = it / (epochs - 1) if epochs > 1 else 0
-            progress_percent = 100 * min(1, max(0, progress_time, progress_it))
+            progress_percent = 100. * min(1., max(0., progress_time, progress_it))
             planner_state = planner_state.replace(progress=progress_percent)
             
             # build a callback
@@ -1739,6 +1781,7 @@ class JaxPlanner(metaclass=ABCMeta):
                 'best_index': best_index,
                 'model_params': train_sim_state.model_params,
                 'policy_hyperparams': planner_state.hyperparams,
+                'best_policy_hyperparams': best_hyperparams,
                 'grad': train_grad,
                 'best_grad': best_grad,
                 'train_log': train_log,
@@ -1799,7 +1842,7 @@ class JaxPlanner(metaclass=ABCMeta):
 
             # calculate best policy return
             final_planner_state = planner_state.replace(
-                policy_params=self._batched_pytree(best_params))
+                policy_params=self._batched_pytree(best_params), hyperparams=best_hyperparams)
             _, (final_log, _) = self.test_loss(test_sim_state, final_planner_state)
             final_returns = np.sum(final_log['reward'], axis=2)
             best_returns = np.ravel(final_returns[best_index])
@@ -2008,16 +2051,16 @@ class JaxPGPEPlanner(JaxPlanner):
             optimizer_sigma = optimizer
         self.optimizer_name = optimizer
         self.optimizer_sigma_name = optimizer_sigma
-        mu_optimizer, inject_mu, _ = _build_optax_optimizer(
+        mu_optimizer, _, _ = _build_optax_optimizer(
             optimizer, optimizer_kwargs_mu, clip_grad_mu, None, None, ema_decay, None)
-        sigma_optimizer, inject_sigma, _ = _build_optax_optimizer(
+        sigma_optimizer, _, _ = _build_optax_optimizer(
             optimizer_sigma, optimizer_kwargs_sigma, clip_grad_sigma, None, None, ema_decay,
             None)
         self.optimizer = optax.multi_transform(
             {'mu': mu_optimizer, 'sigma': sigma_optimizer},
             param_labels={'mu': 'mu', 'log_sigma': 'sigma'}
         )
-        self.max_kl = max_kl_update if inject_mu and inject_sigma else None
+        self.max_kl = max_kl_update
         self.eps = eps
     
         super(JaxPGPEPlanner, self).__init__(rddl=rddl, plan=plan, **planner_kwargs)
@@ -2284,7 +2327,7 @@ class JaxPGPEPlanner(JaxPlanner):
                 epsilon, epsilon_star, returns = jax.vmap(
                     _jax_wrapped_pgpe_returns, in_axes=vmap_axes)(
                         sim_state, planner_state, stats)
-            loss = -jnp.mean(returns)
+            loss = -jnp.nanmean(jnp.where(jnp.isfinite(returns), returns, jnp.nan))
 
             # the samples give no gradient if any of their returns is invalid, unless
             # the returns are replaced by their centered ranks
@@ -2374,18 +2417,17 @@ class JaxPGPEPlanner(JaxPlanner):
                 new_stats, new_opt_state = _jax_wrapped_pgpe_update_helper(
                     stats, grad, opt_state)
                 
-                # respect KL divergence constraint by scaling gradients
+                # respect KL divergence constraint by scaling the step of the stats
                 if max_kl is not None:
                     kl = jax.tree_util.tree_map(
-                        _jax_wrapped_pgpe_kl_term, 
+                        _jax_wrapped_pgpe_kl_term,
                         stats['mu'], stats['log_sigma'], new_stats['mu'],
                         new_stats['log_sigma']
                     )
                     sum_kl = jax.tree_util.tree_reduce(jnp.add, kl)
                     scale = jnp.minimum(1.0, jnp.sqrt(jnp.divide(max_kl, sum_kl + self.eps)))
-                    grad = jax.tree_util.tree_map(lambda g: g * scale, grad)
-                    new_stats, new_opt_state = _jax_wrapped_pgpe_update_helper(
-                        stats, grad, opt_state)
+                    new_stats = jax.tree_util.tree_map(
+                        lambda old, new: old + scale * (new - old), stats, new_stats)
                     
                 # apply a gradient projection
                 new_stats['mu'], converged = _jax_wrapped_projection(
@@ -2945,8 +2987,9 @@ class JaxLMMAESPlanner(JaxPlanner):
                     score = d_sorted * e_sorted - 1.
                     new_opt_state['diagonal'] = diagonal * jnp.exp(
                         0.5 * lr_diagonal * (utilities @ score))
-                return (key, mu, new_opt_state, converged, jnp.mean(sample_losses),
-                        unravel(-step))
+                valid_loss = jnp.nanmean(
+                    jnp.where(jnp.isfinite(sample_losses), sample_losses, jnp.nan))
+                return (key, mu, new_opt_state, converged, valid_loss, unravel(-step))
 
             # do an unrolled update
             mu = planner_state.policy_params
@@ -3155,13 +3198,14 @@ class JaxBackpropPlanner(JaxPlanner):
             model_params, params, opt_state, *rest = jax.vmap(
                 _jax_wrapped_plan_update, in_axes=vmap_axes)(sim_state, planner_state)
 
-            # an update that leaves the optimizer state of a policy non-finite is rejected,
-            # and the state, which then holds no valid statistics, is reinitialized
-            state_leaves = jax.tree_util.tree_leaves(opt_state)
-            if state_leaves:
+            # an update that leaves the parameters or the optimizer state of a policy
+            # non-finite is rejected, and the state, which then holds no valid statistics,
+            # is reinitialized
+            leaves = jax.tree_util.tree_leaves((params, opt_state))
+            if leaves:
                 finite = jnp.all(jnp.stack([
                     jnp.all(jnp.isfinite(leaf), axis=tuple(range(1, jnp.ndim(leaf))))
-                    for leaf in state_leaves]), axis=0)
+                    for leaf in leaves]), axis=0)
                 def _jax_wrapped_reset(params, opt_state):
                     old_params = planner_state.policy_params
                     init_state = jax.vmap(optimizer.init, in_axes=0)(old_params)
