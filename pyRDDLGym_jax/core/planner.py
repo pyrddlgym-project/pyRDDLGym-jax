@@ -583,16 +583,18 @@ class JaxActionRepair:
         return _jax_wrapped_repair_relaxed_actions
 
     @staticmethod
-    def statistics(log: Dict[str, Any]) -> Dict[str, float]:
-        '''Returns statistics of the repairs in the given log of rollouts.'''
-        info = log['repair']
-        infeasible = np.asarray(info['infeasible'])
-        num_repairs = max(int(np.sum(infeasible)), 1)
+    def statistics(log: Dict[str, Any], index: int) -> Dict[str, float]:
+        '''Returns statistics of the repairs of plan index in the given log of rollouts.'''
+        alive = np.asarray(log['alive'][index])
+        info = {key: np.asarray(log['repair'][key][index]) * alive
+                for key in ('infeasible', 'resets', 'shrink', 'failed')}
+        num_steps = np.sum(alive)
+        num_repairs = max(float(np.sum(info['infeasible'])), 1.)
         return {
-            'repaired': float(np.mean(infeasible)),
-            'resets_per_repair': float(np.sum(np.asarray(info['resets'])) / num_repairs),
-            'shrink_per_repair': float(np.sum(np.asarray(info['shrink'])) / num_repairs),
-            'failed': float(np.mean(np.asarray(info['failed'])))
+            'repaired': float(np.sum(info['infeasible']) / num_steps),
+            'resets_per_repair': float(np.sum(info['resets']) / num_repairs),
+            'shrink_per_repair': float(np.sum(info['shrink']) / num_repairs),
+            'failed': float(np.sum(info['failed']) / num_steps)
         }
 
 
@@ -990,7 +992,9 @@ class JaxPlanner(metaclass=ABCMeta):
                 statistics['test SE'] = jnp.std(log['returns'], axis=1, ddof=1) / np.sqrt(
                     batch_size_test)
             if check_preconditions:
-                statistics['repaired'] = jnp.mean(log['repair']['infeasible'], axis=(1, 2))
+                statistics['repaired'] = jnp.sum(
+                    log['repair']['infeasible'] * log['alive'], axis=(1, 2)
+                ) / jnp.sum(log['alive'], axis=(1, 2))
             return statistics
 
         # the test loss of a policy with non-finite parameters is invalid
@@ -1129,6 +1133,7 @@ class JaxPlanner(metaclass=ABCMeta):
                 [jnp.ones_like(not_terminated[:, :1]), not_terminated[:, :-1]], axis=1)
             rewards = rewards * alive
             critic_values = critic_values * not_terminated[:, -1]
+            log['alive'] = alive
 
             # number of steps of each rollout at which the action preconditions are
             # violated until the episode terminates (zero if they are not checked)
@@ -1882,14 +1887,13 @@ class JaxPlanner(metaclass=ABCMeta):
             final_planner_state = planner_state.replace(
                 policy_params=self._batched_pytree(best_params), hyperparams=best_hyperparams)
             _, (final_log, _) = self.test_loss(test_sim_state, final_planner_state)
-            final_returns = np.sum(final_log['reward'], axis=2)
-            best_returns = np.ravel(final_returns[best_index])
+            best_returns = np.ravel(final_log['returns'][best_index])
 
             # calculate other statistics for summary
             mean, rlo, rhi = self._ci_bootstrap(best_returns, key[0].item())            
             if self.check_preconditions:
                 final_violations = np.mean(final_log['violations'][best_index])
-                repairs = JaxActionRepair.statistics(final_log)
+                repairs = JaxActionRepair.statistics(final_log, best_index)
                 violations_info = (f'    best violations:    {final_violations:.5f} '
                                    f'steps per rollout\n'
                                    f'    best repairs:       {repairs["repaired"]:.1%} of '
