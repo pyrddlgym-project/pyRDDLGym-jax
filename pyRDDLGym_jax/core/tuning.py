@@ -487,8 +487,7 @@ class JaxParameterTuning:
         planner_args.pop('parallel_updates', None)
 
         # initialize env for evaluation (need fresh copy to avoid concurrency)
-        env = RDDLEnv(kwargs['domain'], kwargs['instance'],
-                      vectorized=True, enforce_action_constraints=False)
+        env = RDDLEnv(kwargs['domain'], kwargs['instance'], vectorized=True)
         planner = create_planner(rddl=env.model, **planner_args)
         planner.dashboard = None
 
