@@ -21,14 +21,8 @@ from pyRDDLGym.core.policy import RandomAgent
 from pyRDDLGym_jax.core.simulator import JaxRDDLSimulator
 
 def main(domain, instance, episodes=1, seed=42):
-    
-    # create the environment
     env = pyRDDLGym.make(domain, instance, backend=JaxRDDLSimulator)
-
-    # evaluate a random policy
-    agent = RandomAgent(action_space=env.action_space,
-                        num_actions=env.max_allowed_actions,
-                        seed=seed)
+    agent = RandomAgent(env, seed=seed)
     agent.evaluate(env, episodes=episodes, verbose=True, render=True, seed=seed)
     env.close()
 
