@@ -313,7 +313,8 @@ def _jax_tree_mean(tree: Pytree) -> jnp.ndarray:
 
 class JaxActionRepair:
     '''Repairs actions to satisfy the action preconditions of the exact model by moving
-    them towards the default actions.'''
+    them towards the default actions, or changing boolean actions away from their defaults
+    if the preconditions do not hold at the defaults.'''
 
     def __init__(self, compiled: JaxRDDLCompiler, print_warnings: bool=True) -> None:
         '''Creates a new repair of the actions of the given exact model, which must be
@@ -425,15 +426,18 @@ class JaxActionRepair:
                 num_active = jnp.sum(active)
                 order = jnp.argsort(jnp.where(active, jnp.abs(score - 0.5), jnp.inf))
 
-                def _jax_wrapped_targeted_reset(carry):
-                    i, flat, violations = carry
-                    index = order[i]
-                    candidate = flat.at[index].set(flat_default[index])
-                    unflat = _jax_wrapped_unflatten(candidate, bool_splits, bool_vars)
-                    cand_violations = _jax_wrapped_violations(sim_state, fls, unflat)
-                    reset = active[index] & (cand_violations < violations)
-                    return (i + 1, jnp.where(reset, candidate, flat),
-                            jnp.where(reset, cand_violations, violations))
+                # changes an action to the given values if that reduces the violations
+                def _jax_wrapped_targeted(order, values, fls):
+                    def _jax_wrapped_targeted_change(carry):
+                        i, flat, violations = carry
+                        index = order[i]
+                        candidate = flat.at[index].set(values[index])
+                        unflat = _jax_wrapped_unflatten(candidate, bool_splits, bool_vars)
+                        cand_violations = _jax_wrapped_violations(sim_state, fls, unflat)
+                        change = cand_violations < violations
+                        return (i + 1, jnp.where(change, candidate, flat),
+                                jnp.where(change, cand_violations, violations))
+                    return _jax_wrapped_targeted_change
 
                 def _jax_wrapped_reset(carry):
                     i, flat, _ = carry
@@ -448,12 +452,43 @@ class JaxActionRepair:
                 violations = _jax_wrapped_violations(sim_state, fls, unflats)
                 _, flat, _ = jax.lax.while_loop(
                     lambda carry: (carry[0] < num_active) & (carry[2] > 0),
-                    _jax_wrapped_targeted_reset, (0, flat, violations))
+                    _jax_wrapped_targeted(order, flat_default, fls), (0, flat, violations))
                 unflats = _jax_wrapped_unflatten(flat, bool_splits, bool_vars)
                 _, flat, _ = jax.lax.while_loop(
                     lambda carry: (carry[0] < num_active) & jnp.logical_not(carry[2]),
                     _jax_wrapped_reset,
                     (0, flat, _jax_wrapped_feasible(sim_state, fls, unflats)))
+
+                # if the preconditions do not hold now, nor with all other actions at their
+                # defaults, then only changing an action away from its default can satisfy
+                # them: first those that reduce the violations, then as many as it takes
+                fls_defaults = {**fls, **{var: jnp.asarray(defaults[var]) for var in other_vars}}
+                unflats = _jax_wrapped_unflatten(flat, bool_splits, bool_vars)
+                feasible_defaults = _jax_wrapped_feasible(sim_state, fls_defaults, unflats)
+                feasible_now = _jax_wrapped_feasible(sim_state, fls, unflats)
+                at_default = flat == flat_default
+                num_off = jnp.where(feasible_defaults | feasible_now, 0, jnp.sum(at_default))
+                order_off = jnp.argsort(
+                    jnp.where(at_default, -jnp.abs(score - flat_default), jnp.inf))
+                flat_off = jnp.logical_not(flat_default)
+                _, flat, _ = jax.lax.while_loop(
+                    lambda carry: (carry[0] < num_off) & (carry[2] > 0),
+                    _jax_wrapped_targeted(order_off, flat_off, fls_defaults),
+                    (0, flat, _jax_wrapped_violations(sim_state, fls_defaults, unflats)))
+
+                def _jax_wrapped_change_off(carry):
+                    i, flat, _ = carry
+                    index = order_off[i]
+                    flat = flat.at[index].set(flat_off[index])
+                    unflat = _jax_wrapped_unflatten(flat, bool_splits, bool_vars)
+                    return (i + 1, flat, _jax_wrapped_feasible(sim_state, fls_defaults, unflat))
+
+                unflats = _jax_wrapped_unflatten(flat, bool_splits, bool_vars)
+                _, changed, found = jax.lax.while_loop(
+                    lambda carry: (carry[0] < num_off) & jnp.logical_not(carry[2]),
+                    _jax_wrapped_change_off,
+                    (0, flat, _jax_wrapped_feasible(sim_state, fls_defaults, unflats)))
+                flat = jnp.where(found, changed, flat)
                 resets = jnp.sum(flat != initial).astype(REAL)
                 kept = _jax_wrapped_unflatten(flat == initial, bool_splits, bool_vars)
                 fls = {**fls, **_jax_wrapped_unflatten(flat, bool_splits, bool_vars)}
@@ -547,7 +582,7 @@ class JaxActionRepair:
         '''Returns the function (sim_state, planner_state, actions) -> (actions, info)
         that repairs relaxed actions as their exact (rounded) values are repaired.'''
         repair_fn = self._repair
-        INT = self.compiled.INT
+        INT, REAL = self.compiled.INT, self.compiled.REAL
         ranges = self.compiled.rddl.variable_ranges
         defaults = {var: np.asarray(value, dtype=self.compiled.REAL)
                     for (var, value) in self._defaults.items()}
@@ -571,12 +606,13 @@ class JaxActionRepair:
             exact_sim_state = sim_state.replace(
                 fls=_jax_wrapped_exact_values(jax.lax.stop_gradient(sim_state.fls)),
                 nfls=_jax_wrapped_exact_values(jax.lax.stop_gradient(sim_state.nfls)))
-            _, info, kept, step = repair_fn(
+            fixed, info, kept, step = repair_fn(
                 exact_sim_state, *jax.lax.stop_gradient(({**actions, **exact}, actions)))
             repaired = dict(actions)
             for var in defaults:
                 if ranges[var] == 'bool':
-                    repaired[var] = jnp.where(kept[var], actions[var], defaults[var])
+                    repaired[var] = jnp.where(
+                        kept[var], actions[var], jnp.asarray(fixed[var], dtype=REAL))
                 else:
                     repaired[var] = defaults[var] + step[var] * (actions[var] - defaults[var])
             return repaired, info
@@ -2145,6 +2181,7 @@ class JaxPGPEPlanner(JaxPlanner):
         log_sigma_lo, log_sigma_hi = (float(np.log(bound)) for bound in self.sigma_range)
         centered_ranks = self.reward_shaping == 'ranks'
         scale_reward = self.reward_shaping == 'scale'
+        batch_size_test = self.batch_size_test
         min_reward_scale = self.min_reward_scale
         baseline_decay = self.baseline_decay
         super_symmetric = self.super_symmetric
@@ -2322,9 +2359,11 @@ class JaxPGPEPlanner(JaxPlanner):
             sim_state = sim_state.replace(key=subkey)
             samples = (p1, p2, p3, p4) if super_symmetric else (p1, p2)
             samples = jax.tree_util.tree_map(lambda *leaves: jnp.stack(leaves), *samples)
-            returns = -jax.vmap(lambda params: loss_fn(
-                sim_state, planner_state.replace(policy_params=params))[0])(samples)
-            return epsilon, epsilon_star, returns
+            def _jax_wrapped_sample_return(params):
+                loss, (log, _) = loss_fn(sim_state, planner_state.replace(policy_params=params))
+                return -loss, jnp.mean(log['violations'])
+            returns, violations = jax.vmap(_jax_wrapped_sample_return)(samples)
+            return epsilon, epsilon_star, returns, violations
 
         # centered ranks of the returns in [-0.5, 0.5]
         def _jax_wrapped_centered_ranks(returns):
@@ -2362,16 +2401,22 @@ class JaxPGPEPlanner(JaxPlanner):
             # sample policy parameters and evaluate their returns
             if batch_size == 1:
                 samples = _jax_wrapped_pgpe_returns(sim_state, planner_state, stats)
-                epsilon, epsilon_star, returns = jax.tree_util.tree_map(
+                epsilon, epsilon_star, returns, violations = jax.tree_util.tree_map(
                     lambda x: x[None], samples)
             else:
                 keys = random.split(sim_state.key, num=batch_size)
                 sim_state = sim_state.replace(key=keys)
                 vmap_axes = (JaxRDDLSimState(key=0), None, None)
-                epsilon, epsilon_star, returns = jax.vmap(
+                epsilon, epsilon_star, returns, violations = jax.vmap(
                     _jax_wrapped_pgpe_returns, in_axes=vmap_axes)(
                         sim_state, planner_state, stats)
             loss = -jnp.nanmean(jnp.where(jnp.isfinite(returns), returns, jnp.nan))
+
+            # samples are compared by violations and return as the best plan is chosen
+            valid = jnp.isfinite(returns)
+            spread = jnp.maximum(jnp.max(jnp.where(valid, returns, -jnp.inf)) -
+                                 jnp.min(jnp.where(valid, returns, jnp.inf)), 0.)
+            returns = returns - violations * batch_size_test * (spread + 1.)
 
             # the samples give no gradient if any of their returns is invalid, unless
             # the returns are replaced by their centered ranks
@@ -2951,17 +2996,18 @@ class JaxLMMAESPlanner(JaxPlanner):
                     def _jax_wrapped_penalty_statistics(params):
                         loss, (log, _) = loss_fn(_sim_state, planner_state.replace(
                             policy_params=params, opt_aux=mu))
-                        return (loss,) + penalty_statistics(log)
+                        return (loss, jnp.mean(log['violations'])) + penalty_statistics(log)
 
                     # the mean is evaluated with the samples, and the sampling variance
                     # of each action coordinate is estimated from the differences of the
                     # sampled actions from the mean policy
                     flat_params = jnp.concatenate(
                         [mu_flat + sigma * diagonal * d, mu_flat[None]], axis=0)
-                    all_losses, all_squared_distance, all_squared_delta, all_alive = \
+                    all_losses, all_violations, all_squared_distance, all_squared_delta, all_alive = \
                         jax.vmap(lambda flat: _jax_wrapped_penalty_statistics(
                             unravel(flat)))(flat_params)
                     sample_losses = all_losses[:-1]
+                    sample_violations = all_violations[:-1]
                     squared_distance = all_squared_distance[:-1]
                     alive = all_alive[:-1]
                     reached = jnp.sum(alive, axis=0)[:, None]
@@ -2982,15 +3028,18 @@ class JaxLMMAESPlanner(JaxPlanner):
                     losses = sample_losses + penalties
                     opt_state = {**opt_state, 'penalty': penalty_state}
                 else:
-                    losses = jax.vmap(
-                        lambda dd: loss_fn(_sim_state, planner_state.replace(
-                            policy_params=unravel(mu_flat + sigma * diagonal * dd)))[0]
-                    )(d)
+                    def _jax_wrapped_sample_loss(dd):
+                        loss, (log, _) = loss_fn(_sim_state, planner_state.replace(
+                            policy_params=unravel(mu_flat + sigma * diagonal * dd)))
+                        return loss, jnp.mean(log['violations'])
+                    losses, sample_violations = jax.vmap(_jax_wrapped_sample_loss)(d)
                     sample_losses = losses
 
-                # recombine the samples sorted from best to worst, with invalid returns
-                # ranked last
-                order = jnp.argsort(jnp.where(jnp.isfinite(losses), losses, jnp.inf))
+                # recombine the samples sorted from best to worst, by violations and then
+                # loss as the best plan is chosen, with invalid returns ranked last
+                valid = jnp.isfinite(losses)
+                order = jnp.lexsort((jnp.where(valid, losses, jnp.inf),
+                                     jnp.where(valid, sample_violations, jnp.inf)))
                 z_sorted, d_sorted = z[order], d[order]
                 z_mean = weights @ z_sorted
                 d_mean = weights @ d_sorted
