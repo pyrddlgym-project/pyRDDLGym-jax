@@ -316,14 +316,17 @@ class JaxActionRepair:
     them towards the default actions, or changing boolean actions away from their defaults
     if the preconditions do not hold at the defaults.'''
 
-    def __init__(self, compiled: JaxRDDLCompiler, print_warnings: bool=True) -> None:
+    def __init__(self, compiled: JaxRDDLCompiler, print_warnings: bool=True,
+                 fixed_actions: Optional[Dict[str, Any]]=None) -> None:
         '''Creates a new repair of the actions of the given exact model, which must be
         compiled with its constraints.
 
         :param compiled: the compiled exact model
         :param print_warnings: whether to print warnings
+        :param fixed_actions: (mask, value) of boolean actions that are never changed
         '''
         self.compiled = compiled
+        self._fixed_actions = {} if fixed_actions is None else fixed_actions
 
         # default actions, with enum values as their indices
         rddl = compiled.rddl
@@ -372,6 +375,10 @@ class JaxActionRepair:
             [np.ravel(defaults[var]) for var in other_vars] + [np.zeros((0,))]), 
             dtype=REAL)
         bool_splits = np.cumsum([sizes[var] for var in bool_vars])[:-1]
+        bool_free = np.concatenate(
+            [~np.ravel(self._fixed_actions[var][0]) if var in self._fixed_actions
+             else np.ones(sizes[var], dtype=bool) for var in bool_vars] +
+            [np.zeros((0,), dtype=bool)])
         other_splits = np.cumsum([sizes[var] for var in other_vars])[:-1]
 
         # bisection stops at the square root of the precision of the model, so that the
@@ -422,7 +429,7 @@ class JaxActionRepair:
                     [jnp.ravel(jnp.asarray(scores[var], dtype=REAL)) 
                      for var in bool_vars])
                 flat_default = jnp.asarray(bool_default)
-                active = flat != flat_default
+                active = (flat != flat_default) & bool_free
                 num_active = jnp.sum(active)
                 order = jnp.argsort(jnp.where(active, jnp.abs(score - 0.5), jnp.inf))
 
@@ -466,7 +473,7 @@ class JaxActionRepair:
                 unflats = _jax_wrapped_unflatten(flat, bool_splits, bool_vars)
                 feasible_defaults = _jax_wrapped_feasible(sim_state, fls_defaults, unflats)
                 feasible_now = _jax_wrapped_feasible(sim_state, fls, unflats)
-                at_default = flat == flat_default
+                at_default = (flat == flat_default) & bool_free
                 num_off = jnp.where(feasible_defaults | feasible_now, 0, jnp.sum(at_default))
                 order_off = jnp.argsort(
                     jnp.where(at_default, -jnp.abs(score - flat_default), jnp.inf))
@@ -967,6 +974,17 @@ class JaxPlanner(metaclass=ABCMeta):
                           _bounds=self._action_bounds,
                           horizon=self.horizon,
                           preprocessor=self.preprocessor)
+
+        # the boolean actions fixed by their bounds are set in the policies of the plan
+        self._fixed_bool_actions = fixed = self._get_fixed_bool_actions()
+        if fixed:
+            jax_fix_train = self._jax_fix_bool_actions(fixed, self.compiled.REAL)
+            jax_fix_test = self._jax_fix_bool_actions(fixed, bool)
+            plan_train_policy, plan_test_policy = self.plan.train_policy, self.plan.test_policy
+            self.plan.train_policy = lambda *args, **kwargs: jax_fix_train(
+                plan_train_policy(*args, **kwargs))
+            self.plan.test_policy = lambda *args, **kwargs: jax_fix_test(
+                plan_test_policy(*args, **kwargs))
         self.train_policy = jax.jit(self.plan.train_policy)
 
         # the actions on the exact model are repaired to satisfy the preconditions,
@@ -975,7 +993,8 @@ class JaxPlanner(metaclass=ABCMeta):
         test_policy = self.plan.test_policy
         if self.check_preconditions:
             self.action_repair = JaxActionRepair(
-                self.test_compiled, print_warnings=self.print_warnings)
+                self.test_compiled, print_warnings=self.print_warnings,
+                fixed_actions=self._fixed_bool_actions)
             exact_repair = self.action_repair.exact(self.plan.train_policy)
             def _jax_wrapped_repaired_test_policy(sim_state, planner_state):
                 actions = self.plan.test_policy(sim_state, planner_state)
@@ -983,6 +1002,47 @@ class JaxPlanner(metaclass=ABCMeta):
             test_policy = _jax_wrapped_repaired_test_policy
         self.test_policy = jax.jit(test_policy)
         self.init_policy = self._jax_init_policy()
+
+    def _get_fixed_bool_actions(self) -> Dict[str, Any]:
+        '''Returns the (mask, value) of the boolean actions fixed by their bounds, since
+        a boolean bounded to only 0 or only 1 has that value.'''
+        rddl, compiled = self.rddl, self.test_compiled
+        fixed, num_non_default = {}, 0
+        for var in rddl.action_fluents:
+            if rddl.variable_ranges[var] == 'bool':
+                default = np.asarray(compiled.init_values[var], dtype=bool)
+                lower, upper = self._action_bounds.get(var, compiled.constraints.bounds[var])
+                can_0 = np.broadcast_to((lower <= 0) & (upper >= 0), default.shape)
+                can_1 = np.broadcast_to((lower <= 1) & (upper >= 1), default.shape)
+                if np.any(~can_0 & ~can_1):
+                    raise ValueError(
+                        f'Bounds of boolean action-fluent <{var}> admit no value.')
+                if np.any(can_0 != can_1):
+                    fixed[var] = (can_0 != can_1, can_1)
+                    num_non_default += np.sum((can_0 != can_1) & (can_1 != default))
+
+        # the plans enforce max-nondef-actions without counting the actions fixed
+        # to non-defaults, so that case is refused; count them in the plans if needed
+        num_bool = sum(np.size(compiled.init_values[var]) for var in rddl.action_fluents
+                       if rddl.variable_ranges[var] == 'bool')
+        if num_non_default and rddl.max_allowed_actions < num_bool:
+            raise NotImplementedError(
+                f'Bounds fix {num_non_default} boolean actions to non-default values while '
+                f'max-nondef-actions {rddl.max_allowed_actions} is binding.')
+        return fixed
+
+    def _jax_fix_bool_actions(self, fixed: Dict[str, Any], dtype: type) -> Callable:
+        '''Returns the function that sets the given fixed boolean actions to their values,
+        as the given dtype.'''
+        values = {var: np.asarray(value, dtype=dtype) 
+                  for (var, (_, value)) in fixed.items()}
+
+        def _jax_wrapped_fix_bool_actions(actions):
+            new_actions = dict(actions)
+            for (var, (mask, _)) in fixed.items():
+                new_actions[var] = jnp.where(mask, values[var], actions[var])
+            return new_actions
+        return _jax_wrapped_fix_bool_actions
 
     def _jax_train_action_repair(self) -> Optional[Callable]:
         '''Returns the function that repairs the actions of the train policy in the
