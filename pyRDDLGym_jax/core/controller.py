@@ -97,7 +97,7 @@ class JaxOfflineController(BaseAgent):
         self.hyperparams_given = eval_hyperparams is not None
         
         # load the policy from file
-        if not self.train_on_reset and params is not None and isinstance(params, str):
+        if params is not None and isinstance(params, str):
             with open(params, 'rb') as file:
                 contents = pickle.load(file)
                 params = contents['params']
