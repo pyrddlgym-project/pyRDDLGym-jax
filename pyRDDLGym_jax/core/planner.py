@@ -313,8 +313,7 @@ def _jax_tree_mean(tree: Pytree) -> jnp.ndarray:
 
 class JaxActionRepair:
     '''Repairs actions to satisfy the action preconditions of the exact model by moving
-    them towards the default actions, or changing boolean actions away from their defaults
-    if the preconditions do not hold at the defaults.'''
+    them towards the default actions.'''
 
     def __init__(self, compiled: JaxRDDLCompiler, print_warnings: bool=True,
                  fixed_actions: Optional[Dict[str, Any]]=None) -> None:
@@ -433,18 +432,15 @@ class JaxActionRepair:
                 num_active = jnp.sum(active)
                 order = jnp.argsort(jnp.where(active, jnp.abs(score - 0.5), jnp.inf))
 
-                # changes an action to the given values if that reduces the violations
-                def _jax_wrapped_targeted(order, values, fls):
-                    def _jax_wrapped_targeted_change(carry):
-                        i, flat, violations = carry
-                        index = order[i]
-                        candidate = flat.at[index].set(values[index])
-                        unflat = _jax_wrapped_unflatten(candidate, bool_splits, bool_vars)
-                        cand_violations = _jax_wrapped_violations(sim_state, fls, unflat)
-                        change = cand_violations < violations
-                        return (i + 1, jnp.where(change, candidate, flat),
-                                jnp.where(change, cand_violations, violations))
-                    return _jax_wrapped_targeted_change
+                def _jax_wrapped_targeted_reset(carry):
+                    i, flat, violations = carry
+                    index = order[i]
+                    candidate = flat.at[index].set(flat_default[index])
+                    unflat = _jax_wrapped_unflatten(candidate, bool_splits, bool_vars)
+                    cand_violations = _jax_wrapped_violations(sim_state, fls, unflat)
+                    reset = active[index] & (cand_violations < violations)
+                    return (i + 1, jnp.where(reset, candidate, flat),
+                            jnp.where(reset, cand_violations, violations))
 
                 def _jax_wrapped_reset(carry):
                     i, flat, _ = carry
@@ -459,43 +455,12 @@ class JaxActionRepair:
                 violations = _jax_wrapped_violations(sim_state, fls, unflats)
                 _, flat, _ = jax.lax.while_loop(
                     lambda carry: (carry[0] < num_active) & (carry[2] > 0),
-                    _jax_wrapped_targeted(order, flat_default, fls), (0, flat, violations))
+                    _jax_wrapped_targeted_reset, (0, flat, violations))
                 unflats = _jax_wrapped_unflatten(flat, bool_splits, bool_vars)
                 _, flat, _ = jax.lax.while_loop(
                     lambda carry: (carry[0] < num_active) & jnp.logical_not(carry[2]),
                     _jax_wrapped_reset,
                     (0, flat, _jax_wrapped_feasible(sim_state, fls, unflats)))
-
-                # if the preconditions do not hold now, nor with all other actions at their
-                # defaults, then only changing an action away from its default can satisfy
-                # them: first those that reduce the violations, then as many as it takes
-                fls_defaults = {**fls, **{var: jnp.asarray(defaults[var]) for var in other_vars}}
-                unflats = _jax_wrapped_unflatten(flat, bool_splits, bool_vars)
-                feasible_defaults = _jax_wrapped_feasible(sim_state, fls_defaults, unflats)
-                feasible_now = _jax_wrapped_feasible(sim_state, fls, unflats)
-                at_default = (flat == flat_default) & bool_free
-                num_off = jnp.where(feasible_defaults | feasible_now, 0, jnp.sum(at_default))
-                order_off = jnp.argsort(
-                    jnp.where(at_default, -jnp.abs(score - flat_default), jnp.inf))
-                flat_off = jnp.logical_not(flat_default)
-                _, flat, _ = jax.lax.while_loop(
-                    lambda carry: (carry[0] < num_off) & (carry[2] > 0),
-                    _jax_wrapped_targeted(order_off, flat_off, fls_defaults),
-                    (0, flat, _jax_wrapped_violations(sim_state, fls_defaults, unflats)))
-
-                def _jax_wrapped_change_off(carry):
-                    i, flat, _ = carry
-                    index = order_off[i]
-                    flat = flat.at[index].set(flat_off[index])
-                    unflat = _jax_wrapped_unflatten(flat, bool_splits, bool_vars)
-                    return (i + 1, flat, _jax_wrapped_feasible(sim_state, fls_defaults, unflat))
-
-                unflats = _jax_wrapped_unflatten(flat, bool_splits, bool_vars)
-                _, changed, found = jax.lax.while_loop(
-                    lambda carry: (carry[0] < num_off) & jnp.logical_not(carry[2]),
-                    _jax_wrapped_change_off,
-                    (0, flat, _jax_wrapped_feasible(sim_state, fls_defaults, unflats)))
-                flat = jnp.where(found, changed, flat)
                 resets = jnp.sum(flat != initial).astype(REAL)
                 kept = _jax_wrapped_unflatten(flat == initial, bool_splits, bool_vars)
                 fls = {**fls, **_jax_wrapped_unflatten(flat, bool_splits, bool_vars)}
@@ -589,7 +554,7 @@ class JaxActionRepair:
         '''Returns the function (sim_state, planner_state, actions) -> (actions, info)
         that repairs relaxed actions as their exact (rounded) values are repaired.'''
         repair_fn = self._repair
-        INT, REAL = self.compiled.INT, self.compiled.REAL
+        INT = self.compiled.INT
         ranges = self.compiled.rddl.variable_ranges
         defaults = {var: np.asarray(value, dtype=self.compiled.REAL)
                     for (var, value) in self._defaults.items()}
@@ -613,13 +578,12 @@ class JaxActionRepair:
             exact_sim_state = sim_state.replace(
                 fls=_jax_wrapped_exact_values(jax.lax.stop_gradient(sim_state.fls)),
                 nfls=_jax_wrapped_exact_values(jax.lax.stop_gradient(sim_state.nfls)))
-            fixed, info, kept, step = repair_fn(
+            _, info, kept, step = repair_fn(
                 exact_sim_state, *jax.lax.stop_gradient(({**actions, **exact}, actions)))
             repaired = dict(actions)
             for var in defaults:
                 if ranges[var] == 'bool':
-                    repaired[var] = jnp.where(
-                        kept[var], actions[var], jnp.asarray(fixed[var], dtype=REAL))
+                    repaired[var] = jnp.where(kept[var], actions[var], defaults[var])
                 else:
                     repaired[var] = defaults[var] + step[var] * (actions[var] - defaults[var])
             return repaired, info
