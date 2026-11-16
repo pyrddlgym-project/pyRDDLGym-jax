@@ -4,128 +4,104 @@
 [![PyPI Version](https://img.shields.io/pypi/v/pyRDDLGym-jax.svg)](https://pypi.org/project/pyRDDLGym-jax/)
 [![Documentation Status](https://readthedocs.org/projects/pyrddlgym/badge/?version=latest)](https://pyrddlgym.readthedocs.io/en/latest/jax.html)
 ![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)
-[![Cumulative PyPI Downloads](https://img.shields.io/pypi/dm/pyrddlgym-jax)](https://pypistats.org/packages/pyrddlgym-jax)
 
-[Installation](#installation) | [Run cmd](#running-from-the-command-line) | [Run python](#running-from-another-python-application) | [Configuration](#configuring-the-planner) | [Dashboard](#jaxplan-dashboard) | [Tuning](#tuning-the-planner) | [Simulation](#simulation) | [Citing](#citing-jaxplan)
+**JaxPlan compiles any RDDL problem into a differentiable JAX simulator and plans through it by gradient descent.**
 
-**pyRDDLGym-jax (or JaxPlan) is an efficient gradient-based planning algorithm based on JAX.** 
+<img src="https://raw.githubusercontent.com/pyrddlgym-project/pyRDDLGym-jax/main/Images/examples.gif" margin=0/>
 
-Purpose and features:
+[Why JaxPlan?](#why-jaxplan) | [Installation](#installation) | [Quick start](#quick-start) | [Python API](#python-api) | [Configuration](#configuring-the-planner) | [Dashboard](#dashboard) | [Tuning](#tuning-the-planner) | [Simulation](#simulating-with-jax) | [Citing](#citing-jaxplan)
 
-1. automatic translation of RDDL description files into differentiable JAX simulators
-2. implementation of configurable operator relaxations for discrete and hybrid domains
-3. flexible policy representations and automated Bayesian hyper-parameter tuning
-4. interactive dashboard for dynamic visualization and debugging
-5. hybridization with parameter-exploring policy gradients (PGPE)
-6. risk-sensitive objectives
-7. optimization of structured/symbolic policies defined in RDDL blocks.
+## Why JaxPlan?
 
-Some demos of solved problems by JaxPlan:
+- **Differentiable out of the box.** Every RDDL description compiles automatically into a differentiable JAX simulator: no hand-written models.
+- **Discrete and hybrid, too.** Configurable relaxations of discrete operations and distributions give useful gradients in discrete and mixed discrete-continuous problems.
+- **Plans or policies.** Optimize open-loop plans, replan at every step, or train deep reactive policy networks, with risk-sensitive objectives and structured or symbolic policies written in RDDL.
+- **Beyond gradients.** Gradient-free optimizers such as parameter-exploring policy gradients (PGPE) can run alongside gradient descent, or replace it.
+- **Self-tuning.** Bayesian hyper-parameter tuning with [Optuna](https://optuna.org/) finds good settings for you.
+- **Watch it learn.** An interactive dashboard tracks runs and visualizes the policy and the model as they train.
 
-<p align="middle">
-<img src="https://github.com/pyrddlgym-project/pyRDDLGym-jax/blob/main/Images/intruders.gif" width="120" height="120" margin=0/>
-<img src="https://github.com/pyrddlgym-project/pyRDDLGym-jax/blob/main/Images/marsrover.gif" width="120" height="120" margin=0/>
-<img src="https://github.com/pyrddlgym-project/pyRDDLGym-jax/blob/main/Images/pong.gif" width="120" height="120" margin=0/>
-<img src="https://github.com/pyrddlgym-project/pyRDDLGym-jax/blob/main/Images/quadcopter.gif" width="120" height="120" margin=0/>
-<img src="https://github.com/pyrddlgym-project/pyRDDLGym-jax/blob/main/Images/reacher.gif" width="120" height="120" margin=0/>
-<img src="https://github.com/pyrddlgym-project/pyRDDLGym-jax/blob/main/Images/reservoir.gif" width="120" height="120" margin=0/>
-</p>
+> [!NOTE]
+> Through relaxations JaxPlan handles many discrete problems, but on some it can make little progress (an ongoing effort is improving this).
+> In that case, try the [PROST planner](https://github.com/pyrddlgym-project/pyRDDLGym-prost) for discrete spaces, or the [deep reinforcement learning wrappers](https://github.com/pyrddlgym-project/pyRDDLGym-rl).
 
-> [!WARNING]  
-> Starting in version 3.0 (major release), the structure of the config files and internal API have changed.
-> Please make sure your config files follow the new format. See [examples here](https://github.com/pyrddlgym-project/pyRDDLGym-jax/tree/main/pyRDDLGym_jax/examples/configs).
-
-> [!WARNING]  
-> Starting in version 1.0 (major release), the ``weight`` parameter in the config file was removed, 
-and was moved to the individual logic components which have their own unique weight parameter assigned.
-> Furthermore, the tuning module has been redesigned from the ground up, and supports tuning arbitrary hyper-parameters via config templates!
-> Finally, the terrible visualizer for the planner was removed and replaced with an interactive real-time dashboard (similar to tensorboard, but custom designed for the planner)!
-
-> [!NOTE]  
-> While JaxPlan can support some discrete state/action problems through model relaxations, on some discrete problems it can perform poorly (though there is an ongoing effort to remedy this!).
-> If you find it is not making progress, check out the [PROST planner](https://github.com/pyrddlgym-project/pyRDDLGym-prost) (for discrete spaces) or the [deep reinforcement learning wrappers](https://github.com/pyrddlgym-project/pyRDDLGym-rl).
-  
 ## Installation
 
-To install the bare-bones version of JaxPlan with **minimum installation requirements**:
+Install the latest release with pip, with the extras you need:
 
 ```shell
-pip install pyRDDLGym-jax
+pip install pyRDDLGym-jax                     # the planner only
+pip install pyRDDLGym-jax[extra]              # plus hyper-parameter tuning and rddlrepository
+pip install pyRDDLGym-jax[dashboard]          # plus the dashboard
+pip install pyRDDLGym-jax[extra,dashboard]    # everything
 ```
 
-To install JaxPlan with the **automatic hyper-parameter tuning** and rddlrepository:
+Or get the pre-release version from GitHub:
 
 ```shell
-pip install pyRDDLGym-jax[extra]
+git clone https://github.com/pyrddlgym-project/pyRDDLGym-jax.git
 ```
 
-(Since version 1.0) To install JaxPlan with the **visualization dashboard**:
+> [!WARNING]
+> Version 3.0 changed the format of config files and the internal API.
+> If you are upgrading, update your config files to the new format, following [these examples](https://github.com/pyrddlgym-project/pyRDDLGym-jax/tree/main/pyRDDLGym_jax/examples/configs).
 
-```shell
-pip install pyRDDLGym-jax[dashboard]
-```
+## Quick start
 
-(Since version 1.0) To install JaxPlan with **all options**:
-
-```shell
-pip install pyRDDLGym-jax[extra,dashboard]
-```
-
-## Running from the Command Line
-
-A basic run script is provided to train JaxPlan on any RDDL problem:
+Train and evaluate JaxPlan on any RDDL problem straight from the command line:
 
 ```shell
 jaxplan plan <domain> <instance> <method> --episodes <episodes>
 ```
 
 where:
-- ``domain`` is the domain identifier as specified in rddlrepository (i.e. Wildfire_MDP_ippc2014), or a path pointing to a valid ``domain.rddl`` file
-- ``instance`` is the instance identifier (i.e. 1, 2, ... 10), or a path pointing to a valid ``instance.rddl`` file
-- ``method`` is the planning method to use (i.e. drp, slp, replan) or a path to a valid .cfg file (see section below)
-- ``episodes`` is the (optional) number of episodes to evaluate the learned policy.
+- ``domain`` is a domain name in rddlrepository (e.g. ``Wildfire_MDP_ippc2014``) or the path to a ``domain.rddl`` file
+- ``instance`` is an instance name (e.g. ``1``) or the path to an ``instance.rddl`` file
+- ``method`` is how to plan:
+  - ``slp``: a [straight-line plan](https://proceedings.neurips.cc/paper_files/paper/2017/file/98b17f068d5d9b7668e19fb8ae470841-Paper.pdf), optimized once
+  - ``drp``: a [deep reactive policy](https://ojs.aaai.org/index.php/AAAI/article/view/4744) network
+  - ``replan``: a straight-line plan, optimized again at every step
+  - or the path to a [config file](#configuring-the-planner)
+- ``episodes`` (optional) is the number of episodes to evaluate the result on.
 
-The ``method`` parameter supports four possible modes:
-- ``slp`` is the basic straight line planner described [in this paper](https://proceedings.neurips.cc/paper_files/paper/2017/file/98b17f068d5d9b7668e19fb8ae470841-Paper.pdf)
-- ``drp`` is the deep reactive policy network described [in this paper](https://ojs.aaai.org/index.php/AAAI/article/view/4744)
-- ``replan`` is the same as ``slp`` except the plan is recalculated at every decision time step
-- any other argument is interpreted as a file path to a valid configuration file.
-   
-For example, the following will train JaxPlan on the Quadcopter domain with 4 drones (with default config):
+For example, to fly four drones in the Quadcopter domain:
 
 ```shell
-jaxplan plan Quadcopter 1 slp
+jaxplan plan Quadcopter_physics 1 slp
 ```
 
-## Running from Another Python Application
+With ``slp``, ``drp`` or ``replan``, JaxPlan uses the [settings tuned for the domain](https://github.com/pyrddlgym-project/pyRDDLGym-jax/tree/main/pyRDDLGym_jax/examples/configs) when there are any, and the defaults otherwise.
 
-To run JaxPlan from within a Python application, refer to the following example:
+## Python API
+
+To run JaxPlan from your own code, load a [config file](#configuring-the-planner), build the planner, and evaluate it:
 
 ```python
 import pyRDDLGym
+from pyRDDLGym_jax.core.config import load_config
 from pyRDDLGym_jax.core.controller import JaxOfflineController
-from pyRDDLGym_jax.core.planner import JaxBackpropPlanner
+from pyRDDLGym_jax.core.planner import create_planner
 
-# set up the environment (note the vectorized option must be True)
-env = pyRDDLGym.make("domain", "instance", vectorized=True)
+# set up the environment (it must be vectorized)
+env = pyRDDLGym.make("Quadcopter_physics", "1", vectorized=True)
 
-# create the planning algorithm
-planner = JaxBackpropPlanner(rddl=env.model, **planner_args)
+# load the planner settings from a config file
+planner_args, _, train_args = load_config("/path/to/config.cfg")
+
+# create the planner and train it
+planner = create_planner(rddl=env.model, **planner_args)
 controller = JaxOfflineController(planner, **train_args)
 
-# evaluate the planner
+# evaluate the trained plan
 controller.evaluate(env, episodes=1, verbose=True, render=True)
 env.close()
 ```
 
-Here, we have used the straight-line controller, although you can configure the combination of planner and policy representation if you wish. 
-All controllers are instances of pyRDDLGym's ``BaseAgent`` class, so they provide the ``evaluate()`` function to streamline interaction with the environment.
-The ``**planner_args`` and ``**train_args`` are keyword argument parameters to pass during initialization, but we strongly recommend creating and loading a config file as discussed in the next section.
+``JaxOfflineController`` trains once, before acting; to replan at every step, use ``JaxOnlineController`` instead.
+Both are pyRDDLGym agents, so ``evaluate()`` and ``sample_action()`` work as with any other policy.
 
-## Configuring the Planner
+## Configuring the planner
 
-The simplest way to configure the planner is to write and pass a configuration file with the necessary [hyper-parameters](https://pyrddlgym.readthedocs.io/en/latest/jax.html#configuring-pyrddlgym-jax).
-The basic structure of a configuration file is provided below for a straight-line planner:
+A config file holds the planner's [hyper-parameters](https://pyrddlgym.readthedocs.io/en/latest/jax.html#configuring-pyrddlgym-jax). For a straight-line plan:
 
 ```ini
 [Compiler]
@@ -144,12 +120,12 @@ epochs=5000
 train_seconds=30
 ```
 
-The configuration file contains three sections:
-- ``[Compiler]`` specifies the fuzzy logic operations used to relax discrete operations to differentiable approximations; the ``weight`` dictates the quality of the approximation
-- ``[Planner]`` generally specify the optimizer and plan settings; the ``method`` specifies the plan/policy representation (e.g. ``JaxStraightLinePlan``, ``JaxDeepReactivePolicy``), the gradient descent settings, learning rate, batch size, etc.
-- ``[Optimize]`` specifies computation limits, such as total training time and number of iterations, and options for printing or visualizing information from the planner.
+It has three sections:
+- ``[Compiler]`` sets how discrete operations are relaxed into differentiable ones, and how sharp the relaxations are (e.g. ``sigmoid_weight``)
+- ``[Planner]`` sets the plan or policy (``method``, e.g. ``JaxStraightLinePlan`` or ``JaxDeepReactivePolicy``) and the optimizer: its learning rate, batch size and so on
+- ``[Optimize]`` sets the limits on training, such as its time and number of iterations, and what is printed or shown along the way.
 
-For a policy network approach, simply change the ``[Planner]`` settings like so:
+For a policy network instead, change the ``[Planner]`` section:
 
 ```ini
 ...
@@ -159,25 +135,10 @@ method_kwargs={'topology': [128, 64], 'activation': 'tanh'}
 ...
 ```
 
-The configuration file must then be passed to the planner during initialization. 
-For example, the [previous script here](#running-from-another-python-application) can be modified to set parameters from a config file:
+## Dashboard
 
-```python
-from pyRDDLGym_jax.core.config import load_config
-
-# load the config file with planner settings
-planner_args, _, train_args = load_config("/path/to/config.cfg")
-    
-# create the planning algorithm
-planner = JaxBackpropPlanner(rddl=env.model, **planner_args)
-controller = JaxOfflineController(planner, **train_args)
-...
-```
-
-## JaxPlan Dashboard
-
-Since version 1.0, JaxPlan has an optional dashboard that allows keeping track of the planner performance across multiple runs, 
-and visualization of the policy or model, and other useful debugging features. To run the dashboard, add the following to your config file:
+The dashboard tracks the planner across runs, visualizes the policy and the model, and helps with debugging.
+To open it, add this to your config file:
 
 ```ini
 ...
@@ -186,26 +147,23 @@ dashboard=True
 ...
 ```
 
-## Tuning the Planner
+## Tuning the planner
 
-A basic run script is provided to run automatic Bayesian hyper-parameter tuning (with [Optuna](https://optuna.org/)) for the most sensitive parameters of JaxPlan:
+Tune the most sensitive hyper-parameters automatically with Bayesian optimization ([Optuna](https://optuna.org/)), straight from the command line:
 
 ```shell
-jaxplan tune <domain> <instance> <method> --seeds <seeds> --configs <configs> --workers <workers> --dashboard <dashboard> --filepath <filepath>
+jaxplan tune <domain> <instance> <method> --seeds <seeds> --configs <configs> --workers <workers> --dashboard --filepath <filepath>
 ```
 
 where:
-- ``domain`` is the domain identifier as specified in rddlrepository
-- ``instance`` is the instance identifier
-- ``method`` is the planning method to use (i.e. drp, slp, replan)
-- ``seeds`` is the (optional) number of independent training runs (seeds) to average in evaluating each hyper-parameter setting
-- ``configs`` is the (optional) number of hyper-parameter settings to evaluate
-- ``workers`` is the (optional) number of hyper-parameter settings evaluated in parallel
-- ``dashboard`` is whether the training runs are tracked in the dashboard application
-- ``filepath`` is the optional file path where a config file with the best hyper-parameter setting will be saved.
+- ``domain``, ``instance`` and ``method`` are as for [``jaxplan plan``](#quick-start), with ``method`` one of ``slp``, ``drp`` or ``replan``
+- ``seeds`` (optional) is the number of training runs averaged to score each setting
+- ``configs`` (optional) is the number of settings to try
+- ``workers`` (optional) is the number of settings tried in parallel
+- ``--dashboard`` (optional) tracks the training runs in the dashboard
+- ``filepath`` (optional) is where to save a config file with the best setting.
 
-It is easy to tune a custom range of the planner's hyper-parameters efficiently. 
-First create a config file template with patterns replacing concrete parameter values that you want to tune, e.g.:
+To tune any hyper-parameters you choose, write a config template with a tag in place of each value to tune:
 
 ```ini
 [Compiler]
@@ -225,68 +183,62 @@ print_progress=False
 train_on_reset=True
 ```
 
-would allow to tune the sharpness of model relaxations, and the learning rate of the optimizer.
-
-Next, link the hyperparameters in the config with concrete ranges that the optimizer will use, and run the optimizer:
+This one tunes how sharp the relaxations are and the learning rate. Then give each tag a range, and tune:
 
 ```python
 import pyRDDLGym
 from pyRDDLGym_jax.core.tuning import JaxParameterTuning, Hyperparameter
 
-# set up the environment   
+# set up the environment
 env = pyRDDLGym.make(domain, instance, vectorized=True)
-    
-# load the config file template with planner settings
-with open('path/to/config.cfg', 'r') as file: 
-    config_template = file.read() 
-    
-# tune weight from 10^-1 ... 10^5 and lr from 10^-5 ... 10^1 in log-space
-hyperparams = [Hyperparameter.real('TUNABLE_WEIGHT', 1e-1, 1e5, log=True),
-               Hyperparameter.real('TUNABLE_LEARNING_RATE', 1e-5, 1e1, log=True)]
-    
+
+# load the config template
+with open("path/to/config.cfg", "r") as file:
+    config_template = file.read()
+
+# tune the weight in 10^-1 ... 10^5 and the learning rate in 10^-5 ... 10^1, in log-space
+hyperparams = [Hyperparameter.real("TUNABLE_WEIGHT", 1e-1, 1e5, log=True),
+               Hyperparameter.real("TUNABLE_LEARNING_RATE", 1e-5, 1e1, log=True)]
+
 # build the tuner and tune
 tuning = JaxParameterTuning(env=env,
                             config_template=config_template, hyperparams=hyperparams,
                             online=False, num_seeds=seeds, num_workers=workers, num_configs=configs)
-tuning.tune(key=42, log_file='path/to/log.csv')
+tuning.tune(key=42, log_file="path/to/log.csv")
 ```
 
-Details:
-- Hyper-parameters can be ``Hyperparameter.real``, ``Hyperparameter.integer`` or ``Hyperparameter.categorical``. 
-- An optional ``transform`` argument maps the searched value to the value in the config (e.g. ``transform=lambda x: 2 ** x``).
+More options:
+- Hyper-parameters can be ``Hyperparameter.real``, ``Hyperparameter.integer`` or ``Hyperparameter.categorical``.
+- An optional ``transform`` maps the searched value to the value in the config (e.g. ``transform=lambda x: 2 ** x``).
 - Values are substituted as written, so the tag of a string choice must be quoted in the template (e.g. ``optimizer='OPTIMIZER_TUNE'``).
-- By default, configurations are suggested by Optuna's ``GPSampler`` if ``torch`` is installed (otherwise ``TPESampler``); any other Optuna ``sampler`` can be passed, 
-as well as a ``pruner`` (e.g. ``optuna.pruners.WilcoxonPruner()``) to stop evaluating unpromising configurations early, 
-and a ``storage`` journal file to save and resume the study. The Optuna study is available afterwards as ``tuning.study``,
-where the return and training iterations of each run are kept in the ``user_attrs`` of each trial, and also saved in the ``log_file``.
-- With ``show_dashboard=True``, the study is shown live in [optuna-dashboard](https://github.com/optuna/optuna-dashboard) (history, parameter importances, contours, etc.),
-and the training curves of each run in the JaxPlan dashboard, where run ``config=N`` is Optuna trial ``N``.
-  
+- Settings are suggested by Optuna's ``GPSampler`` if ``torch`` is installed, and by ``TPESampler`` otherwise. Pass any other Optuna ``sampler``,
+  a ``pruner`` (e.g. ``optuna.pruners.WilcoxonPruner()``) to stop unpromising settings early, or a ``storage`` journal file to save and resume the study.
+- The Optuna study is kept in ``tuning.study``: the return and training iterations of each run are in the ``user_attrs`` of its trial, and in the ``log_file``.
+- With ``show_dashboard=True``, the study is shown live in [optuna-dashboard](https://github.com/optuna/optuna-dashboard) (history, parameter importances, contours and more),
+  and the training curves of each run in the JaxPlan dashboard, where run ``config=N`` is Optuna trial ``N``.
 
-## Simulation
+## Simulating with JAX
 
-The JAX compiler can be used as a backend for simulating and evaluating RDDL environments:
+The JAX compiler also works as a simulation backend for any pyRDDLGym environment:
 
 ```python
 import pyRDDLGym
 from pyRDDLGym.core.policy import RandomAgent
 from pyRDDLGym_jax.core.simulator import JaxRDDLSimulator
 
-# create the environment
-env = pyRDDLGym.make("domain", "instance", backend=JaxRDDLSimulator)
+# create the environment with the JAX backend
+env = pyRDDLGym.make("Quadcopter_physics", "1", backend=JaxRDDLSimulator)
 
-# evaluate the random policy
-agent = RandomAgent(action_space=env.action_space, num_actions=env.max_allowed_actions)
+# evaluate a random policy
+agent = RandomAgent(env)
 agent.evaluate(env, verbose=True, render=True)
 ```
 
-For some domains, the JAX backend could perform better than the numpy-based one, due to various compiler optimizations. 
-In any event, the simulation results using the JAX backend should (almost) always match the numpy backend.
-
+Thanks to compiler optimizations, it can be faster than the default NumPy backend on some domains, and its results match it (almost) always.
 
 ## Citing JaxPlan
 
-The [following citation](https://ojs.aaai.org/index.php/ICAPS/article/view/31480) describes the main ideas of JaxPlan. Please cite it if you found it useful:
+The [following paper](https://ojs.aaai.org/index.php/ICAPS/article/view/31480) describes the main ideas of JaxPlan. If you find it useful, please cite:
 
 ```
 @inproceedings{gimelfarb2024jaxplan,
@@ -298,7 +250,7 @@ The [following citation](https://ojs.aaai.org/index.php/ICAPS/article/view/31480
 }
 ```
 
-Some of the implementation details derive from the following literature, which you may wish to also cite in your research papers:
+Parts of the implementation build on the following works, which you may also wish to cite:
 - [A Distributional Framework for Risk-Sensitive End-to-End Planning in Continuous MDPs, AAAI 2022](https://ojs.aaai.org/index.php/AAAI/article/view/21226)
 - [Deep reactive policies for planning in stochastic nonlinear domains, AAAI 2019](https://ojs.aaai.org/index.php/AAAI/article/view/4744)
 - [Stochastic Planning with Lifted Symbolic Trajectory Optimization, AAAI 2019](https://ojs.aaai.org/index.php/ICAPS/article/view/3467/3335)
@@ -306,7 +258,7 @@ Some of the implementation details derive from the following literature, which y
 - [Scalable planning with tensorflow for hybrid nonlinear domains, NeurIPS 2017](https://proceedings.neurips.cc/paper/2017/file/98b17f068d5d9b7668e19fb8ae470841-Paper.pdf)
 - [Baseline-Free Sampling in Parameter Exploring Policy Gradients: Super Symmetric PGPE, ANN 2015](https://link.springer.com/chapter/10.1007/978-3-319-09903-3_13)
 
-The model relaxations in JaxPlan are based on the following works:
+The relaxations of JaxPlan build on these works:
 - [SoftJAX & SoftTorch: Empowering Automatic Differentiation Libraries with Informative Gradients, ICML 2026](https://openreview.net/forum?id=RKHDV40omz)
 - [Poisson Variational Autoencoder, NeurIPS 2025](https://proceedings.neurips.cc/paper_files/paper/2024/file/4f3cb9576dc99d62b80726690453716f-Paper-Conference.pdf)
 - [Analyzing Differentiable Fuzzy Logic Operators, AI 2022](https://www.sciencedirect.com/science/article/pii/S0004370221001533)
