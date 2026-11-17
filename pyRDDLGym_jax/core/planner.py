@@ -3178,7 +3178,9 @@ class JaxMPPIPlanner(JaxPlanner):
     Optionally, the noise perturbs a few support points that are interpolated over time
     by a kernel (KMPPI in [15]), which smooths the plan and reduces the sampled dimension.
     Also optionally as in [18], the best perturbed plans of an update are evaluated again
-    in the next update.
+    in the next update. Boolean actions can instead be sampled from the probabilities of
+    the plan, updated by matching the moments of the weighted samples as in the
+    cross-entropy method.
 
     An update is one iteration of MPPI from the initial state, so an online controller
     with one iteration per decision epoch and warm start runs MPPI with the plan shifted
@@ -3199,6 +3201,7 @@ class JaxMPPIPlanner(JaxPlanner):
                  noise_sigma: Union[float, Dict[str, Any], np.ndarray]=1.0,
                  noise_mu: Optional[Union[float, Dict[str, Any], np.ndarray]]=None,
                  min_flip_prob: Optional[float]=0.01,
+                 bool_sampling: str='bernoulli',
                  adapt_noise: bool=True,
                  noise_abs_cost: bool=False,
                  noise_init: bool=False,
@@ -3232,7 +3235,12 @@ class JaxMPPIPlanner(JaxPlanner):
         action-fluent to variance, or a vector or matrix over the parameters
         :param noise_mu: mean of the noise as a scalar, dict or vector (zero if None)
         :param min_flip_prob: minimum probability that the noise flips a boolean action at
-        the bound of its parameter (None for no minimum), for a scalar noise_sigma
+        the bound of its parameter (None for no minimum), for a scalar noise_sigma or
+        bool_sampling = 'bernoulli'
+        :param bool_sampling: 'gaussian' perturbs the parameters of boolean actions by
+        Gaussian noise, 'bernoulli' samples them from the probabilities of the plan (a
+        categorical for max-nondef-actions = 1) mixed with a uniform so that every value
+        has probability at least min_flip_prob, and updates the plan by moment matching
         :param adapt_noise: whether the diagonal variances of the noise are adapted to the
         weighted spread of the noise around the plan as in [17]
         :param noise_abs_cost: whether the action cost uses the absolute value of noise
@@ -3290,6 +3298,10 @@ class JaxMPPIPlanner(JaxPlanner):
         if min_flip_prob is not None and not 0 < min_flip_prob < 0.5:
             raise ValueError(f'min_flip_prob must be in (0, 0.5), got {min_flip_prob}.')
         self.min_flip_prob = min_flip_prob
+        if bool_sampling not in ('gaussian', 'bernoulli'):
+            raise ValueError(
+                f'bool_sampling must be gaussian or bernoulli, got {bool_sampling}.')
+        self.bool_sampling = bool_sampling
         self.adapt_noise = adapt_noise
         self.noise_abs_cost = noise_abs_cost
         self.noise_init = noise_init
@@ -3318,6 +3330,7 @@ class JaxMPPIPlanner(JaxPlanner):
                 f'    noise_sigma        ={self.noise_sigma}\n'
                 f'    noise_mu           ={self.noise_mu}\n'
                 f'    min_flip_prob      ={self.min_flip_prob}\n'
+                f'    bool_sampling      ={self.bool_sampling}\n'
                 f'    adapt_noise        ={self.adapt_noise}\n'
                 f'    noise_abs_cost     ={self.noise_abs_cost}\n'
                 f'    noise_init         ={self.noise_init}\n'
@@ -3425,6 +3438,53 @@ class JaxMPPIPlanner(JaxPlanner):
             value = np.ravel(np.broadcast_to(np.asarray(value, dtype=np.float64), shape))
             values.append(value)
         return np.concatenate(values)
+
+    def _bernoulli_columns(self, names: list, shapes: list) -> Optional[Dict[str, Any]]:
+        '''Returns the columns of the boolean action parameters at one step, their noop
+        values and whether they form a categorical (max-nondef-actions = 1), or None if
+        boolean actions are not sampled from Bernoulli or categorical distributions.'''
+        if self.bool_sampling != 'bernoulli':
+            return None
+        rddl, ranges = self.rddl, self.rddl.variable_ranges
+        if any(name not in ranges for name in names):
+            if self.print_warnings:
+                print(termcolor.colored(
+                    '[WARN] bool_sampling = bernoulli does not support wrap_softmax: '
+                    'using Gaussian noise for boolean actions.', 'yellow'))
+            return None
+        bool_count = sum(int(np.prod(shape)) for (name, shape) in zip(names, shapes)
+                         if ranges[name] == 'bool')
+        if bool_count == 0:
+            return None
+        allowed = rddl.max_allowed_actions
+        categorical = allowed < bool_count
+        if categorical and allowed > 1:
+            if self.print_warnings:
+                print(termcolor.colored(
+                    f'[WARN] bool_sampling = bernoulli does not support '
+                    f'max-nondef-actions = {allowed} > 1: using Gaussian noise for '
+                    f'boolean actions.', 'yellow'))
+            return None
+        floor = 0. if self.min_flip_prob is None else self.min_flip_prob
+        num_classes = bool_count + 1 if categorical else 2
+        if num_classes * floor >= 1:
+            raise ValueError(
+                f'min_flip_prob {floor} is too large for {num_classes} values of the '
+                f'boolean actions at one step, must be < {1. / num_classes}.')
+
+        index, noop, variables, start = [], [], [], 0
+        for (name, shape) in zip(names, shapes):
+            size = int(np.prod(shape))
+            if ranges[name] == 'bool':
+                default = rddl.action_fluents[name]
+                default = default[0] if isinstance(default, list) else default
+                index.extend(range(start, start + size))
+                noop.extend([bool(default)] * size)
+                variables.append((name, size))
+            start += size
+        return {'index': np.asarray(index), 'noop': np.asarray(noop),
+                'variables': variables, 'categorical': categorical,
+                'num_classes': num_classes, 'floor': floor}
 
     def _jax_compile_optimizer(self) -> None:
         if not isinstance(self.plan, JaxStraightLinePlan):
@@ -3549,7 +3609,7 @@ class JaxMPPIPlanner(JaxPlanner):
         # mean weighted as the mean update, over all steps, bounded below by their floor
         def _jax_wrapped_adapt_variance(variance, weights, noise, hyperparams):
             spread = jnp.einsum('k,ktn->n', weights, jnp.square(noise)) / noise.shape[1]
-            variance = jnp.where(jnp.sum(weights) > 0, spread, variance)
+            variance = jnp.where((jnp.sum(weights) > 0) & real_columns, spread, variance)
             floor = jnp.maximum(_jax_wrapped_scale_columns(floor_variance, hyperparams), tiny)
             return jnp.maximum(variance, floor)
 
@@ -3572,6 +3632,8 @@ class JaxMPPIPlanner(JaxPlanner):
             if noise_abs_cost:
                 noise = jnp.abs(noise)
             weighted = noise * precision if diagonal else noise @ precision
+            if bernoulli is not None:
+                weighted = weighted * real_columns
             return jnp.sum(nominal[jnp.newaxis] * weighted, axis=(1, 2))
 
         def _jax_wrapped_ess(weights):
@@ -3650,6 +3712,104 @@ class JaxMPPIPlanner(JaxPlanner):
             num_rows = num_support
         else:
             num_rows = horizon
+
+        # boolean actions sampled from the probabilities of the plan that they differ from
+        # noop, mixed with a uniform so that every class has probability at least the floor
+        bernoulli = self._bernoulli_columns(names, shapes)
+        real_columns = np.ones((nu,), dtype=bool)
+        if bernoulli is not None:
+            if use_kernel:
+                raise ValueError('bool_sampling = bernoulli does not support KMPPI.')
+            bool_index = bernoulli['index']
+            bool_noop = bernoulli['noop']
+            bool_variables = bernoulli['variables']
+            categorical = bernoulli['categorical']
+            num_classes = bernoulli['num_classes']
+            class_floor = bernoulli['floor']
+            mixture = num_classes * class_floor
+            wrap_sigmoid = self.plan._wrap_sigmoid
+            bool_threshold = 0. if wrap_sigmoid else 0.5
+            min_prob = self.plan._min_action_prob
+            real_columns[bool_index] = False
+
+        def _jax_wrapped_bool_weights(hyperparams):
+            return jnp.concatenate([
+                jnp.full((size,), hyperparams[name], dtype=real_dtype)
+                for (name, size) in bool_variables
+            ])
+
+        # whether the boolean actions of rows differ from noop, as evaluated by the plan
+        def _jax_wrapped_active(rows):
+            params = rows[..., bool_index]
+            values = jnp.where(
+                bool_noop, params >= bool_threshold, params > bool_threshold)
+            return values != bool_noop
+
+        # rows whose boolean actions differ from noop with the given probabilities
+        def _jax_wrapped_encode(rows, active_probs, hyperparams):
+            active_probs = jnp.clip(active_probs, 0., 1.)
+            probs = jnp.where(bool_noop, 1. - active_probs, active_probs)
+            if wrap_sigmoid:
+                params = jax.scipy.special.logit(probs) / _jax_wrapped_bool_weights(hyperparams)
+            else:
+                params = probs
+            return rows.at[..., bool_index].set(params)
+
+        # the distribution of the plan over the classes (last axis) at each step
+        def _jax_wrapped_bool_distribution(rows, hyperparams):
+            params = rows[..., bool_index]
+            if wrap_sigmoid:
+                probs = jax.nn.sigmoid(_jax_wrapped_bool_weights(hyperparams) * params)
+            else:
+                probs = params
+            active = jnp.where(bool_noop, 1. - probs, probs)
+            if categorical:
+                none = jnp.maximum(1. - jnp.sum(active, axis=-1, keepdims=True), 0.)
+                dist = jnp.concatenate([none, active], axis=-1)
+                return dist / jnp.sum(dist, axis=-1, keepdims=True)
+            return jnp.stack([1. - active, active], axis=-1)
+
+        # inverse-CDF sampling of the classes, whose uniforms are mirrored as 1 - u
+        def _jax_wrapped_sample_active(key, num, sampling, mirrored=False):
+            batch = sampling.shape[:-1]
+            if mirrored:
+                half = (num + 1) // 2
+                u = random.uniform(key, shape=(half,) + batch, dtype=real_dtype)
+                u = jnp.concatenate([u, 1. - u], axis=0)[:num]
+            else:
+                u = random.uniform(key, shape=(num,) + batch, dtype=real_dtype)
+            cdf = jnp.cumsum(sampling, axis=-1)[..., :-1]
+            classes = jnp.sum(u[..., jnp.newaxis] >= cdf[jnp.newaxis], axis=-1)
+            if categorical:
+                return classes[..., jnp.newaxis] == jnp.arange(1, num_classes)
+            return classes == 1
+
+        # the KL projection of the weighted class frequencies onto the distributions whose
+        # classes have probability at least the floor: q = max(m / s, floor), sum q = 1
+        def _jax_wrapped_project_floor(means):
+            if class_floor == 0:
+                return means
+            ascending = jnp.sort(means, axis=-1)
+            clamped = jnp.arange(num_classes, dtype=real_dtype)
+            tails = jnp.flip(jnp.cumsum(jnp.flip(ascending, axis=-1), axis=-1), axis=-1)
+            scales = tails / (1. - clamped * class_floor)
+            first = jnp.argmax(ascending >= class_floor * scales, axis=-1)
+            scale = jnp.take_along_axis(scales, first[..., jnp.newaxis], axis=-1)
+            scale = jnp.where(scale > 0, scale, 1.)
+            return jnp.maximum(means / scale, class_floor)
+
+        # moment matching of the mixture with the uniform to the weighted samples
+        def _jax_wrapped_bool_update(base, weights, active):
+            if categorical:
+                active = active & (jnp.cumsum(active, axis=-1) == 1)
+                classes = jnp.concatenate(
+                    [~jnp.any(active, axis=-1, keepdims=True), active], axis=-1)
+            else:
+                classes = jnp.stack([~active, active], axis=-1)
+            means = jnp.einsum('k,k...->...', weights, classes.astype(real_dtype))
+            sampling = _jax_wrapped_project_floor(means)
+            new_base = (sampling - class_floor) / (1. - mixture)
+            return jnp.where(jnp.sum(weights) > 0, new_base, base)
 
         # the null plan is the noop action at every step (KMPPI support fits to it)
         if sample_null_action:
@@ -3735,6 +3895,20 @@ class JaxMPPIPlanner(JaxPlanner):
                 perturbed = center[jnp.newaxis] + _jax_wrapped_noise(
                     noise_key, (num_samples, num_rows), moments, mirrored_sampling)
 
+                # boolean actions are sampled from the plan mixed with the uniform
+                if bernoulli is not None:
+                    base = _jax_wrapped_bool_distribution(
+                        _jax_wrapped_project_rows(nominal, hyperparams)[0], hyperparams)
+                    sampling = (1. - mixture) * base + class_floor
+                    sampled_active = _jax_wrapped_sample_active(
+                        random.fold_in(noise_key, 1), num_samples, sampling, mirrored_sampling)
+                    perturbed = _jax_wrapped_encode(
+                        perturbed, jnp.where(sampled_active, 1. - min_prob, min_prob),
+                        hyperparams)
+                    flip_prob = jnp.mean(1. - jnp.max(sampling, axis=-1))
+                else:
+                    flip_prob = jnp.zeros((), dtype=real_dtype)
+
                 # specific perturbed plans replace the first sampled plans
                 start = 0
                 if sample_null_action:
@@ -3805,8 +3979,14 @@ class JaxMPPIPlanner(JaxPlanner):
                     temperature)
                 ess = _jax_wrapped_ess(weights)
 
-                # update the sampled variables by the weighted noise
+                # update the sampled variables by the weighted noise, and the boolean
+                # actions by moment matching to the classes of the evaluated plans
                 center = center + jnp.einsum('k,ktn->tn', weights, noise)
+                if bernoulli is not None:
+                    new_base = _jax_wrapped_bool_update(
+                        base, weights, _jax_wrapped_active(perturbed))
+                    active_probs = new_base[..., 1:] if categorical else new_base[..., 1]
+                    center = _jax_wrapped_encode(center, active_probs, hyperparams)
                 new_opt_state = dict(opt_state)
                 if adapt_noise:
                     new_opt_state['variance'] = _jax_wrapped_adapt_variance(
@@ -3826,23 +4006,31 @@ class JaxMPPIPlanner(JaxPlanner):
                 new_nominal, converged = _jax_wrapped_project_rows(new_nominal, hyperparams)
                 valid_loss = jnp.nanmean(jnp.where(jnp.isfinite(losses), losses, jnp.nan))
                 grad = _jax_wrapped_from_rows(nominal - new_nominal)
+                statistics = {'ESS': ess, 'lambda': temperature}
+                if num_elites > 0:
+                    statistics['elite weight'] = elite_weight
+                if bernoulli is not None:
+                    statistics['flip prob'] = flip_prob
                 return (key, _jax_wrapped_from_rows(new_nominal), new_opt_state, converged,
-                        valid_loss, grad, ess, temperature, elite_weight)
+                        valid_loss, grad, statistics)
 
             # do an unrolled update
             params = planner_state.policy_params
+            statistic_names = ['ESS', 'lambda']
+            if num_elites > 0:
+                statistic_names.append('elite weight')
+            if bernoulli is not None:
+                statistic_names.append('flip prob')
             carry = (sim_state.key, params, planner_state.opt_state,
                      jnp.asarray(True), jnp.zeros((), dtype=real_dtype),
                      jax.tree_util.tree_map(jnp.zeros_like, params),
-                     jnp.zeros((), dtype=real_dtype), jnp.zeros((), dtype=real_dtype),
-                     jnp.zeros((), dtype=real_dtype))
-            _, params, opt_state, converged, loss, grad, ess, temperature, elite_weight = \
-                jax.lax.fori_loop(
-                    lower=0, upper=self.steps_per_update,
-                    body_fun=_jax_wrapped_mppi_update_step,
-                    init_val=carry
-                )
-            return params, opt_state, converged, loss, grad, ess, temperature, elite_weight
+                     {name: jnp.zeros((), dtype=real_dtype) for name in statistic_names})
+            _, params, opt_state, converged, loss, grad, statistics = jax.lax.fori_loop(
+                lower=0, upper=self.steps_per_update,
+                body_fun=_jax_wrapped_mppi_update_step,
+                init_val=carry
+            )
+            return params, opt_state, converged, loss, grad, statistics
 
         # for parallel policy update
         def _jax_wrapped_batched_mppi_updates(sim_state, planner_state):
@@ -3850,20 +4038,19 @@ class JaxMPPIPlanner(JaxPlanner):
             sim_state = sim_state.replace(key=keys[1:])
             vmap_axes = (JaxRDDLSimState(key=0, model_params=0),
                          JaxPlannerState(policy_params=0, opt_state=0))
-            params, opt_state, converged, loss, grad, ess, temperature, elite_weight = jax.vmap(
+            params, opt_state, converged, loss, grad, statistics = jax.vmap(
                 _jax_wrapped_mppi_update, in_axes=vmap_axes
             )(sim_state, planner_state)
             planner_state = planner_state.replace(policy_params=params, opt_state=opt_state)
             sim_state = sim_state.replace(key=keys[0])
             zero_grads = jax.vmap(_jax_zero_tree)(grad)
-            statistics = {'ESS': ess, 'lambda': temperature}
-            if num_elites > 0:
-                statistics['elite weight'] = elite_weight
-            if adapt_noise:
+
+            # the noise scale is over the parameters with Gaussian noise
+            if adapt_noise and np.any(real_columns):
                 initial = _jax_wrapped_scale_columns(
                     default_variance, planner_state.hyperparams)
-                statistics['noise scale'] = jnp.sqrt(
-                    jnp.mean(opt_state['variance'] / initial, axis=1))
+                ratio = opt_state['variance'] / initial
+                statistics['noise scale'] = jnp.sqrt(jnp.mean(ratio[:, real_columns], axis=1))
             return sim_state, planner_state, loss, converged, grad, zero_grads, statistics
         update_fn = jax.jit(_jax_wrapped_batched_mppi_updates)
 
