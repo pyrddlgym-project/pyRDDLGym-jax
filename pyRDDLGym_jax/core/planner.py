@@ -75,6 +75,10 @@
 # matrix adaptation." In Proceedings of the 29th International Conference on Machine
 # Learning, pp. 1547-1554. 2012.
 #
+# [18] Pinneri, Cristina, Shambhuraj Sawant, Sebastian Blaes, Jan Achterhold, Joerg
+# Stueckler, Michal Rolinek, and Georg Martius. "Sample-efficient cross-entropy method
+# for real-time planning." In Conference on Robot Learning, pp. 1049-1065. 2021.
+#
 # ***********************************************************************
 
 
@@ -3173,6 +3177,8 @@ class JaxMPPIPlanner(JaxPlanner):
 
     Optionally, the noise perturbs a few support points that are interpolated over time
     by a kernel (KMPPI in [15]), which smooths the plan and reduces the sampled dimension.
+    Also optionally as in [18], the best perturbed plans of an update are evaluated again
+    in the next update.
 
     An update is one iteration of MPPI from the initial state, so an online controller
     with one iteration per decision epoch and warm start runs MPPI with the plan shifted
@@ -3203,6 +3209,7 @@ class JaxMPPIPlanner(JaxPlanner):
                  common_random_numbers: bool=True,
                  violations_first: bool=True,
                  mirrored_sampling: bool=False,
+                 num_elites: int=3,
                  kernel: Optional[Union[str, Callable]]=None,
                  kernel_sigma: float=1.0,
                  num_support_pts: Optional[int]=None,
@@ -3239,6 +3246,8 @@ class JaxMPPIPlanner(JaxPlanner):
         :param violations_first: whether only the perturbed plans with the fewest
         violations of the action preconditions are weighted (otherwise only their costs)
         :param mirrored_sampling: whether the noise is sampled in mirrored pairs
+        :param num_elites: how many perturbed plans with the largest weights replace
+        sampled plans in the next update and are evaluated again, as in [18]
         :param kernel: None for MPPI, or 'rbf' or a function (t, tk) -> kernel matrix
         over times for KMPPI
         :param kernel_sigma: bandwidth of the 'rbf' kernel
@@ -3259,6 +3268,8 @@ class JaxMPPIPlanner(JaxPlanner):
             raise ValueError(f'Invalid kernel <{kernel}>, must be None, rbf or callable.')
         if num_support_pts is not None and num_support_pts < 1:
             raise ValueError(f'num_support_pts must be positive, got {num_support_pts}.')
+        if not 0 <= num_elites < num_samples:
+            raise ValueError(f'num_elites must be in [0, num_samples), got {num_elites}.')
         self.num_samples = num_samples
         self.lambda_ = lambda_
         self.target_ess = target_ess
@@ -3278,6 +3289,7 @@ class JaxMPPIPlanner(JaxPlanner):
         self.common_random_numbers = common_random_numbers
         self.violations_first = violations_first
         self.mirrored_sampling = mirrored_sampling
+        self.num_elites = num_elites
         self.kernel = kernel
         self.kernel_sigma = kernel_sigma
         self.num_support_pts = num_support_pts
@@ -3303,7 +3315,8 @@ class JaxMPPIPlanner(JaxPlanner):
                 f'    common_random_nums ={self.common_random_numbers}\n'
                 f'    violations_first   ={self.violations_first}\n'
                 f'    mirrored_sampling  ={self.mirrored_sampling}\n'
-                f'    kernel             ={self.kernel}\n'
+                f'    num_elites         ={self.num_elites}\n'
+                f'    kernel            ={self.kernel}\n'
                 f'    kernel_sigma       ={self.kernel_sigma}\n'
                 f'    num_support_pts    ={self.num_support_pts}\n'
                 f'    steps_per_update   ={self.steps_per_update}\n')
@@ -3419,6 +3432,7 @@ class JaxMPPIPlanner(JaxPlanner):
         common_random_numbers = self.common_random_numbers
         violations_first = self.violations_first and self.check_preconditions
         mirrored_sampling = self.mirrored_sampling
+        num_elites = self.num_elites
 
         # the plan is a matrix whose rows are the steps and whose columns are the
         # action parameters at one step
@@ -3657,6 +3671,10 @@ class JaxMPPIPlanner(JaxPlanner):
                 variance = _jax_wrapped_scale_columns(
                     default_variance, planner_state.hyperparams)
                 opt_state['variance'] = jnp.broadcast_to(variance, (parallel_updates, nu))
+            if num_elites > 0:
+                opt_state['elites'] = jnp.zeros(
+                    (parallel_updates, num_elites, num_rows, nu), dtype=real_dtype)
+                opt_state['has_elites'] = jnp.zeros((parallel_updates,), dtype=bool)
             return planner_state.replace(opt_state=opt_state)
         self.initialize = jax.jit(
             _jax_wrapped_batched_mppi_init, static_argnames=['init_policy_params'])
@@ -3705,10 +3723,18 @@ class JaxMPPIPlanner(JaxPlanner):
                     if use_kernel:
                         specific = jnp.einsum('st,ktn->ksn', support_fit, specific)
                     end = start + specific.shape[0]
-                    if end > num_samples:
+                    if end > num_samples - num_elites:
                         raise ValueError(
-                            f'Specific and null plans ({end}) > num_samples ({num_samples}).')
+                            f'Specific and null plans ({end}) > num_samples - num_elites '
+                            f'({num_samples - num_elites}).')
                     perturbed = perturbed.at[start:end].set(specific)
+
+                # the elites of the last update replace the last sampled plans
+                if num_elites > 0:
+                    elites = jnp.where(
+                        opt_state['has_elites'], opt_state['elites'],
+                        perturbed[num_samples - num_elites:])
+                    perturbed = perturbed.at[num_samples - num_elites:].set(elites)
 
                 # the noise is measured after projection
                 perturbed = project_samples(perturbed)
@@ -3751,6 +3777,13 @@ class JaxMPPIPlanner(JaxPlanner):
                 if adapt_noise:
                     new_opt_state['variance'] = _jax_wrapped_adapt_variance(
                         opt_state['variance'], weights, noise, hyperparams)
+                if num_elites > 0:
+                    _, best = jax.lax.top_k(weights, num_elites)
+                    new_opt_state['elites'] = perturbed[best]
+                    new_opt_state['has_elites'] = jnp.sum(weights) > 0
+                    elite_weight = jnp.sum(weights[num_samples - num_elites:])
+                else:
+                    elite_weight = jnp.zeros((), dtype=real_dtype)
                 if use_kernel:
                     new_opt_state['support'] = center
                     new_nominal = interpolation @ center
@@ -3760,21 +3793,22 @@ class JaxMPPIPlanner(JaxPlanner):
                 valid_loss = jnp.nanmean(jnp.where(jnp.isfinite(losses), losses, jnp.nan))
                 grad = _jax_wrapped_from_rows(nominal - new_nominal)
                 return (key, _jax_wrapped_from_rows(new_nominal), new_opt_state, converged,
-                        valid_loss, grad, ess, temperature)
+                        valid_loss, grad, ess, temperature, elite_weight)
 
             # do an unrolled update
             params = planner_state.policy_params
             carry = (sim_state.key, params, planner_state.opt_state,
                      jnp.asarray(True), jnp.zeros((), dtype=real_dtype),
                      jax.tree_util.tree_map(jnp.zeros_like, params),
-                     jnp.zeros((), dtype=real_dtype), jnp.zeros((), dtype=real_dtype))
-            _, params, opt_state, converged, loss, grad, ess, temperature = \
+                     jnp.zeros((), dtype=real_dtype), jnp.zeros((), dtype=real_dtype),
+                     jnp.zeros((), dtype=real_dtype))
+            _, params, opt_state, converged, loss, grad, ess, temperature, elite_weight = \
                 jax.lax.fori_loop(
                     lower=0, upper=self.steps_per_update,
                     body_fun=_jax_wrapped_mppi_update_step,
                     init_val=carry
                 )
-            return params, opt_state, converged, loss, grad, ess, temperature
+            return params, opt_state, converged, loss, grad, ess, temperature, elite_weight
 
         # for parallel policy update
         def _jax_wrapped_batched_mppi_updates(sim_state, planner_state):
@@ -3782,12 +3816,15 @@ class JaxMPPIPlanner(JaxPlanner):
             sim_state = sim_state.replace(key=keys[1:])
             vmap_axes = (JaxRDDLSimState(key=0, model_params=0),
                          JaxPlannerState(policy_params=0, opt_state=0))
-            params, opt_state, converged, loss, grad, ess, temperature = jax.vmap(
-                _jax_wrapped_mppi_update, in_axes=vmap_axes)(sim_state, planner_state)
+            params, opt_state, converged, loss, grad, ess, temperature, elite_weight = jax.vmap(
+                _jax_wrapped_mppi_update, in_axes=vmap_axes
+            )(sim_state, planner_state)
             planner_state = planner_state.replace(policy_params=params, opt_state=opt_state)
             sim_state = sim_state.replace(key=keys[0])
             zero_grads = jax.vmap(_jax_zero_tree)(grad)
             statistics = {'ESS': ess, 'lambda': temperature}
+            if num_elites > 0:
+                statistics['elite weight'] = elite_weight
             if adapt_noise:
                 initial = _jax_wrapped_scale_columns(
                     default_variance, planner_state.hyperparams)
