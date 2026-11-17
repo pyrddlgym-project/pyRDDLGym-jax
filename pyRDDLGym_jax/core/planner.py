@@ -3202,6 +3202,7 @@ class JaxMPPIPlanner(JaxPlanner):
                  rollout_var_discount: float=0.95,
                  common_random_numbers: bool=True,
                  violations_first: bool=True,
+                 mirrored_sampling: bool=False,
                  kernel: Optional[Union[str, Callable]]=None,
                  kernel_sigma: float=1.0,
                  num_support_pts: Optional[int]=None,
@@ -3237,6 +3238,7 @@ class JaxMPPIPlanner(JaxPlanner):
         random numbers of their rollouts
         :param violations_first: whether only the perturbed plans with the fewest
         violations of the action preconditions are weighted (otherwise only their costs)
+        :param mirrored_sampling: whether the noise is sampled in mirrored pairs
         :param kernel: None for MPPI, or 'rbf' or a function (t, tk) -> kernel matrix
         over times for KMPPI
         :param kernel_sigma: bandwidth of the 'rbf' kernel
@@ -3275,6 +3277,7 @@ class JaxMPPIPlanner(JaxPlanner):
         self.rollout_var_discount = rollout_var_discount
         self.common_random_numbers = common_random_numbers
         self.violations_first = violations_first
+        self.mirrored_sampling = mirrored_sampling
         self.kernel = kernel
         self.kernel_sigma = kernel_sigma
         self.num_support_pts = num_support_pts
@@ -3299,6 +3302,7 @@ class JaxMPPIPlanner(JaxPlanner):
                 f'    rollout_var_disc   ={self.rollout_var_discount}\n'
                 f'    common_random_nums ={self.common_random_numbers}\n'
                 f'    violations_first   ={self.violations_first}\n'
+                f'    mirrored_sampling  ={self.mirrored_sampling}\n'
                 f'    kernel             ={self.kernel}\n'
                 f'    kernel_sigma       ={self.kernel_sigma}\n'
                 f'    num_support_pts    ={self.num_support_pts}\n'
@@ -3414,6 +3418,7 @@ class JaxMPPIPlanner(JaxPlanner):
         specific_action_sampler = self.specific_action_sampler
         common_random_numbers = self.common_random_numbers
         violations_first = self.violations_first and self.check_preconditions
+        mirrored_sampling = self.mirrored_sampling
 
         # the plan is a matrix whose rows are the steps and whose columns are the
         # action parameters at one step
@@ -3511,9 +3516,15 @@ class JaxMPPIPlanner(JaxPlanner):
             floor = jnp.maximum(_jax_wrapped_scale_columns(floor_variance, hyperparams), tiny)
             return jnp.maximum(variance, floor)
 
-        def _jax_wrapped_noise(key, shape, moments):
+        # sampling with mirroring option
+        def _jax_wrapped_noise(key, shape, moments, mirrored=False):
             scale, _ = moments
-            z = random.normal(key, shape=shape + (nu,), dtype=real_dtype)
+            if mirrored:
+                half = (shape[0] + 1) // 2
+                z = random.normal(key, shape=(half,) + shape[1:] + (nu,), dtype=real_dtype)
+                z = jnp.concatenate([z, -z], axis=0)[:shape[0]]
+            else:
+                z = random.normal(key, shape=shape + (nu,), dtype=real_dtype)
             if diagonal:
                 return z * scale + noise_mean
             return z @ scale.T + noise_mean
@@ -3681,7 +3692,7 @@ class JaxMPPIPlanner(JaxPlanner):
                 nominal = _jax_wrapped_to_rows(params)
                 center = opt_state['support'] if use_kernel else nominal
                 perturbed = center[jnp.newaxis] + _jax_wrapped_noise(
-                    noise_key, (num_samples, num_rows), moments)
+                    noise_key, (num_samples, num_rows), moments, mirrored_sampling)
 
                 # specific perturbed plans replace the first sampled plans
                 start = 0
