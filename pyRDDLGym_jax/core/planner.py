@@ -3210,6 +3210,7 @@ class JaxMPPIPlanner(JaxPlanner):
                  violations_first: bool=True,
                  mirrored_sampling: bool=False,
                  elite_frac: float=0.03,
+                 sample_batch_size: Optional[int]=None,
                  kernel: Optional[Union[str, Callable]]=None,
                  kernel_sigma: float=1.0,
                  num_support_pts: Optional[int]=None,
@@ -3249,6 +3250,8 @@ class JaxMPPIPlanner(JaxPlanner):
         :param elite_frac: fraction of the perturbed plans (at least one if positive) with
         the largest weights that replace sampled plans in the next update and are
         evaluated again, as in [18]
+        :param sample_batch_size: at most how many perturbed plans are evaluated at once,
+        which bounds the memory of their rollouts (None evaluates all at once)
         :param kernel: None for MPPI, or 'rbf' or a function (t, tk) -> kernel matrix
         over times for KMPPI
         :param kernel_sigma: bandwidth of the 'rbf' kernel
@@ -3275,6 +3278,9 @@ class JaxMPPIPlanner(JaxPlanner):
         if num_elites >= num_samples:
             raise ValueError(
                 f'elite_frac {elite_frac} leaves no sampled plans of {num_samples}.')
+        if sample_batch_size is not None and sample_batch_size < 1:
+            raise ValueError(
+                f'sample_batch_size must be positive, got {sample_batch_size}.')
         self.num_samples = num_samples
         self.lambda_ = lambda_
         self.target_ess = target_ess
@@ -3296,6 +3302,7 @@ class JaxMPPIPlanner(JaxPlanner):
         self.mirrored_sampling = mirrored_sampling
         self.elite_frac = elite_frac
         self.num_elites = num_elites
+        self.sample_batch_size = sample_batch_size
         self.kernel = kernel
         self.kernel_sigma = kernel_sigma
         self.num_support_pts = num_support_pts
@@ -3322,6 +3329,7 @@ class JaxMPPIPlanner(JaxPlanner):
                 f'    violations_first   ={self.violations_first}\n'
                 f'    mirrored_sampling  ={self.mirrored_sampling}\n'
                 f'    elite_frac         ={self.elite_frac} ({self.num_elites} plans)\n'
+                f'    sample_batch_size  ={self.sample_batch_size}\n'
                 f'    kernel            ={self.kernel}\n'
                 f'    kernel_sigma       ={self.kernel_sigma}\n'
                 f'    num_support_pts    ={self.num_support_pts}\n'
@@ -3439,6 +3447,15 @@ class JaxMPPIPlanner(JaxPlanner):
         violations_first = self.violations_first and self.check_preconditions
         mirrored_sampling = self.mirrored_sampling
         num_elites = self.num_elites
+
+        # the fewest batches of equal size at most sample_batch_size, padded by fewer plans
+        # than batches, so the rollouts are traced once
+        if self.sample_batch_size is None or self.sample_batch_size >= num_samples:
+            num_batches = 1
+        else:
+            num_batches = -(-num_samples // self.sample_batch_size)
+        samples_per_batch = -(-num_samples // num_batches)
+        num_padded = num_batches * samples_per_batch - num_samples
 
         # the plan is a matrix whose rows are the steps and whose columns are the
         # action parameters at one step
@@ -3756,7 +3773,18 @@ class JaxMPPIPlanner(JaxPlanner):
                     keys = jnp.broadcast_to(rollout_key, (num_samples,) + rollout_key.shape)
                 else:
                     keys = random.split(rollout_key, num=num_samples)
-                losses, costs, violations = jax.vmap(_jax_wrapped_sample_cost)(keys, actions)
+                if num_batches == 1:
+                    losses, costs, violations = jax.vmap(_jax_wrapped_sample_cost)(
+                        keys, actions)
+                else:
+                    def _jax_wrapped_batches(x):
+                        x = jnp.concatenate([x, jnp.repeat(x[-1:], num_padded, axis=0)], axis=0)
+                        return jnp.reshape(x, (num_batches, samples_per_batch) + x.shape[1:])
+                    outputs = jax.lax.map(
+                        lambda args: jax.vmap(_jax_wrapped_sample_cost)(*args),
+                        (_jax_wrapped_batches(keys), _jax_wrapped_batches(actions)))
+                    losses, costs, violations = [jnp.reshape(output, (-1,))[:num_samples] 
+                                                 for output in outputs]
                 if noise_cost_scale == 0:
                     action_costs = jnp.zeros_like(costs)
                 else:
