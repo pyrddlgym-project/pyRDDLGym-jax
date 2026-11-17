@@ -3209,7 +3209,7 @@ class JaxMPPIPlanner(JaxPlanner):
                  common_random_numbers: bool=True,
                  violations_first: bool=True,
                  mirrored_sampling: bool=False,
-                 num_elites: int=3,
+                 elite_frac: float=0.03,
                  kernel: Optional[Union[str, Callable]]=None,
                  kernel_sigma: float=1.0,
                  num_support_pts: Optional[int]=None,
@@ -3246,8 +3246,9 @@ class JaxMPPIPlanner(JaxPlanner):
         :param violations_first: whether only the perturbed plans with the fewest
         violations of the action preconditions are weighted (otherwise only their costs)
         :param mirrored_sampling: whether the noise is sampled in mirrored pairs
-        :param num_elites: how many perturbed plans with the largest weights replace
-        sampled plans in the next update and are evaluated again, as in [18]
+        :param elite_frac: fraction of the perturbed plans (at least one if positive) with
+        the largest weights that replace sampled plans in the next update and are
+        evaluated again, as in [18]
         :param kernel: None for MPPI, or 'rbf' or a function (t, tk) -> kernel matrix
         over times for KMPPI
         :param kernel_sigma: bandwidth of the 'rbf' kernel
@@ -3268,8 +3269,12 @@ class JaxMPPIPlanner(JaxPlanner):
             raise ValueError(f'Invalid kernel <{kernel}>, must be None, rbf or callable.')
         if num_support_pts is not None and num_support_pts < 1:
             raise ValueError(f'num_support_pts must be positive, got {num_support_pts}.')
-        if not 0 <= num_elites < num_samples:
-            raise ValueError(f'num_elites must be in [0, num_samples), got {num_elites}.')
+        if not 0 <= elite_frac < 1:
+            raise ValueError(f'elite_frac must be in [0, 1), got {elite_frac}.')
+        num_elites = max(int(round(elite_frac * num_samples)), 1) if elite_frac > 0 else 0
+        if num_elites >= num_samples:
+            raise ValueError(
+                f'elite_frac {elite_frac} leaves no sampled plans of {num_samples}.')
         self.num_samples = num_samples
         self.lambda_ = lambda_
         self.target_ess = target_ess
@@ -3289,6 +3294,7 @@ class JaxMPPIPlanner(JaxPlanner):
         self.common_random_numbers = common_random_numbers
         self.violations_first = violations_first
         self.mirrored_sampling = mirrored_sampling
+        self.elite_frac = elite_frac
         self.num_elites = num_elites
         self.kernel = kernel
         self.kernel_sigma = kernel_sigma
@@ -3315,7 +3321,7 @@ class JaxMPPIPlanner(JaxPlanner):
                 f'    common_random_nums ={self.common_random_numbers}\n'
                 f'    violations_first   ={self.violations_first}\n'
                 f'    mirrored_sampling  ={self.mirrored_sampling}\n'
-                f'    num_elites         ={self.num_elites}\n'
+                f'    elite_frac         ={self.elite_frac} ({self.num_elites} plans)\n'
                 f'    kernel            ={self.kernel}\n'
                 f'    kernel_sigma       ={self.kernel_sigma}\n'
                 f'    num_support_pts    ={self.num_support_pts}\n'
