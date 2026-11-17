@@ -71,6 +71,10 @@
 # Theodorou. "Information theoretic model predictive control: Theory and applications
 # to autonomous driving." arXiv preprint arXiv:1707.02342 (2017).
 #
+# [17] Stulp, Freek, and Olivier Sigaud. "Path integral policy improvement with covariance
+# matrix adaptation." In Proceedings of the 29th International Conference on Machine
+# Learning, pp. 1547-1554. 2012.
+#
 # ***********************************************************************
 
 
@@ -3189,6 +3193,7 @@ class JaxMPPIPlanner(JaxPlanner):
                  noise_sigma: Union[float, Dict[str, Any], np.ndarray]=1.0,
                  noise_mu: Optional[Union[float, Dict[str, Any], np.ndarray]]=None,
                  min_flip_prob: Optional[float]=0.01,
+                 adapt_noise: bool=True,
                  noise_abs_cost: bool=False,
                  noise_init: bool=False,
                  sample_null_action: bool=False,
@@ -3218,6 +3223,8 @@ class JaxMPPIPlanner(JaxPlanner):
         :param noise_mu: mean of the noise as a scalar, dict or vector (zero if None)
         :param min_flip_prob: minimum probability that the noise flips a boolean action at
         the bound of its parameter (None for no minimum), for a scalar noise_sigma
+        :param adapt_noise: whether the diagonal variances of the noise are adapted to the
+        weighted spread of the noise around the plan as in [17]
         :param noise_abs_cost: whether the action cost uses the absolute value of noise
         :param noise_init: whether the initial plan is sampled from the noise
         :param sample_null_action: whether one perturbed plan is the noop action per step
@@ -3256,6 +3263,7 @@ class JaxMPPIPlanner(JaxPlanner):
         if min_flip_prob is not None and not 0 < min_flip_prob < 0.5:
             raise ValueError(f'min_flip_prob must be in (0, 0.5), got {min_flip_prob}.')
         self.min_flip_prob = min_flip_prob
+        self.adapt_noise = adapt_noise
         self.noise_abs_cost = noise_abs_cost
         self.noise_init = noise_init
         self.sample_null_action = sample_null_action
@@ -3278,6 +3286,7 @@ class JaxMPPIPlanner(JaxPlanner):
                 f'    noise_sigma        ={self.noise_sigma}\n'
                 f'    noise_mu           ={self.noise_mu}\n'
                 f'    min_flip_prob      ={self.min_flip_prob}\n'
+                f'    adapt_noise        ={self.adapt_noise}\n'
                 f'    noise_abs_cost     ={self.noise_abs_cost}\n'
                 f'    noise_init         ={self.noise_init}\n'
                 f'    sample_null_action ={self.sample_null_action}\n'
@@ -3453,28 +3462,48 @@ class JaxMPPIPlanner(JaxPlanner):
                         f'noise_sigma must be a matrix of shape {(nu, nu)}, '
                         f'got {covariance.shape}.')
             diagonal = np.array_equal(covariance, np.diag(np.diag(covariance)))
+            sigmoid_columns = []
+            floor_variance = np.zeros((nu,))
             if diagonal:
-                variances = np.diag(covariance)
-                if not np.all(variances > 0):
+                default_variance = np.diag(covariance)
+                if not np.all(default_variance > 0):
                     raise ValueError('Variances of noise_sigma must be positive.')
-                noise_scale = np.asarray(np.sqrt(variances), dtype=real_dtype)
-                precision = np.asarray(1. / variances, dtype=real_dtype)
+                default_variance = np.asarray(default_variance, dtype=real_dtype)
             else:
                 cholesky = np.asarray(np.linalg.cholesky(covariance), dtype=real_dtype)
                 precision = np.asarray(np.linalg.inv(covariance), dtype=real_dtype)
         noise_mu = 0. if self.noise_mu is None else self.noise_mu
         noise_mean = np.asarray(
             self._coordinates(noise_mu, names, shapes, 'noise_mu'), dtype=real_dtype)
+        adapt_noise = self.adapt_noise
+        if adapt_noise and not diagonal:
+            raise ValueError('adapt_noise requires a diagonal noise_sigma.')
+        floor_variance = np.asarray(floor_variance, dtype=real_dtype)
+        tiny = np.finfo(real_dtype).tiny
 
-        # the scale (standard deviations or Cholesky factor) and precision of the noise
-        def _jax_wrapped_noise_moments(hyperparams):
-            if not relative:
-                return (noise_scale if diagonal else cholesky), precision
-            variance = jnp.asarray(default_variance)
+        # variances of sigmoid-wrapped boolean actions are divided by their weights squared
+        def _jax_wrapped_scale_columns(vector, hyperparams):
+            vector = jnp.asarray(vector)
             for (start, end, name) in sigmoid_columns:
                 weight = jnp.asarray(hyperparams[name], dtype=real_dtype)
-                variance = variance.at[start:end].divide(jnp.square(weight))
+                vector = vector.at[start:end].divide(jnp.square(weight))
+            return vector
+
+        # the scale (standard deviations or Cholesky factor) and precision of the noise
+        def _jax_wrapped_noise_moments(hyperparams, variance=None):
+            if not diagonal:
+                return cholesky, precision
+            if variance is None:
+                variance = _jax_wrapped_scale_columns(default_variance, hyperparams)
             return jnp.sqrt(variance), 1. / variance
+
+        # PI2-CMA [17]: the diagonal variances are the spread of the noise around the old
+        # mean weighted as the mean update, over all steps, bounded below by their floor
+        def _jax_wrapped_adapt_variance(variance, weights, noise, hyperparams):
+            spread = jnp.einsum('k,ktn->n', weights, jnp.square(noise)) / noise.shape[1]
+            variance = jnp.where(jnp.sum(weights) > 0, spread, variance)
+            floor = jnp.maximum(_jax_wrapped_scale_columns(floor_variance, hyperparams), tiny)
+            return jnp.maximum(variance, floor)
 
         def _jax_wrapped_noise(key, shape, moments):
             scale, _ = moments
@@ -3607,6 +3636,10 @@ class JaxMPPIPlanner(JaxPlanner):
                 planner_state = planner_state.replace(
                     policy_params=jax.vmap(_jax_wrapped_from_rows)(nominal))
                 opt_state['support'] = support
+            if adapt_noise:
+                variance = _jax_wrapped_scale_columns(
+                    default_variance, planner_state.hyperparams)
+                opt_state['variance'] = jnp.broadcast_to(variance, (parallel_updates, nu))
             return planner_state.replace(opt_state=opt_state)
         self.initialize = jax.jit(
             _jax_wrapped_batched_mppi_init, static_argnames=['init_policy_params'])
@@ -3618,7 +3651,6 @@ class JaxMPPIPlanner(JaxPlanner):
 
         def _jax_wrapped_mppi_update(sim_state, planner_state):
             hyperparams = planner_state.hyperparams
-            moments = _jax_wrapped_noise_moments(hyperparams)
             project_samples = jax.vmap(
                 lambda rows: _jax_wrapped_project_rows(rows, hyperparams)[0])
 
@@ -3636,6 +3668,8 @@ class JaxMPPIPlanner(JaxPlanner):
             def _jax_wrapped_mppi_update_step(_, carry):
                 key, params, opt_state, *_ = carry
                 key, noise_key, rollout_key, specific_key = random.split(key, num=4)
+                moments = _jax_wrapped_noise_moments(
+                    hyperparams, opt_state['variance'] if adapt_noise else None)
 
                 # the sampled variables are the plan, or the support points of KMPPI
                 nominal = _jax_wrapped_to_rows(params)
@@ -3674,7 +3708,10 @@ class JaxMPPIPlanner(JaxPlanner):
                 else:
                     keys = random.split(rollout_key, num=num_samples)
                 losses, costs = jax.vmap(_jax_wrapped_sample_cost)(keys, actions)
-                action_costs = _jax_wrapped_action_cost(center, noise, moments)
+                if noise_cost_scale == 0:
+                    action_costs = jnp.zeros_like(costs)
+                else:
+                    action_costs = _jax_wrapped_action_cost(center, noise, moments)
                 if target_ess is None:
                     temperature = jnp.asarray(lambda_, dtype=real_dtype)
                 else:
@@ -3687,6 +3724,9 @@ class JaxMPPIPlanner(JaxPlanner):
                 # update the sampled variables by the weighted noise
                 center = center + jnp.einsum('k,ktn->tn', weights, noise)
                 new_opt_state = dict(opt_state)
+                if adapt_noise:
+                    new_opt_state['variance'] = _jax_wrapped_adapt_variance(
+                        opt_state['variance'], weights, noise, hyperparams)
                 if use_kernel:
                     new_opt_state['support'] = center
                     new_nominal = interpolation @ center
@@ -3724,6 +3764,11 @@ class JaxMPPIPlanner(JaxPlanner):
             sim_state = sim_state.replace(key=keys[0])
             zero_grads = jax.vmap(_jax_zero_tree)(grad)
             statistics = {'ESS': ess, 'lambda': temperature}
+            if adapt_noise:
+                initial = _jax_wrapped_scale_columns(
+                    default_variance, planner_state.hyperparams)
+                statistics['noise scale'] = jnp.sqrt(
+                    jnp.mean(opt_state['variance'] / initial, axis=1))
             return sim_state, planner_state, loss, converged, grad, zero_grads, statistics
         update_fn = jax.jit(_jax_wrapped_batched_mppi_updates)
 
