@@ -16,13 +16,15 @@
 - **Differentiable out of the box.** Every RDDL description compiles automatically into a differentiable JAX simulator: no hand-written models.
 - **Discrete and hybrid, too.** Configurable relaxations of discrete operations and distributions give useful gradients in discrete and mixed discrete-continuous problems.
 - **Plans or policies.** Optimize open-loop plans, replan at every step, or train deep reactive policy networks, with risk-sensitive objectives and structured or symbolic policies written in RDDL.
-- **Beyond gradients.** Gradient-free optimizers such as parameter-exploring policy gradients (PGPE) can run alongside gradient descent, or replace it.
+- **Beyond gradients.** Gradient-free optimizers (PGPE, LM-MA-ES and MPPI) can run alongside gradient descent, or replace it.
 - **Self-tuning.** Bayesian hyper-parameter tuning with [Optuna](https://optuna.org/) finds good settings for you.
 - **Watch it learn.** An interactive dashboard tracks runs and visualizes the policy and the model as they train.
 
+**Available planners:** [JaxPlan](https://ojs.aaai.org/index.php/ICAPS/article/view/31480) (default) | [PGPE](https://doi.org/10.1016/j.neunet.2009.12.004) | [LM-MA-ES](https://doi.org/10.1109/TEVC.2018.2855049) | [MPPI](https://doi.org/10.1109/ICRA.2017.7989202)
+
 > [!NOTE]
 > Through relaxations JaxPlan handles many discrete problems, but on some it can make little progress (an ongoing effort is improving this).
-> In that case, try the [PROST planner](https://github.com/pyrddlgym-project/pyRDDLGym-prost) for discrete spaces, or the [deep reinforcement learning wrappers](https://github.com/pyrddlgym-project/pyRDDLGym-rl).
+> In that case, try changing the planner (see list above), or try [PROST planner](https://github.com/pyrddlgym-project/pyRDDLGym-prost) for discrete spaces, or the [deep reinforcement learning wrappers](https://github.com/pyrddlgym-project/pyRDDLGym-rl).
 
 ## Installation
 
@@ -111,6 +113,7 @@ sigmoid_weight=20
 [Planner]
 method='JaxStraightLinePlan'
 method_kwargs={}
+planner='JaxBackpropPlanner'
 optimizer='rmsprop'
 optimizer_kwargs={'learning_rate': 0.001}
 
@@ -255,6 +258,7 @@ Parts of the implementation build on the following works, which you may also wis
 - [Deep reactive policies for planning in stochastic nonlinear domains, AAAI 2019](https://ojs.aaai.org/index.php/AAAI/article/view/4744)
 - [Stochastic Planning with Lifted Symbolic Trajectory Optimization, AAAI 2019](https://ojs.aaai.org/index.php/ICAPS/article/view/3467/3335)
 - [Large Scale Black-Box Optimization by Limited-Memory Matrix Adaptation, IEEE 2018](https://ieeexplore.ieee.org/document/8410043)
+- [Information Theoretic MPC for Model-Based Reinforcement Learning, ICRA 2017](https://doi.org/10.1109/ICRA.2017.7989202)
 - [Scalable planning with tensorflow for hybrid nonlinear domains, NeurIPS 2017](https://proceedings.neurips.cc/paper/2017/file/98b17f068d5d9b7668e19fb8ae470841-Paper.pdf)
 - [Baseline-Free Sampling in Parameter Exploring Policy Gradients: Super Symmetric PGPE, ANN 2015](https://link.springer.com/chapter/10.1007/978-3-319-09903-3_13)
 
