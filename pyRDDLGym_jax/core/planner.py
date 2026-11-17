@@ -59,6 +59,18 @@
 # application to feedback control of combustion." IEEE Transactions on Evolutionary
 # Computation 13, no. 1 (2009): 180-197.
 #
+# [14] Williams, Grady, Nolan Wagener, Brian Goldfain, Paul Drews, James M. Rehg, Byron
+# Boots, and Evangelos A. Theodorou. "Information theoretic MPC for model-based
+# reinforcement learning." In IEEE International Conference on Robotics and Automation,
+# pp. 1714-1721. 2017.
+#
+# [15] Zhong, Sheng, et al. pytorch_mppi: Model Predictive Path Integral control in
+# PyTorch. https://github.com/UM-ARM-Lab/pytorch_mppi (MPPI and KMPPI).
+#
+# [16] Williams, Grady, Paul Drews, Brian Goldfain, James M. Rehg, and Evangelos A.
+# Theodorou. "Information theoretic model predictive control: Theory and applications
+# to autonomous driving." arXiv preprint arXiv:1707.02342 (2017).
+#
 # ***********************************************************************
 
 
@@ -79,6 +91,7 @@ import jax.numpy as jnp
 import jax.random as random
 import numpy as np
 import optax
+from scipy.special import ndtri
 import termcolor
 
 from pyRDDLGym.core.compiler.model import RDDLPlanningModel, RDDLLiftedModel
@@ -87,7 +100,7 @@ from pyRDDLGym.core.debug.logger import Logger
 from pyRDDLGym_jax import __version__
 from pyRDDLGym_jax.core.compiler import JaxRDDLCompiler, JaxRDDLSimState, pytree_dataclass
 from pyRDDLGym_jax.core.logic import JaxRDDLCompilerWithGrad, DefaultJaxRDDLCompilerWithGrad
-from pyRDDLGym_jax.core.plan import Preprocessor, JaxPlan
+from pyRDDLGym_jax.core.plan import Preprocessor, JaxPlan, JaxStraightLinePlan
 from pyRDDLGym_jax.core.progress import JaxPlannerProgress
 from pyRDDLGym_jax.core.utility import create_utility
 
@@ -3148,8 +3161,585 @@ class JaxLMMAESPlanner(JaxPlanner):
         self.update = _jax_wrapped_update
 
 
+class JaxMPPIPlanner(JaxPlanner):
+    '''Model predictive path integral control (MPPI) [14] as implemented in [15], that
+    optimizes a straight-line plan on the exact model: each update perturbs the plan by
+    Gaussian noise at every step, and moves it by the average of the noise weighted by
+    the exponentiated negative costs of the perturbed plans.
+
+    Optionally, the noise perturbs a few support points that are interpolated over time
+    by a kernel (KMPPI in [15]), which smooths the plan and reduces the sampled dimension.
+
+    An update is one iteration of MPPI from the initial state, so an online controller
+    with one iteration per decision epoch and warm start runs MPPI with the plan shifted
+    forward, whose new last step repeats the previous last step. The perturbed plans and
+    the plan are projected to satisfy the action constraints, and the preconditions only
+    enter through the costs. Unlike [15], the temperature is set at each step so that
+    the weights of the costs have a target effective sample size, which makes it
+    invariant to the scale of the returns, perturbed plans with invalid costs have zero
+    weight, and KMPPI keeps the plan equal to the interpolated support points and
+    computes the cost of the noise on the support points.'''
+
+    def __init__(self, rddl: Optional[RDDLLiftedModel]=None,
+                 plan: Optional[JaxPlan]=None,
+                 num_samples: int=100,
+                 lambda_: float=1.0,
+                 target_ess: Optional[float]=0.25,
+                 alpha: float=1.0,
+                 noise_sigma: Union[float, Dict[str, Any], np.ndarray]=1.0,
+                 noise_mu: Optional[Union[float, Dict[str, Any], np.ndarray]]=None,
+                 min_flip_prob: Optional[float]=0.01,
+                 noise_abs_cost: bool=False,
+                 noise_init: bool=False,
+                 sample_null_action: bool=False,
+                 specific_action_sampler: Optional[Callable]=None,
+                 rollout_var_cost: float=0.0,
+                 rollout_var_discount: float=0.95,
+                 common_random_numbers: bool=True,
+                 kernel: Optional[Union[str, Callable]]=None,
+                 kernel_sigma: float=1.0,
+                 num_support_pts: Optional[int]=None,
+                 steps_per_update: int=1,
+                 **planner_kwargs) -> None:
+        '''Creates a new MPPI planner.
+
+        :param rddl: the RDDL domain to optimize: None if used as an auxiliary planner
+        :param plan: the straight-line plan to optimize
+        :param num_samples: how many perturbed plans to sample per optimization step
+        :param lambda_: fixed temperature of the weights of the perturbed plans, used if
+        target_ess is None
+        :param alpha: the cost of the noise is scaled by (1 - alpha), as gamma = lambda
+        (1 - alpha) in [16] (0 as in [15], 1 removes it)
+        :param target_ess: fraction of the perturbed plans that is the effective sample
+        size of the weights of their costs, which sets the temperature at each step
+        :param noise_sigma: covariance of the noise of the action parameters at one step:
+        a scale of the default variances (see _default_variances), or a dict of
+        action-fluent to variance, or a vector or matrix over the parameters
+        :param noise_mu: mean of the noise as a scalar, dict or vector (zero if None)
+        :param min_flip_prob: minimum probability that the noise flips a boolean action at
+        the bound of its parameter (None for no minimum), for a scalar noise_sigma
+        :param noise_abs_cost: whether the action cost uses the absolute value of noise
+        :param noise_init: whether the initial plan is sampled from the noise
+        :param sample_null_action: whether one perturbed plan is the noop action per step
+        :param specific_action_sampler: optional function (key, sim_state, planner_state)
+        -> plan parameters with a leading axis of plans, which replace perturbed plans
+        :param rollout_var_cost: weight of the variance of the step costs over rollouts
+        :param rollout_var_discount: discount of the variance cost over the steps
+        :param common_random_numbers: whether the perturbed plans of a step share the
+        random numbers of their rollouts
+        :param kernel: None for MPPI, or 'rbf' or a function (t, tk) -> kernel matrix
+        over times for KMPPI
+        :param kernel_sigma: bandwidth of the 'rbf' kernel
+        :param num_support_pts: number of support points of KMPPI (None uses horizon/2)
+        :param steps_per_update: how many optimization steps are performed per planner
+        update (useful for partially jit compiling the update loop)
+        :param **planner_kwargs: arguments of the planning problem (see JaxPlanner)
+        '''
+        if num_samples < 1:
+            raise ValueError(f'num_samples must be positive, got {num_samples}.')
+        if not lambda_ > 0:
+            raise ValueError(f'lambda_ must be positive, got {lambda_}.')
+        if not 0 <= alpha <= 1:
+            raise ValueError(f'alpha must be in [0, 1], got {alpha}.')
+        if target_ess is not None and not 0 < target_ess <= 1:
+            raise ValueError(f'target_ess must be in (0, 1], got {target_ess}.')
+        if not (kernel is None or kernel == 'rbf' or callable(kernel)):
+            raise ValueError(f'Invalid kernel <{kernel}>, must be None, rbf or callable.')
+        if num_support_pts is not None and num_support_pts < 1:
+            raise ValueError(f'num_support_pts must be positive, got {num_support_pts}.')
+        self.num_samples = num_samples
+        self.lambda_ = lambda_
+        self.target_ess = target_ess
+        self.alpha = alpha
+        self.noise_sigma = noise_sigma
+        self.noise_mu = noise_mu
+        if min_flip_prob is not None and not 0 < min_flip_prob < 0.5:
+            raise ValueError(f'min_flip_prob must be in (0, 0.5), got {min_flip_prob}.')
+        self.min_flip_prob = min_flip_prob
+        self.noise_abs_cost = noise_abs_cost
+        self.noise_init = noise_init
+        self.sample_null_action = sample_null_action
+        self.specific_action_sampler = specific_action_sampler
+        self.rollout_var_cost = rollout_var_cost
+        self.rollout_var_discount = rollout_var_discount
+        self.common_random_numbers = common_random_numbers
+        self.kernel = kernel
+        self.kernel_sigma = kernel_sigma
+        self.num_support_pts = num_support_pts
+        self.steps_per_update = steps_per_update
+        super(JaxMPPIPlanner, self).__init__(rddl=rddl, plan=plan, **planner_kwargs)
+
+    def summarize_optimizer(self) -> str:
+        return (f'[INFO] MPPI hyper-parameters:\n'
+                f'    num_samples        ={self.num_samples}\n'
+                f'    lambda_            ={self.lambda_}\n'
+                f'    target_ess         ={self.target_ess}\n'
+                f'    alpha              ={self.alpha}\n'
+                f'    noise_sigma        ={self.noise_sigma}\n'
+                f'    noise_mu           ={self.noise_mu}\n'
+                f'    min_flip_prob      ={self.min_flip_prob}\n'
+                f'    noise_abs_cost     ={self.noise_abs_cost}\n'
+                f'    noise_init         ={self.noise_init}\n'
+                f'    sample_null_action ={self.sample_null_action}\n'
+                f'    specific_sampler   ={self.specific_action_sampler is not None}\n'
+                f'    rollout_var_cost   ={self.rollout_var_cost}\n'
+                f'    rollout_var_disc   ={self.rollout_var_discount}\n'
+                f'    common_random_nums ={self.common_random_numbers}\n'
+                f'    kernel             ={self.kernel}\n'
+                f'    kernel_sigma       ={self.kernel_sigma}\n'
+                f'    num_support_pts    ={self.num_support_pts}\n'
+                f'    steps_per_update   ={self.steps_per_update}\n')
+
+    @staticmethod
+    def _coordinates(value: Any, names: list, shapes: list, what: str) -> np.ndarray:
+        '''Returns the vector over the action parameters at one step of a value given as
+        a scalar, a dict of action-fluent to value, or a vector.'''
+        size = sum(int(np.prod(shape)) for shape in shapes)
+        if isinstance(value, dict):
+            unknown = set(value) - set(names)
+            missing = set(names) - set(value)
+            if unknown or missing:
+                raise ValueError(
+                    f'{what} has unknown action-fluents {sorted(unknown)} '
+                    f'and misses action-fluents {sorted(missing)}.')
+            return np.concatenate([
+                np.ravel(np.broadcast_to(np.asarray(value[name], dtype=np.float64), shape))
+                for (name, shape) in zip(names, shapes)
+            ])
+        value = np.asarray(value, dtype=np.float64)
+        if value.ndim == 0:
+            return np.full((size,), float(value))
+        elif value.shape == (size,):
+            return value
+        raise ValueError(f'{what} must be of size {size}, got shape {value.shape}.')
+
+    def _default_variances(self, names: list, shapes: list) -> Tuple[np.ndarray, ...]:
+        '''Returns the default variances of the noise of the action parameters at one
+        step, their minimum variances, and the (start, end, name) of the columns of
+        sigmoid-wrapped boolean actions.'''
+        plan, ranges = self.plan, self.rddl.variable_ranges
+        slope = 1. / np.sqrt(2. * np.pi)
+        min_prob = plan._min_action_prob
+        if self.min_flip_prob is None:
+            quantile = np.inf
+        else:
+            quantile = float(ndtri(1. - self.min_flip_prob))
+
+        variances, floors, sigmoid_columns, start = [], [], [], 0
+        for (name, shape) in zip(names, shapes):
+            size = int(np.prod(shape))
+            floor = np.zeros((size,))
+
+            # sigmoid(w p) has slope w / 4 and probability p has slope 1 at the threshold,
+            # and the projection bounds w p to logit(1 - min_prob) and p to 1 - min_prob
+            if name not in ranges or ranges[name] == 'bool':
+                if plan._wrap_sigmoid or name not in ranges:
+                    variance = np.full((size,), np.square(4. * slope))
+                    sigmoid_columns.append((start, start + size, name))
+                    bound = np.log((1. - min_prob) / min_prob)
+                else:
+                    variance = np.full((size,), np.square(slope))
+                    bound = 0.5 - min_prob
+                if name in ranges:
+                    floor = np.full((size,), np.square(bound / quantile))
+
+            # the variance of the uniform distribution over the values, where a wrapped
+            # parameter maps to the action by a sigmoid of slope (upper - lower) / 4
+            else:
+                lower, upper = plan.bounds[name]
+                lower = np.broadcast_to(np.asarray(lower, dtype=np.float64), shape)
+                upper = np.broadcast_to(np.asarray(upper, dtype=np.float64), shape)
+                bounded = np.isfinite(lower) & np.isfinite(upper) & (upper > lower)
+                width = np.where(bounded, upper - lower, 1.)
+                if ranges[name] == 'real':
+                    uniform = np.square(width) / 12.
+                else:
+                    uniform = (np.square(width + 1.) - 1.) / 12.
+                if plan._wrap_non_bool:
+                    uniform = uniform / np.square(width / 4.)
+                variance = np.ravel(np.where(bounded, uniform, 1.))
+            variances.append(variance)
+            floors.append(floor)
+            start += size
+        return np.concatenate(variances), np.concatenate(floors), sigmoid_columns
+
+    def _noop_parameters(self, names: list, shapes: list) -> np.ndarray:
+        '''Returns the vector of the action parameters at one step whose actions are the
+        noop (default) actions of the RDDL.'''
+        plan, ranges = self.plan, self.rddl.variable_ranges
+        if any(name not in ranges for name in names) or (
+                plan._wrap_non_bool and any(ranges[name] != 'bool' for name in names)):
+            raise NotImplementedError(
+                'sample_null_action does not support plans with wrap_softmax or wrap_non_bool.')
+        values = []
+        for (name, shape) in zip(names, shapes):
+            if ranges[name] == 'bool':
+                value = 0.0 if plan._wrap_sigmoid else 0.5
+            else:
+                value = self.test_compiled.init_values[name]
+            value = np.ravel(np.broadcast_to(np.asarray(value, dtype=np.float64), shape))
+            values.append(value)
+        return np.concatenate(values)
+
+    def _jax_compile_optimizer(self) -> None:
+        if not isinstance(self.plan, JaxStraightLinePlan):
+            plan_type = type(self.plan).__name__
+            raise ValueError(
+                f'JaxMPPIPlanner requires a JaxStraightLinePlan, got {plan_type}.')
+        loss_fn = self.single_test_loss
+        projection = self.plan.projection
+        real_dtype = self.test_compiled.REAL
+        parallel_updates = self.parallel_updates
+        init_policy = self.init_policy
+        horizon = self.horizon
+        num_samples = self.num_samples
+        lambda_ = self.lambda_
+        noise_abs_cost = self.noise_abs_cost
+        noise_init = self.noise_init
+        sample_null_action = self.sample_null_action
+        specific_action_sampler = self.specific_action_sampler
+        common_random_numbers = self.common_random_numbers
+
+        # the plan is a matrix whose rows are the steps and whose columns are the
+        # action parameters at one step
+        sim_state = self.compiled.init_sim_state(
+            random.PRNGKey(0), None, self.batch_size_train, print_warnings=False)
+        param_shapes, _ = jax.eval_shape(self.plan.initializer, sim_state)
+        paths_and_leaves, treedef = jax.tree_util.tree_flatten_with_path(param_shapes)
+        names = [str(getattr(path[1], 'key', path[1])) for (path, _) in paths_and_leaves]
+        shapes = [tuple(leaf.shape[1:]) for (_, leaf) in paths_and_leaves]
+        dtypes = [leaf.dtype for (_, leaf) in paths_and_leaves]
+        sizes = [int(np.prod(shape)) for shape in shapes]
+        splits = np.cumsum(sizes)[:-1]
+        nu = sum(sizes)
+
+        def _jax_wrapped_to_rows(params):
+            leaves = jax.tree_util.tree_leaves(params)
+            return jnp.concatenate([
+                jnp.reshape(jnp.asarray(leaf, dtype=real_dtype), (jnp.shape(leaf)[0], -1))
+                for leaf in leaves
+            ], axis=1)
+
+        def _jax_wrapped_from_rows(rows):
+            columns = jnp.split(rows, splits, axis=1)
+            leaves = [jnp.asarray(jnp.reshape(column, (jnp.shape(rows)[0],) + shape), dtype)
+                      for (column, shape, dtype) in zip(columns, shapes, dtypes)]
+            return jax.tree_util.tree_unflatten(treedef, leaves)
+
+        # the projection of the straight-line plan acts on each step (row) separately
+        def _jax_wrapped_project_rows(rows, hyperparams):
+            params, converged = projection(JaxPlannerState(
+                policy_params=_jax_wrapped_from_rows(rows), hyperparams=hyperparams))
+            return _jax_wrapped_to_rows(params), converged
+
+        # Gaussian noise of the action parameters at one step
+        relative = not isinstance(self.noise_sigma, dict) and np.ndim(self.noise_sigma) == 0
+        if relative:
+            if not self.noise_sigma > 0:
+                raise ValueError(f'noise_sigma must be positive, got {self.noise_sigma}.')
+            default_variance, floor_variance, sigmoid_columns = self._default_variances(
+                names, shapes)
+            default_variance = np.asarray(np.maximum(
+                self.noise_sigma * default_variance, floor_variance), dtype=real_dtype)
+            diagonal = True
+        else:
+            if isinstance(self.noise_sigma, dict) or np.ndim(self.noise_sigma) == 1:
+                covariance = np.diag(self._coordinates(
+                    self.noise_sigma, names, shapes, 'noise_sigma'))
+            else:
+                covariance = np.asarray(self.noise_sigma, dtype=np.float64)
+                if covariance.shape != (nu, nu):
+                    raise ValueError(
+                        f'noise_sigma must be a matrix of shape {(nu, nu)}, '
+                        f'got {covariance.shape}.')
+            diagonal = np.array_equal(covariance, np.diag(np.diag(covariance)))
+            if diagonal:
+                variances = np.diag(covariance)
+                if not np.all(variances > 0):
+                    raise ValueError('Variances of noise_sigma must be positive.')
+                noise_scale = np.asarray(np.sqrt(variances), dtype=real_dtype)
+                precision = np.asarray(1. / variances, dtype=real_dtype)
+            else:
+                cholesky = np.asarray(np.linalg.cholesky(covariance), dtype=real_dtype)
+                precision = np.asarray(np.linalg.inv(covariance), dtype=real_dtype)
+        noise_mu = 0. if self.noise_mu is None else self.noise_mu
+        noise_mean = np.asarray(
+            self._coordinates(noise_mu, names, shapes, 'noise_mu'), dtype=real_dtype)
+
+        # the scale (standard deviations or Cholesky factor) and precision of the noise
+        def _jax_wrapped_noise_moments(hyperparams):
+            if not relative:
+                return (noise_scale if diagonal else cholesky), precision
+            variance = jnp.asarray(default_variance)
+            for (start, end, name) in sigmoid_columns:
+                weight = jnp.asarray(hyperparams[name], dtype=real_dtype)
+                variance = variance.at[start:end].divide(jnp.square(weight))
+            return jnp.sqrt(variance), 1. / variance
+
+        def _jax_wrapped_noise(key, shape, moments):
+            scale, _ = moments
+            z = random.normal(key, shape=shape + (nu,), dtype=real_dtype)
+            if diagonal:
+                return z * scale + noise_mean
+            return z @ scale.T + noise_mean
+
+        # u^T Sigma^-1 eps of the noise of each perturbed plan, whose cost is lambda times
+        def _jax_wrapped_action_cost(nominal, noise, moments):
+            _, precision = moments
+            if noise_abs_cost:
+                noise = jnp.abs(noise)
+            weighted = noise * precision if diagonal else noise @ precision
+            return jnp.sum(nominal[jnp.newaxis] * weighted, axis=(1, 2))
+
+        def _jax_wrapped_ess(weights):
+            return jnp.square(jnp.sum(weights)) / jnp.maximum(
+                jnp.sum(jnp.square(weights)), np.finfo(real_dtype).tiny)
+
+        # the temperature at which the weights exp(-cost / lambda) of the valid costs have
+        # the target effective sample size, which decreases in 1 / lambda
+        target_ess = self.target_ess
+        noise_cost_scale = 1. - self.alpha
+        log_lo, log_hi = float(np.log(1e-6)), float(np.log(1e6))
+
+        def _jax_wrapped_temperature(costs, valid):
+            gaps = jnp.where(valid, costs - jnp.min(jnp.where(valid, costs, jnp.inf)), 0.)
+            spread = jnp.max(gaps)
+            gaps = gaps / jnp.where(spread > 0, spread, 1.)
+            target = jnp.maximum(target_ess * jnp.sum(valid), 1.)
+
+            def _jax_wrapped_bisect(_, bounds):
+                lo, hi = bounds
+                mid = 0.5 * (lo + hi)
+                weights = jnp.where(valid, jnp.exp(-jnp.exp(mid) * gaps), 0.)
+                below = _jax_wrapped_ess(weights) < target
+                return jnp.where(below, lo, mid), jnp.where(below, mid, hi)
+            lo, _ = jax.lax.fori_loop(
+                0, 64, _jax_wrapped_bisect,
+                (jnp.asarray(log_lo, dtype=real_dtype), 
+                 jnp.asarray(log_hi, dtype=real_dtype)))
+            return jnp.where(spread > 0, spread / jnp.exp(lo), lambda_)
+
+        # normalized exponentiated negative costs, which are zero for invalid costs
+        def _jax_wrapped_weights(costs, temperature):
+            valid = jnp.isfinite(costs)
+            beta = jnp.min(jnp.where(valid, costs, jnp.inf))
+            non_zero = jnp.where(
+                valid, jnp.exp(-(jnp.where(valid, costs, beta) - beta) / temperature), 0.)
+            return non_zero / jnp.maximum(jnp.sum(non_zero), 1.)
+
+        # cost of the variance of the step costs over the rollouts of a plan
+        use_variance = self.rollout_var_cost != 0 and self.batch_size_test > 1
+        rollout_var_cost = self.rollout_var_cost
+        var_discount = np.asarray(
+            np.power(self.rollout_var_discount, np.arange(horizon)), dtype=real_dtype)
+        step_discount = np.asarray(
+            np.power(self.rddl.discount, np.arange(horizon)), dtype=real_dtype)
+
+        def _jax_wrapped_variance_cost(log, reward_mask):
+            rewards = log['reward'] * log['alive']
+            if reward_mask is not None:
+                rewards = rewards * reward_mask[jnp.newaxis, ...]
+            step_costs = -rewards * step_discount[jnp.newaxis, ...]
+            variance = jnp.var(step_costs, axis=0, ddof=1)
+            return rollout_var_cost * jnp.sum(variance * var_discount)
+
+        # KMPPI samples support points interpolated by the kernel, support fit by l2
+        use_kernel = self.kernel is not None
+        if use_kernel:
+            if self.kernel == 'rbf':
+                sigma = self.kernel_sigma
+                kernel_fn = lambda t, tk: np.exp(
+                    -np.square(t[:, None] - tk[None, :]) / (1e-8 + 2 * sigma ** 2))
+            else:
+                kernel_fn = self.kernel
+            num_support = self.num_support_pts
+            if num_support is None:
+                num_support = max(horizon // 2, 1)
+            if num_support > horizon:
+                raise ValueError(f'num_support_pts {num_support} > horizon {horizon}.')
+            support_times = np.linspace(0, horizon - 1, num_support)
+            times = np.arange(horizon, dtype=np.float64)
+            k_support = np.asarray(kernel_fn(support_times, support_times), dtype=np.float64)
+            k_times = np.asarray(kernel_fn(times, support_times), dtype=np.float64)
+            interpolation = np.linalg.solve(k_support.T, k_times.T).T
+            support_fit = np.asarray(np.linalg.pinv(interpolation), dtype=real_dtype)
+            interpolation = np.asarray(interpolation, dtype=real_dtype)
+            num_rows = num_support
+        else:
+            num_rows = horizon
+
+        # the null plan is the noop action at every step (KMPPI support fits to it)
+        if sample_null_action:
+            null_rows = np.tile(self._noop_parameters(names, shapes), (horizon, 1))
+            if use_kernel:
+                null_rows = np.asarray(support_fit, dtype=np.float64) @ null_rows
+            null_rows = np.asarray(null_rows, dtype=real_dtype)
+
+        # ***********************************************************************
+        # INITIALIZATION OF POLICY
+        #
+        # ***********************************************************************
+
+        # the policy parameters are the plan, and the optimizer state holds the support
+        # points of KMPPI, which the plan is set to interpolate
+        def _jax_wrapped_batched_mppi_init(sim_state, planner_state, init_policy_params=True):
+            if init_policy_params:
+                params, hyperparams = init_policy(sim_state)
+                planner_state = planner_state.replace(
+                    policy_params=params, hyperparams=hyperparams)
+                if noise_init:
+                    key = random.fold_in(sim_state.key, 1)
+                    rows = _jax_wrapped_noise(
+                        key, (parallel_updates, horizon),
+                        _jax_wrapped_noise_moments(hyperparams))
+                    rows = jax.vmap(_jax_wrapped_project_rows, in_axes=(0, None))(
+                        rows, hyperparams)[0]
+                    planner_state = planner_state.replace(
+                        policy_params=jax.vmap(_jax_wrapped_from_rows)(rows))
+            opt_state = {}
+            if use_kernel:
+                nominal = jax.vmap(_jax_wrapped_to_rows)(planner_state.policy_params)
+                support = jnp.einsum('st,ptn->psn', support_fit, nominal)
+                nominal = jnp.einsum('ts,psn->ptn', interpolation, support)
+                nominal = jax.vmap(
+                    _jax_wrapped_project_rows, in_axes=(0, None)
+                )(nominal, planner_state.hyperparams)[0]
+                planner_state = planner_state.replace(
+                    policy_params=jax.vmap(_jax_wrapped_from_rows)(nominal))
+                opt_state['support'] = support
+            return planner_state.replace(opt_state=opt_state)
+        self.initialize = jax.jit(
+            _jax_wrapped_batched_mppi_init, static_argnames=['init_policy_params'])
+
+        # ***********************************************************************
+        # PARAMETER UPDATE
+        #
+        # ***********************************************************************
+
+        def _jax_wrapped_mppi_update(sim_state, planner_state):
+            hyperparams = planner_state.hyperparams
+            moments = _jax_wrapped_noise_moments(hyperparams)
+            project_samples = jax.vmap(
+                lambda rows: _jax_wrapped_project_rows(rows, hyperparams)[0])
+
+            # loss of a perturbed plan, and its cost including the variance cost
+            def _jax_wrapped_sample_cost(key, rows):
+                loss, (log, _) = loss_fn(
+                    sim_state.replace(key=key), 
+                    planner_state.replace(policy_params=_jax_wrapped_from_rows(rows)))
+                cost = loss
+                if use_variance:
+                    cost = cost + _jax_wrapped_variance_cost(log, planner_state.reward_mask)
+                return loss, cost
+
+            # do a single update step
+            def _jax_wrapped_mppi_update_step(_, carry):
+                key, params, opt_state, *_ = carry
+                key, noise_key, rollout_key, specific_key = random.split(key, num=4)
+
+                # the sampled variables are the plan, or the support points of KMPPI
+                nominal = _jax_wrapped_to_rows(params)
+                center = opt_state['support'] if use_kernel else nominal
+                perturbed = center[jnp.newaxis] + _jax_wrapped_noise(
+                    noise_key, (num_samples, num_rows), moments)
+
+                # specific perturbed plans replace the first sampled plans
+                start = 0
+                if sample_null_action:
+                    perturbed = perturbed.at[0].set(null_rows)
+                    start = 1
+                if specific_action_sampler is not None:
+                    specific = jax.vmap(_jax_wrapped_to_rows)(
+                        specific_action_sampler(specific_key, sim_state, planner_state))
+                    if use_kernel:
+                        specific = jnp.einsum('st,ktn->ksn', support_fit, specific)
+                    end = start + specific.shape[0]
+                    if end > num_samples:
+                        raise ValueError(
+                            f'Specific and null plans ({end}) > num_samples ({num_samples}).')
+                    perturbed = perturbed.at[start:end].set(specific)
+
+                # the noise is measured after projection
+                perturbed = project_samples(perturbed)
+                noise = perturbed - center[jnp.newaxis]
+                if use_kernel:
+                    actions = project_samples(
+                        jnp.einsum('ts,ksn->ktn', interpolation, perturbed))
+                else:
+                    actions = perturbed
+
+                # evaluate the perturbed plans
+                if common_random_numbers:
+                    keys = jnp.broadcast_to(rollout_key, (num_samples,) + rollout_key.shape)
+                else:
+                    keys = random.split(rollout_key, num=num_samples)
+                losses, costs = jax.vmap(_jax_wrapped_sample_cost)(keys, actions)
+                action_costs = _jax_wrapped_action_cost(center, noise, moments)
+                if target_ess is None:
+                    temperature = jnp.asarray(lambda_, dtype=real_dtype)
+                else:
+                    temperature = _jax_wrapped_temperature(
+                        costs, jnp.isfinite(costs) & jnp.isfinite(action_costs))
+                weights = _jax_wrapped_weights(
+                    costs + temperature * noise_cost_scale * action_costs, temperature)
+                ess = _jax_wrapped_ess(weights)
+
+                # update the sampled variables by the weighted noise
+                center = center + jnp.einsum('k,ktn->tn', weights, noise)
+                new_opt_state = dict(opt_state)
+                if use_kernel:
+                    new_opt_state['support'] = center
+                    new_nominal = interpolation @ center
+                else:
+                    new_nominal = center
+                new_nominal, converged = _jax_wrapped_project_rows(new_nominal, hyperparams)
+                valid_loss = jnp.nanmean(jnp.where(jnp.isfinite(losses), losses, jnp.nan))
+                grad = _jax_wrapped_from_rows(nominal - new_nominal)
+                return (key, _jax_wrapped_from_rows(new_nominal), new_opt_state, converged,
+                        valid_loss, grad, ess, temperature)
+
+            # do an unrolled update
+            params = planner_state.policy_params
+            carry = (sim_state.key, params, planner_state.opt_state,
+                     jnp.asarray(True), jnp.zeros((), dtype=real_dtype),
+                     jax.tree_util.tree_map(jnp.zeros_like, params),
+                     jnp.zeros((), dtype=real_dtype), jnp.zeros((), dtype=real_dtype))
+            _, params, opt_state, converged, loss, grad, ess, temperature = \
+                jax.lax.fori_loop(
+                    lower=0, upper=self.steps_per_update,
+                    body_fun=_jax_wrapped_mppi_update_step,
+                    init_val=carry
+                )
+            return params, opt_state, converged, loss, grad, ess, temperature
+
+        # for parallel policy update
+        def _jax_wrapped_batched_mppi_updates(sim_state, planner_state):
+            keys = random.split(sim_state.key, num=1 + parallel_updates)
+            sim_state = sim_state.replace(key=keys[1:])
+            vmap_axes = (JaxRDDLSimState(key=0, model_params=0),
+                         JaxPlannerState(policy_params=0, opt_state=0))
+            params, opt_state, converged, loss, grad, ess, temperature = jax.vmap(
+                _jax_wrapped_mppi_update, in_axes=vmap_axes)(sim_state, planner_state)
+            planner_state = planner_state.replace(policy_params=params, opt_state=opt_state)
+            sim_state = sim_state.replace(key=keys[0])
+            zero_grads = jax.vmap(_jax_zero_tree)(grad)
+            statistics = {'ESS': ess, 'lambda': temperature}
+            return sim_state, planner_state, loss, converged, grad, zero_grads, statistics
+        update_fn = jax.jit(_jax_wrapped_batched_mppi_updates)
+
+        # the exact model is optimized, which advances the test simulation state
+        def _jax_wrapped_update(train_sim_state, test_sim_state, planner_state):
+            (test_sim_state, planner_state, loss, converged, grad, zero_grads,
+             statistics) = update_fn(test_sim_state, planner_state)
+            train_sim_state = train_sim_state.replace(key=test_sim_state.key)
+            log = {'grad': grad, 'statistics': statistics}
+            return (train_sim_state, test_sim_state, planner_state, loss, converged, log,
+                    zero_grads)
+        self.update = _jax_wrapped_update
+
+
 class JaxBackpropPlanner(JaxPlanner):
-    '''A class for optimizing an action sequence in the given RDDL MDP using 
+    '''A class for optimizing an action sequence in the given RDDL MDP using
     gradient descent through the relaxed model.'''
 
     _DEFAULT_AUXILIARY = JaxLMMAESPlanner()
