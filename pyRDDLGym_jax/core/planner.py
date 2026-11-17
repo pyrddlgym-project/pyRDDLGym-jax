@@ -3201,6 +3201,7 @@ class JaxMPPIPlanner(JaxPlanner):
                  rollout_var_cost: float=0.0,
                  rollout_var_discount: float=0.95,
                  common_random_numbers: bool=True,
+                 violations_first: bool=True,
                  kernel: Optional[Union[str, Callable]]=None,
                  kernel_sigma: float=1.0,
                  num_support_pts: Optional[int]=None,
@@ -3234,6 +3235,8 @@ class JaxMPPIPlanner(JaxPlanner):
         :param rollout_var_discount: discount of the variance cost over the steps
         :param common_random_numbers: whether the perturbed plans of a step share the
         random numbers of their rollouts
+        :param violations_first: whether only the perturbed plans with the fewest
+        violations of the action preconditions are weighted (otherwise only their costs)
         :param kernel: None for MPPI, or 'rbf' or a function (t, tk) -> kernel matrix
         over times for KMPPI
         :param kernel_sigma: bandwidth of the 'rbf' kernel
@@ -3271,6 +3274,7 @@ class JaxMPPIPlanner(JaxPlanner):
         self.rollout_var_cost = rollout_var_cost
         self.rollout_var_discount = rollout_var_discount
         self.common_random_numbers = common_random_numbers
+        self.violations_first = violations_first
         self.kernel = kernel
         self.kernel_sigma = kernel_sigma
         self.num_support_pts = num_support_pts
@@ -3294,6 +3298,7 @@ class JaxMPPIPlanner(JaxPlanner):
                 f'    rollout_var_cost   ={self.rollout_var_cost}\n'
                 f'    rollout_var_disc   ={self.rollout_var_discount}\n'
                 f'    common_random_nums ={self.common_random_numbers}\n'
+                f'    violations_first   ={self.violations_first}\n'
                 f'    kernel             ={self.kernel}\n'
                 f'    kernel_sigma       ={self.kernel_sigma}\n'
                 f'    num_support_pts    ={self.num_support_pts}\n'
@@ -3408,6 +3413,7 @@ class JaxMPPIPlanner(JaxPlanner):
         sample_null_action = self.sample_null_action
         specific_action_sampler = self.specific_action_sampler
         common_random_numbers = self.common_random_numbers
+        violations_first = self.violations_first and self.check_preconditions
 
         # the plan is a matrix whose rows are the steps and whose columns are the
         # action parameters at one step
@@ -3662,7 +3668,7 @@ class JaxMPPIPlanner(JaxPlanner):
                 cost = loss
                 if use_variance:
                     cost = cost + _jax_wrapped_variance_cost(log, planner_state.reward_mask)
-                return loss, cost
+                return loss, cost, jnp.mean(log['violations'])
 
             # do a single update step
             def _jax_wrapped_mppi_update_step(_, carry):
@@ -3707,18 +3713,25 @@ class JaxMPPIPlanner(JaxPlanner):
                     keys = jnp.broadcast_to(rollout_key, (num_samples,) + rollout_key.shape)
                 else:
                     keys = random.split(rollout_key, num=num_samples)
-                losses, costs = jax.vmap(_jax_wrapped_sample_cost)(keys, actions)
+                losses, costs, violations = jax.vmap(_jax_wrapped_sample_cost)(keys, actions)
                 if noise_cost_scale == 0:
                     action_costs = jnp.zeros_like(costs)
                 else:
                     action_costs = _jax_wrapped_action_cost(center, noise, moments)
+
+                # only the valid plans with the fewest violations of the preconditions are
+                # weighted, as the limit of an infinite penalty of the violations
+                valid = jnp.isfinite(costs) & jnp.isfinite(action_costs)
+                if violations_first:
+                    fewest = jnp.min(jnp.where(valid, violations, jnp.inf))
+                    valid = valid & (violations <= fewest)
                 if target_ess is None:
                     temperature = jnp.asarray(lambda_, dtype=real_dtype)
                 else:
-                    temperature = _jax_wrapped_temperature(
-                        costs, jnp.isfinite(costs) & jnp.isfinite(action_costs))
-                weights = _jax_wrapped_weights(
-                    costs + temperature * noise_cost_scale * action_costs, temperature)
+                    temperature = _jax_wrapped_temperature(costs, valid)
+                weights = _jax_wrapped_weights(jnp.where(
+                    valid, costs + temperature * noise_cost_scale * action_costs, jnp.inf),
+                    temperature)
                 ess = _jax_wrapped_ess(weights)
 
                 # update the sampled variables by the weighted noise
