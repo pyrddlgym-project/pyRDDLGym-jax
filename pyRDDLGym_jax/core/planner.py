@@ -3203,6 +3203,7 @@ class JaxMPPIPlanner(JaxPlanner):
                  min_flip_prob: Optional[float]=0.01,
                  bool_sampling: str='bernoulli',
                  adapt_noise: bool=True,
+                 min_noise_scale: float=0.01,
                  noise_abs_cost: bool=False,
                  noise_init: bool=False,
                  sample_null_action: bool=False,
@@ -3244,6 +3245,8 @@ class JaxMPPIPlanner(JaxPlanner):
         updates the plan by moment matching (a categorical plan executes its mode)
         :param adapt_noise: whether the diagonal variances of the noise are adapted to the
         weighted spread of the noise around the plan as in [17]
+        :param min_noise_scale: the adapted standard deviations of the noise stay above
+        this fraction of their initial values
         :param noise_abs_cost: whether the action cost uses the absolute value of noise
         :param noise_init: whether the initial plan is sampled from the noise
         :param sample_null_action: whether one perturbed plan is the noop action per step
@@ -3304,6 +3307,9 @@ class JaxMPPIPlanner(JaxPlanner):
                 f'bool_sampling must be gaussian or bernoulli, got {bool_sampling}.')
         self.bool_sampling = bool_sampling
         self.adapt_noise = adapt_noise
+        if not min_noise_scale >= 0:
+            raise ValueError(f'min_noise_scale must be non-negative, got {min_noise_scale}.')
+        self.min_noise_scale = min_noise_scale
         self.noise_abs_cost = noise_abs_cost
         self.noise_init = noise_init
         self.sample_null_action = sample_null_action
@@ -3333,6 +3339,7 @@ class JaxMPPIPlanner(JaxPlanner):
                 f'    min_flip_prob      ={self.min_flip_prob}\n'
                 f'    bool_sampling      ={self.bool_sampling}\n'
                 f'    adapt_noise        ={self.adapt_noise}\n'
+                f'    min_noise_scale    ={self.min_noise_scale}\n'
                 f'    noise_abs_cost     ={self.noise_abs_cost}\n'
                 f'    noise_init         ={self.noise_init}\n'
                 f'    sample_null_action ={self.sample_null_action}\n'
@@ -3583,6 +3590,9 @@ class JaxMPPIPlanner(JaxPlanner):
         adapt_noise = self.adapt_noise
         if adapt_noise and not diagonal:
             raise ValueError('adapt_noise requires a diagonal noise_sigma.')
+        if adapt_noise:
+            floor_variance = np.maximum(
+                floor_variance, np.square(self.min_noise_scale) * default_variance)
         floor_variance = np.asarray(floor_variance, dtype=real_dtype)
         tiny = np.finfo(real_dtype).tiny
 
@@ -3941,13 +3951,18 @@ class JaxMPPIPlanner(JaxPlanner):
                             f'Specific and null plans ({end}) > num_samples - num_elites '
                             f'({num_samples - num_elites}).')
                     perturbed = perturbed.at[start:end].set(specific)
+                    start = end
 
-                # the elites of the last update replace the last sampled plans
+                # the elites of the last update replace the last sampled plans, and only
+                # the plans drawn from the noise estimate its variances
+                drawn = jnp.arange(num_samples) >= start
                 if num_elites > 0:
                     elites = jnp.where(
                         opt_state['has_elites'], opt_state['elites'],
                         perturbed[num_samples - num_elites:])
                     perturbed = perturbed.at[num_samples - num_elites:].set(elites)
+                    drawn = drawn & ~(opt_state['has_elites'] & (
+                        jnp.arange(num_samples) >= num_samples - num_elites))
 
                 # the noise is measured after projection
                 perturbed = project_samples(perturbed)
@@ -4013,8 +4028,10 @@ class JaxMPPIPlanner(JaxPlanner):
                 if bernoulli is not None and categorical:
                     new_opt_state['bool_dist'] = new_base
                 if adapt_noise:
+                    drawn_weights = jnp.where(drawn, weights, 0.)
+                    drawn_weights = drawn_weights / jnp.maximum(jnp.sum(drawn_weights), tiny)
                     new_opt_state['variance'] = _jax_wrapped_adapt_variance(
-                        opt_state['variance'], weights, noise, hyperparams)
+                        opt_state['variance'], drawn_weights, noise, hyperparams)
                 if num_elites > 0:
                     _, best = jax.lax.top_k(weights, num_elites)
                     new_opt_state['elites'] = perturbed[best]
