@@ -38,22 +38,34 @@ except Exception:
 Kwargs = Dict[str, Any]
 
 
+def _literal_eval_entry(section, key, value):
+    try:
+        return literal_eval(value)
+    except Exception as error:
+        raise ValueError(
+            f'Invalid value <{value}> for {key} in section [{section}] of the config: '
+            f'values must be Python literals, e.g. strings must be quoted ({error}).'
+        ) from None
+
+
 def _parse_config_file(path: str):
     if not os.path.isfile(path):
         raise FileNotFoundError(f'File {path} does not exist.')
     config = configparser.RawConfigParser()
-    config.optionxform = str 
+    config.optionxform = str
     config.read(path)
-    args = {section: {k: literal_eval(v) for (k, v) in config.items(section)}
+    args = {section: {k: _literal_eval_entry(section, k, v) 
+                      for (k, v) in config.items(section)}
             for section in config.sections()}
     return config, args
 
 
 def _parse_config_string(value: str):
     config = configparser.RawConfigParser()
-    config.optionxform = str 
+    config.optionxform = str
     config.read_string(value)
-    args = {section: {k: literal_eval(v) for (k, v) in config.items(section)}
+    args = {section: {k: _literal_eval_entry(section, k, v) 
+                      for (k, v) in config.items(section)}
             for section in config.sections()}
     return config, args
 

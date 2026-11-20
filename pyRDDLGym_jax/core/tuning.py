@@ -17,9 +17,7 @@
 # ***********************************************************************
 
 
-from ast import literal_eval
 import atexit
-import configparser
 import csv
 import datetime
 import importlib.util
@@ -268,9 +266,7 @@ class JaxParameterTuning:
         try:
             planner_args, _, _ = load_config_from_string(config_string)
         except Exception as error:
-            entry = self._invalid_entry(config_string)
-            where = '' if entry is None else f' in {entry}'
-            raise ValueError(f'Config template is invalid{where} after replacing the '
+            raise ValueError(f'Config template is invalid after replacing the '
                              f'hyper-parameters by values {params}: {error}') from error
 
         # each configuration is evaluated with a single optimizer
@@ -278,20 +274,6 @@ class JaxParameterTuning:
         if parallel_updates > 1:
             raise_warning(f'[WARN] parallel_updates={parallel_updates} in the config template '
                           f'is ignored during tuning', 'yellow')
-
-    @staticmethod
-    def _invalid_entry(config_string: str) -> Optional[str]:
-        '''Returns the first entry of the config whose value is not a Python literal.'''
-        parser = configparser.RawConfigParser()
-        parser.optionxform = str
-        parser.read_string(config_string)
-        for section in parser.sections():
-            for (key, value) in parser.items(section):
-                try:
-                    literal_eval(value)
-                except (ValueError, SyntaxError):
-                    return f'[{section}] {key}={value}'
-        return None
 
     @staticmethod
     def default_sampler(seed: int) -> optuna.samplers.BaseSampler:
