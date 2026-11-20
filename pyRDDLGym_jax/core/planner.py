@@ -3203,7 +3203,7 @@ class JaxMPPIPlanner(JaxPlanner):
                  min_flip_prob: Optional[float]=0.01,
                  bool_sampling: str='bernoulli',
                  adapt_noise: bool=True,
-                 min_noise_scale: float=0.01,
+                 min_noise_scale: float=0.0,
                  noise_abs_cost: bool=False,
                  noise_init: bool=False,
                  sample_null_action: bool=False,
@@ -3235,9 +3235,10 @@ class JaxMPPIPlanner(JaxPlanner):
         a scale of the default variances (see _default_variances), or a dict of
         action-fluent to variance, or a vector or matrix over the parameters
         :param noise_mu: mean of the noise as a scalar, dict or vector (zero if None)
-        :param min_flip_prob: minimum probability that the noise flips a boolean action at
-        the bound of its parameter (None for no minimum), for a scalar noise_sigma or
-        bool_sampling = 'bernoulli'
+        :param min_flip_prob: minimum probability that a sample changes the boolean actions
+        of the plan (None for no minimum): with 'gaussian' bool_sampling and a scalar
+        noise_sigma, of each action at the bound of its parameter; with 'bernoulli', of
+        the values other than the most likely (of each action, or of the categorical)
         :param bool_sampling: 'gaussian' perturbs the parameters of boolean actions by
         Gaussian noise, 'bernoulli' samples them from the probabilities of the plan (a
         categorical for max-nondef-actions = 1) mixed with a uniform so that the values
@@ -3705,13 +3706,16 @@ class JaxMPPIPlanner(JaxPlanner):
         # the target effective sample size, which decreases in 1 / lambda
         target_ess = self.target_ess
         noise_cost_scale = 1. - self.alpha
-        log_lo, log_hi = float(np.log(1e-6)), float(np.log(1e6))
+        log_lo = float(np.log(np.finfo(real_dtype).eps))
+        log_underflow = float(np.log(-np.log(np.finfo(real_dtype).tiny)))
 
         # offsets are the noise costs over lambda, which do not scale with the temperature
         def _jax_wrapped_temperature(costs, valid, offsets):
             gaps = jnp.where(valid, costs - jnp.min(jnp.where(valid, costs, jnp.inf)), 0.)
             spread = jnp.max(gaps)
             gaps = gaps / jnp.where(spread > 0, spread, 1.)
+            smallest = jnp.min(jnp.where(valid & (gaps > 0), gaps, 1.))
+            log_hi = log_underflow - jnp.log(smallest)
             offsets = jnp.where(
                 valid, offsets - jnp.min(jnp.where(valid, offsets, jnp.inf)), 0.)
             target = jnp.maximum(target_ess * jnp.sum(valid), 1.)
@@ -4104,7 +4108,8 @@ class JaxMPPIPlanner(JaxPlanner):
                     _, best = jax.lax.top_k(weights, num_elites)
                     new_opt_state['elites'] = perturbed[best]
                     new_opt_state['has_elites'] = jnp.sum(weights) > 0
-                    elite_weight = jnp.sum(weights[num_samples - num_elites:])
+                    elite_weight = jnp.where(
+                        opt_state['has_elites'], jnp.sum(weights[num_samples - num_elites:]), 0.)
                 else:
                     elite_weight = jnp.zeros((), dtype=real_dtype)
                 if use_kernel:
