@@ -99,7 +99,7 @@ import jax.numpy as jnp
 import jax.random as random
 import numpy as np
 import optax
-from scipy.special import ndtri
+from scipy.special import logit, ndtri
 import termcolor
 
 from pyRDDLGym.core.compiler.model import RDDLPlanningModel, RDDLLiftedModel
@@ -3408,6 +3408,12 @@ class JaxMPPIPlanner(JaxPlanner):
                     bound = 0.5 - min_prob
                 if name in ranges:
                     floor = np.full((size,), np.square(bound / quantile))
+                elif (self.min_flip_prob is not None and self.bool_sampling == 'gaussian'
+                      and self.print_warnings):
+                    print(termcolor.colored(
+                        '[WARN] min_flip_prob is not enforced for wrap_softmax with '
+                        'bool_sampling = gaussian: use bool_sampling = bernoulli.', 
+                        'yellow'))
 
             # the variance of the uniform distribution over the values, where a wrapped
             # parameter maps to the action by a sigmoid of slope (upper - lower) / 4
@@ -3431,18 +3437,50 @@ class JaxMPPIPlanner(JaxPlanner):
 
     def _noop_parameters(self, names: list, shapes: list) -> np.ndarray:
         '''Returns the vector of the action parameters at one step whose actions are the
-        noop (default) actions of the RDDL.'''
-        plan, ranges = self.plan, self.rddl.variable_ranges
-        if any(name not in ranges for name in names) or (
-                plan._wrap_non_bool and any(ranges[name] != 'bool' for name in names)):
-            raise NotImplementedError(
-                'sample_null_action does not support plans with wrap_softmax or wrap_non_bool.')
+        noop (default) actions of the RDDL, clipped to the action bounds.'''
+        plan, rddl = self.plan, self.rddl
+        ranges = rddl.variable_ranges
+        saturate = 1. - np.log(np.finfo(self.test_compiled.REAL).smallest_subnormal)
+
+        def _inverse_softplus(gap):
+            with np.errstate(divide='ignore'):
+                return np.where(gap > 0, gap + np.log(-np.expm1(-gap)), -saturate)
+
         values = []
         for (name, shape) in zip(names, shapes):
-            if ranges[name] == 'bool':
+
+            # the stacked logits of wrap_softmax select their argmax
+            if name not in ranges:
+                bool_count = sum(int(np.size(default)) 
+                                 for (var, default) in rddl.action_fluents.items() 
+                                 if ranges[var] == 'bool')
+                value = (np.arange(int(np.prod(shape))) >= bool_count).astype(np.float64)
+                if not np.any(value):
+                    raise ValueError('wrap_softmax has no noop slot for sample_null_action.')
+            elif ranges[name] == 'bool':
                 value = 0.0 if plan._wrap_sigmoid else 0.5
+
+            # wrap_non_bool maps the parameter to the action by a sigmoid (both bounds),
+            # softplus (one bound) or the identity (no bounds), as _jax_bound_action
             else:
-                value = self.test_compiled.init_values[name]
+                lower, upper = plan.bounds[name]
+                lower = np.broadcast_to(np.asarray(lower, dtype=np.float64), shape)
+                upper = np.broadcast_to(np.asarray(upper, dtype=np.float64), shape)
+                value = np.clip(np.broadcast_to(np.asarray(
+                    self.test_compiled.init_values[name], dtype=np.float64), shape),
+                    lower, upper)
+                if plan._wrap_non_bool:
+                    has_lower, has_upper = np.isfinite(lower), np.isfinite(upper)
+                    width = np.where(
+                        has_lower & has_upper & (upper > lower), upper - lower, 0.)
+                    with np.errstate(divide='ignore', invalid='ignore'):
+                        both = np.where(width > 0, np.clip(
+                            logit((value - lower) / np.where(width > 0, width, 1.)),
+                            -saturate, saturate), 0.)
+                        value = np.select(
+                            [has_lower & has_upper, has_lower, has_upper],
+                            [both, _inverse_softplus(value - lower),
+                             -_inverse_softplus(upper - value)], value)
             value = np.ravel(np.broadcast_to(np.asarray(value, dtype=np.float64), shape))
             values.append(value)
         return np.concatenate(values)
@@ -3454,12 +3492,28 @@ class JaxMPPIPlanner(JaxPlanner):
         if self.bool_sampling != 'bernoulli':
             return None
         rddl, ranges = self.rddl, self.rddl.variable_ranges
-        if any(name not in ranges for name in names):
-            if self.print_warnings:
-                print(termcolor.colored(
-                    '[WARN] bool_sampling = bernoulli does not support wrap_softmax: '
-                    'using Gaussian noise for boolean actions.', 'yellow'))
-            return None
+
+        # the stacked logits of wrap_softmax are a categorical over the boolean actions
+        # and the noop slot after them, whose argmax is the action
+        stacked = [index for (index, name) in enumerate(names) if name not in ranges]
+        if stacked:
+            index = stacked[0]
+            start = sum(int(np.prod(shape)) for shape in shapes[:index])
+            size = int(np.prod(shapes[index]))
+            bool_count = sum(int(np.size(default)) 
+                             for (var, default) in rddl.action_fluents.items() 
+                             if ranges[var] == 'bool')
+            if size != bool_count + 1:
+                if self.print_warnings:
+                    print(termcolor.colored(
+                        f'[WARN] bool_sampling = bernoulli requires one noop slot of '
+                        f'wrap_softmax, got {size - bool_count}: using Gaussian noise for '
+                        f'boolean actions.', 'yellow'))
+                return None
+            floor = 0.0 if self.min_flip_prob is None else self.min_flip_prob / (size - 1)
+            return {'index': np.arange(start, start + size), 'noop': None,
+                    'variables': [(names[index], size)], 'categorical': True,
+                    'softmax': True, 'num_classes': size, 'floor': floor}
         bool_count = sum(int(np.prod(shape)) for (name, shape) in zip(names, shapes)
                          if ranges[name] == 'bool')
         if bool_count == 0:
@@ -3487,7 +3541,7 @@ class JaxMPPIPlanner(JaxPlanner):
                 variables.append((name, size))
             start += size
         return {'index': np.asarray(index), 'noop': np.asarray(noop),
-                'variables': variables, 'categorical': categorical,
+                'variables': variables, 'categorical': categorical, 'softmax': False,
                 'num_classes': num_classes, 'floor': floor}
 
     def _jax_compile_optimizer(self) -> None:
@@ -3734,12 +3788,13 @@ class JaxMPPIPlanner(JaxPlanner):
             bool_noop = bernoulli['noop']
             bool_variables = bernoulli['variables']
             categorical = bernoulli['categorical']
+            softmax = bernoulli['softmax']
             num_classes = bernoulli['num_classes']
             class_floor = bernoulli['floor']
             mixture = num_classes * class_floor
             wrap_sigmoid = self.plan._wrap_sigmoid
             bool_threshold = 0. if wrap_sigmoid else 0.5
-            min_prob = self.plan._min_action_prob
+            min_prob = 0. if softmax else self.plan._min_action_prob
             real_columns[bool_index] = False
 
         def _jax_wrapped_bool_weights(hyperparams):
@@ -3751,6 +3806,9 @@ class JaxMPPIPlanner(JaxPlanner):
         # whether the boolean actions of rows differ from noop, as evaluated by the plan
         def _jax_wrapped_active(rows):
             params = rows[..., bool_index]
+            if softmax:
+                slots = jnp.argmax(params, axis=-1)[..., jnp.newaxis]
+                return slots == jnp.arange(num_classes - 1)
             values = jnp.where(
                 bool_noop, params >= bool_threshold, params > bool_threshold)
             return values != bool_noop
@@ -3758,6 +3816,12 @@ class JaxMPPIPlanner(JaxPlanner):
         # rows whose boolean actions differ from noop with the given probabilities
         def _jax_wrapped_encode(rows, active_probs, hyperparams):
             active_probs = jnp.clip(active_probs, 0., 1.)
+            if softmax:
+                none = jnp.maximum(1. - jnp.sum(active_probs, axis=-1, keepdims=True), 0.)
+                probs = jnp.concatenate([active_probs, none], axis=-1)
+                params = jnp.log(jnp.maximum(probs, tiny)) / _jax_wrapped_bool_weights(
+                    hyperparams)
+                return rows.at[..., bool_index].set(params)
             probs = jnp.where(bool_noop, 1. - active_probs, active_probs)
             if wrap_sigmoid:
                 params = jax.scipy.special.logit(probs) / _jax_wrapped_bool_weights(hyperparams)
@@ -3768,6 +3832,10 @@ class JaxMPPIPlanner(JaxPlanner):
         # the distribution of the plan over the classes (last axis) at each step
         def _jax_wrapped_bool_distribution(rows, hyperparams):
             params = rows[..., bool_index]
+            if softmax:
+                probs = jax.nn.softmax(
+                    _jax_wrapped_bool_weights(hyperparams) * params, axis=-1)
+                return jnp.concatenate([probs[..., -1:], probs[..., :-1]], axis=-1)
             if wrap_sigmoid:
                 probs = jax.nn.sigmoid(_jax_wrapped_bool_weights(hyperparams) * params)
             else:
