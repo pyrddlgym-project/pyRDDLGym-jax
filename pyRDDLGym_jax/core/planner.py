@@ -3239,8 +3239,9 @@ class JaxMPPIPlanner(JaxPlanner):
         bool_sampling = 'bernoulli'
         :param bool_sampling: 'gaussian' perturbs the parameters of boolean actions by
         Gaussian noise, 'bernoulli' samples them from the probabilities of the plan (a
-        categorical for max-nondef-actions = 1) mixed with a uniform so that every value
-        has probability at least min_flip_prob, and updates the plan by moment matching
+        categorical for max-nondef-actions = 1) mixed with a uniform so that the values
+        other than the most likely have total probability at least min_flip_prob, and
+        updates the plan by moment matching (a categorical plan executes its mode)
         :param adapt_noise: whether the diagonal variances of the noise are adapted to the
         weighted spread of the noise around the plan as in [17]
         :param noise_abs_cost: whether the action cost uses the absolute value of noise
@@ -3465,12 +3466,8 @@ class JaxMPPIPlanner(JaxPlanner):
                     f'max-nondef-actions = {allowed} > 1: using Gaussian noise for '
                     f'boolean actions.', 'yellow'))
             return None
-        floor = 0. if self.min_flip_prob is None else self.min_flip_prob
         num_classes = bool_count + 1 if categorical else 2
-        if num_classes * floor >= 1:
-            raise ValueError(
-                f'min_flip_prob {floor} is too large for {num_classes} values of the '
-                f'boolean actions at one step, must be < {1. / num_classes}.')
+        floor = 0.0 if self.min_flip_prob is None else self.min_flip_prob / (num_classes - 1)
 
         index, noop, variables, start = [], [], [], 0
         for (name, shape) in zip(names, shapes):
@@ -3646,16 +3643,19 @@ class JaxMPPIPlanner(JaxPlanner):
         noise_cost_scale = 1. - self.alpha
         log_lo, log_hi = float(np.log(1e-6)), float(np.log(1e6))
 
-        def _jax_wrapped_temperature(costs, valid):
+        # offsets are the noise costs over lambda, which do not scale with the temperature
+        def _jax_wrapped_temperature(costs, valid, offsets):
             gaps = jnp.where(valid, costs - jnp.min(jnp.where(valid, costs, jnp.inf)), 0.)
             spread = jnp.max(gaps)
             gaps = gaps / jnp.where(spread > 0, spread, 1.)
+            offsets = jnp.where(
+                valid, offsets - jnp.min(jnp.where(valid, offsets, jnp.inf)), 0.)
             target = jnp.maximum(target_ess * jnp.sum(valid), 1.)
 
             def _jax_wrapped_bisect(_, bounds):
                 lo, hi = bounds
                 mid = 0.5 * (lo + hi)
-                weights = jnp.where(valid, jnp.exp(-jnp.exp(mid) * gaps), 0.)
+                weights = jnp.where(valid, jnp.exp(-jnp.exp(mid) * gaps - offsets), 0.)
                 below = _jax_wrapped_ess(weights) < target
                 return jnp.where(below, lo, mid), jnp.where(below, mid, hi)
             lo, _ = jax.lax.fori_loop(
@@ -3769,6 +3769,10 @@ class JaxMPPIPlanner(JaxPlanner):
                 return dist / jnp.sum(dist, axis=-1, keepdims=True)
             return jnp.stack([1. - active, active], axis=-1)
 
+        def _jax_wrapped_plan_distribution(rows, hyperparams):
+            return _jax_wrapped_bool_distribution(
+                _jax_wrapped_project_rows(rows, hyperparams)[0], hyperparams)
+
         # inverse-CDF sampling of the classes, whose uniforms are mirrored as 1 - u
         def _jax_wrapped_sample_active(key, num, sampling, mirrored=False):
             batch = sampling.shape[:-1]
@@ -3828,6 +3832,8 @@ class JaxMPPIPlanner(JaxPlanner):
         def _jax_wrapped_batched_mppi_init(sim_state, planner_state, init_policy_params=True):
             if init_policy_params:
                 params, hyperparams = init_policy(sim_state)
+                if planner_state.hyperparams is not None:
+                    hyperparams = {**hyperparams, **planner_state.hyperparams}
                 planner_state = planner_state.replace(
                     policy_params=params, hyperparams=hyperparams)
                 if noise_init:
@@ -3858,6 +3864,11 @@ class JaxMPPIPlanner(JaxPlanner):
                 opt_state['elites'] = jnp.zeros(
                     (parallel_updates, num_elites, num_rows, nu), dtype=real_dtype)
                 opt_state['has_elites'] = jnp.zeros((parallel_updates,), dtype=bool)
+            if bernoulli is not None and categorical:
+                inner_dist = jax.vmap(_jax_wrapped_to_rows)(planner_state.policy_params)
+                opt_state['bool_dist'] = jax.vmap(
+                    _jax_wrapped_plan_distribution, in_axes=(0, None)
+                )(inner_dist, planner_state.hyperparams)
             return planner_state.replace(opt_state=opt_state)
         self.initialize = jax.jit(
             _jax_wrapped_batched_mppi_init, static_argnames=['init_policy_params'])
@@ -3897,8 +3908,13 @@ class JaxMPPIPlanner(JaxPlanner):
 
                 # boolean actions are sampled from the plan mixed with the uniform
                 if bernoulli is not None:
-                    base = _jax_wrapped_bool_distribution(
-                        _jax_wrapped_project_rows(nominal, hyperparams)[0], hyperparams)
+                    base = _jax_wrapped_plan_distribution(nominal, hyperparams)
+                    if categorical:
+                        active = _jax_wrapped_active(nominal)
+                        plan_class = jnp.where(
+                            jnp.any(active, axis=-1), jnp.argmax(active, axis=-1) + 1, 0)
+                        kept = jnp.all(plan_class == jnp.argmax(opt_state['bool_dist'], axis=-1))
+                        base = jnp.where(kept, opt_state['bool_dist'], base)
                     sampling = (1. - mixture) * base + class_floor
                     sampled_active = _jax_wrapped_sample_active(
                         random.fold_in(noise_key, 1), num_samples, sampling, mirrored_sampling)
@@ -3973,7 +3989,8 @@ class JaxMPPIPlanner(JaxPlanner):
                 if target_ess is None:
                     temperature = jnp.asarray(lambda_, dtype=real_dtype)
                 else:
-                    temperature = _jax_wrapped_temperature(costs, valid)
+                    temperature = _jax_wrapped_temperature(
+                        costs, valid, noise_cost_scale * action_costs)
                 weights = _jax_wrapped_weights(jnp.where(
                     valid, costs + temperature * noise_cost_scale * action_costs, jnp.inf),
                     temperature)
@@ -3985,9 +4002,16 @@ class JaxMPPIPlanner(JaxPlanner):
                 if bernoulli is not None:
                     new_base = _jax_wrapped_bool_update(
                         base, weights, _jax_wrapped_active(perturbed))
-                    active_probs = new_base[..., 1:] if categorical else new_base[..., 1]
+                    if categorical:
+                        mode = jax.nn.one_hot(
+                            jnp.argmax(new_base, axis=-1), num_classes, dtype=bool)[..., 1:]
+                        active_probs = jnp.where(mode, 1. - min_prob, min_prob)
+                    else:
+                        active_probs = new_base[..., 1]
                     center = _jax_wrapped_encode(center, active_probs, hyperparams)
                 new_opt_state = dict(opt_state)
+                if bernoulli is not None and categorical:
+                    new_opt_state['bool_dist'] = new_base
                 if adapt_noise:
                     new_opt_state['variance'] = _jax_wrapped_adapt_variance(
                         opt_state['variance'], weights, noise, hyperparams)
