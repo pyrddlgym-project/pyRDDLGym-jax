@@ -124,7 +124,8 @@ safe_hypot = finite_grad(jnp.hypot)
 def pytree_dataclass(cls):
     '''Frozen dataclass registered as a JAX pytree, with a replace method.'''
     cls = dataclasses.dataclass(frozen=True)(cls)
-    cls.replace = dataclasses.replace
+    if 'replace' not in cls.__dict__:
+        cls.replace = dataclasses.replace
     return jax.tree_util.register_dataclass(cls)
 
 
@@ -137,6 +138,13 @@ class JaxRDDLSimState:
     fls_hist: Dict=None
     nfls: Dict=None
     model_params: Any=None
+    sampled_init_state: Dict=None
+
+    # the sampled init-state flags only apply to the fls they were created with
+    def replace(self, **changes):
+        if 'fls' in changes:
+            changes.setdefault('sampled_init_state', None)
+        return dataclasses.replace(self, **changes)
 
 
 class JaxRDDLCompiler:
@@ -278,6 +286,7 @@ class JaxRDDLCompiler:
 
         self.cpfs = self._compile_cpfs(self.model_aux)
         self.reward = self._compile_reward(self.model_aux)
+        self.init_state = self._compile_init_state(self.model_aux)
 
         if compile_policy_block:
             self.policy_cpfs = self._compile_policy_cpfs(self.model_aux)
@@ -329,6 +338,13 @@ class JaxRDDLCompiler:
     
     def _compile_reward(self, aux):
         return self._jax(self.rddl.reward, aux, dtype=self.REAL)
+
+    def _compile_init_state(self, aux):
+        init_state = []
+        for (name, expr, target, _) in self.traced.init_state_schedule:
+            dtype = self.JAX_TYPES.get(self.rddl.variable_ranges[name], self.INT)
+            init_state.append((name, self._jax(expr, aux, dtype=dtype), target))
+        return init_state
     
     def _variable_range_from_rddl_or_policy(self, var, default=None):
         rddl = self.rddl
@@ -568,6 +584,42 @@ class JaxRDDLCompiler:
     # ===========================================================================
     # rollout compilation subroutines
     # ===========================================================================
+    
+    def compile_init_state(self) -> Callable:
+        '''Compiles the init-state expressions of the current RDDL model into a JAX 
+        function that samples the groundings they define.
+        
+        The arguments of the returned function are:
+            - key is the RNG key
+            - errors is the error code to accumulate errors into
+            - fls is the dict of fluent tensors (without a batch dimension) to sample into
+            - nfls is the dict of non-fluent tensors
+            - params is the dict of model parameters
+            - sampled is an optional dict that maps each state-fluent with init-state 
+              expressions to whether it is sampled (True) or keeps its value in fls 
+              (False); if it is None, all of them are sampled
+        
+        The returned value of the function is (fls, key, errors, params), where fls is 
+        a copy of the input fls with the groundings sampled.
+        '''
+        def _jax_wrapped_init_state(key, errors, fls, nfls, params, sampled=None):
+            fls = fls.copy()
+            for (name, assignment, target) in self.init_state:
+                sample, key, err, params = assignment(fls, nfls, params, key)
+                values = jnp.asarray(fls[name])
+                sample = jnp.asarray(sample, dtype=values.dtype)
+                if isinstance(target, np.ndarray):
+                    new_values = jnp.where(
+                        target, jnp.broadcast_to(sample, values.shape), values)
+                else:
+                    new_values = values.at[target].set(sample)
+                if sampled is not None:
+                    new_values = jnp.where(sampled[name], new_values, values)
+                    err = jnp.where(sampled[name], err, 0)
+                fls[name] = new_values
+                errors = errors | err
+            return fls, key, errors, params
+        return _jax_wrapped_init_state
      
     def compile_transition(self, check_constraints: bool=False,
                            constraint_func: bool=False, 
@@ -854,7 +906,31 @@ class JaxRDDLCompiler:
         jax_fn = self._compile_policy_step(policy, jax_fn, action_repair)
         jax_fn = self._compile_batched_policy_step(jax_fn, n_batch)
         jax_fn = self._compile_unrolled_policy_step(jax_fn, n_steps, history_dependent, remat)
+        jax_fn = self._compile_sampled_init_state(jax_fn, n_batch)
         return jax_fn
+    
+    def _compile_sampled_init_state(self, rollouts_fn, n_batch):
+        if not self.init_state:
+            return rollouts_fn
+        NORMAL = JaxRDDLCompiler.ERROR_CODES['NORMAL']
+        init_state_fn = self.compile_init_state()
+        
+        # each rollout of the batch starts from its own sample of the init-state
+        def _jax_wrapped_rollouts_from_sampled_init_state(sim_state, planner_state):
+            sampled = sim_state.sampled_init_state
+            if sampled is None:
+                return rollouts_fn(sim_state, planner_state)
+            else:
+                keys = random.split(sim_state.key, num=1 + n_batch)
+                vmap_axes = (0, None, 0, None, None, None)
+                fls, _, errors, _ = jax.vmap(init_state_fn, in_axes=vmap_axes)(
+                    keys[1:], NORMAL, sim_state.fls, sim_state.nfls, 
+                    sim_state.model_params, sampled)
+                log, model_params = rollouts_fn(
+                    sim_state.replace(key=keys[0], fls=fls), planner_state)
+                log['init_error'] = errors
+                return log, model_params
+        return _jax_wrapped_rollouts_from_sampled_init_state
     
     def init_fls_and_nfls(self, init_values: Dict[str, Any], 
                           fls_batch_size: int) -> Tuple[Dict[str, Any], Dict[str, Any]]:
@@ -937,6 +1013,13 @@ class JaxRDDLCompiler:
         }
         default_init_values = {**self.init_values, **init_policy_values}
 
+        # state-fluents with init-state expressions are sampled unless they are given
+        if self.rddl.init_state_exprs:
+            sampled = {name: np.asarray(init_values is None or name not in init_values)
+                       for name in self.rddl.init_state_exprs}
+        else:
+            sampled = None
+
         # fix missing entries in init_values
         if init_values is None:
             init_values = default_init_values
@@ -959,7 +1042,8 @@ class JaxRDDLCompiler:
 
         # create the sim state with the initialized values
         return JaxRDDLSimState(
-            key=key, step=0, fls=fls, nfls=nfls, model_params=self.model_aux['params'])
+            key=key, step=0, fls=fls, nfls=nfls, model_params=self.model_aux['params'],
+            sampled_init_state=sampled)
         
     # ===========================================================================
     # error checks and prints
@@ -1816,12 +1900,11 @@ class JaxRDDLCompiler:
     
     def _jax_if(self, expr, aux):
         aux['exact'].add(expr.id)
-        ERR = JaxRDDLCompiler.ERROR_CODES['INVALID_CAST']
         JaxRDDLCompiler._check_num_args(expr, 3)
         pred, if_true, if_false = expr.args     
         
         # recursively compile arguments   
-        jax_pred = self._jax(pred, aux)
+        jax_pred = self._jax_unary(self._jax(pred, aux), lambda x: x, check_dtype=jnp.bool_)
         jax_true = self._jax(if_true, aux)
         jax_false = self._jax(if_false, aux)
         
@@ -1831,8 +1914,6 @@ class JaxRDDLCompiler:
             sample3, key, err3, params = jax_false(fls, nfls, params, key)
             sample = jnp.where(sample1 > 0.5, sample2, sample3)
             err = err1 | err2 | err3
-            invalid_cast = jnp.logical_not(jnp.can_cast(sample1, jnp.bool_))
-            err = err | (invalid_cast * ERR)
             return sample, key, err, params
         return _jax_wrapped_if_then_else
     

@@ -1853,22 +1853,17 @@ class JaxPlanner(metaclass=ABCMeta):
               
             # problem in the model compilation
             if progress is not None:
-
-                # train model
-                for error_code in np.unique(train_log.get('error', [])):
-                    if error_code not in jax_train_msg_shown:
-                        jax_train_msg_shown.add(error_code)
-                        for message in JaxRDDLCompiler.get_error_messages(error_code):
-                            print(termcolor.colored(
-                                '[FAIL] Training model error: ' + message, 'red'))
-
-                # test model
-                for error_code in np.unique(test_log['error']):
-                    if error_code not in jax_test_msg_shown:
-                        jax_test_msg_shown.add(error_code)
-                        for message in JaxRDDLCompiler.get_error_messages(error_code):
-                            print(termcolor.colored(
-                                '[FAIL] Testing model error: ' + message, 'red'))
+                for (run_log, model, shown) in ((train_log, 'Training', jax_train_msg_shown),
+                                                (test_log, 'Testing', jax_test_msg_shown)):
+                    for (log_key, where) in (('error', ''), ('init_error', ' in init-state')):
+                        for error_code in np.unique(run_log.get(log_key, [])):
+                            if (log_key, error_code) not in shown:
+                                shown.add((log_key, error_code))
+                                for message in JaxRDDLCompiler.get_error_messages(
+                                        error_code):
+                                    print(termcolor.colored(
+                                        f'[FAIL] {model} model error{where}: {message}',
+                                        'red'))
         
             # reached computation budget
             elapsed = (time.time() - start_time - elapsed_outside_loop -

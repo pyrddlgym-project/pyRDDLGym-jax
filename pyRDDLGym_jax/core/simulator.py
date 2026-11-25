@@ -104,6 +104,8 @@ class JaxRDDLSimulator(RDDLSimulator):
         self.terminals = jax.tree_util.tree_map(jax.jit, compiled.terminations)
         self.reward = jax.jit(compiled.reward)
         jax_cpfs = jax.tree_util.tree_map(jax.jit, compiled.cpfs)
+        self.init_state_schedule = self.traced.init_state_schedule
+        self.init_state = jax.jit(compiled.compile_init_state())
         self.model_params = compiled.model_aux['params']
         
         # level analysis
@@ -193,6 +195,15 @@ class JaxRDDLSimulator(RDDLSimulator):
         self.fls = {var: self.init_values.get(var, values)
                     for (var, values) in self.fls.items()}
         return super().reset()
+
+    def sample_init_state(self) -> None:
+        if self.init_state_schedule:
+            NORMAL = JaxRDDLCompiler.ERROR_CODES['NORMAL']
+            self.fls, self.key, error, self.model_params = self.init_state(
+                self.key, NORMAL, self.fls, self.nfls, self.model_params)
+            self.handle_error_code(error, 'init-state expressions')
+            for name in self.rddl.init_state_exprs:
+                self.subs[name] = self.fls[name]
 
     def step(self, actions: Args) -> Tuple[Args, float, bool]:
         '''Samples and returns the next state from the cpfs.
