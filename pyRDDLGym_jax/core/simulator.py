@@ -18,7 +18,6 @@
 # ***********************************************************************
 
 
-import time
 import numpy as np
 from typing import Callable, Dict, Optional, Tuple, Union
 
@@ -68,7 +67,7 @@ class JaxRDDLSimulator(RDDLSimulator):
         :param **compiler_args: keyword arguments to pass to the Jax compiler
         '''
         if key is None:
-            key = jax.random.PRNGKey(round(time.time() * 1000))
+            key = jax.random.PRNGKey(int(np.random.SeedSequence().generate_state(1)[0]))
         self.key = key
         self.raise_error = raise_error
         self.compiler_args = compiler_args
