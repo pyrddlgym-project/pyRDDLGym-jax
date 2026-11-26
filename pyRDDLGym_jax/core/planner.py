@@ -1362,7 +1362,7 @@ class JaxPlanner(metaclass=ABCMeta):
         
         # if PRNG key is not provided
         if key is None:
-            key = random.PRNGKey(round(time.time() * 1000))
+            key = random.PRNGKey(int(np.random.SeedSequence().generate_state(1)[0]))
             
         # initialize the simulation state
         sim_state = self.compiled.init_sim_state(key, None, self.batch_size_train)
@@ -1522,7 +1522,7 @@ class JaxPlanner(metaclass=ABCMeta):
         
         # if PRNG key is not provided
         if key is None:
-            key = random.PRNGKey(round(time.time() * 1000))
+            key = random.PRNGKey(int(np.random.SeedSequence().generate_state(1)[0]))
             if self.print_warnings:
                 print(termcolor.colored(
                     '[WARN] PRNG key is not set: setting from clock.', 'yellow'

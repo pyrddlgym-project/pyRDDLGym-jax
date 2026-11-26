@@ -11,7 +11,6 @@
 
 
 import pickle
-import time
 from typing import Any, Dict, Optional, Union
 
 import jax.random as random
@@ -88,7 +87,7 @@ class JaxOfflineController(BaseAgent):
         '''
         self.planner = planner
         if key is None:
-            key = random.PRNGKey(round(time.time() * 1000))
+            key = random.PRNGKey(int(np.random.SeedSequence().generate_state(1)[0]))
         self.key = key
         self.eval_hyperparams = eval_hyperparams
         self.train_on_reset = train_on_reset
@@ -181,7 +180,7 @@ class JaxOnlineController(BaseAgent):
         '''
         self.planner = planner
         if key is None:
-            key = random.PRNGKey(round(time.time() * 1000))
+            key = random.PRNGKey(int(np.random.SeedSequence().generate_state(1)[0]))
         self.key = key
         self.eval_hyperparams = eval_hyperparams
         self.hyperparams_given = eval_hyperparams is not None
