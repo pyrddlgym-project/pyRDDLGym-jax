@@ -2,6 +2,7 @@
 
 # pyRDDLGym-jax
 
+[![Paper](https://img.shields.io/badge/Paper-ICAPS%202024-b31b1b)](https://ojs.aaai.org/index.php/ICAPS/article/view/31480)
 ![Python Version](https://img.shields.io/badge/python-3.12%2B-blue)
 [![PyPI Version](https://img.shields.io/pypi/v/pyRDDLGym-jax.svg)](https://pypi.org/project/pyRDDLGym-jax/)
 [![Documentation Status](https://readthedocs.org/projects/pyrddlgym/badge/?version=latest)](https://pyrddlgym.readthedocs.io/en/latest/jax.html)
