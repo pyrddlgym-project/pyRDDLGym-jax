@@ -1,3 +1,5 @@
+<div align="center">
+
 # pyRDDLGym-jax
 
 ![Python Version](https://img.shields.io/badge/python-3.12%2B-blue)
@@ -7,20 +9,22 @@
 
 **JaxPlan compiles any RDDL problem into a differentiable JAX simulator and plans through it by gradient descent.**
 
-<img src="https://raw.githubusercontent.com/pyrddlgym-project/pyRDDLGym-jax/main/Images/examples.gif" margin=0/>
+[Why JaxPlan?](#why-jaxplan) &nbsp;&middot;&nbsp; [Installation](#installation) &nbsp;&middot;&nbsp; [Quick start](#quick-start) &nbsp;&middot;&nbsp; [Python API](#python-api) &nbsp;&middot;&nbsp; [Configuration](#configuring-the-planner) &nbsp;&middot;&nbsp; [Dashboard](#dashboard) &nbsp;&middot;&nbsp; [Tuning](#tuning-the-planner) &nbsp;&middot;&nbsp; [Simulation](#simulating-with-jax) &nbsp;&middot;&nbsp; [Citing](#citing-jaxplan)
 
-[Why JaxPlan?](#why-jaxplan) | [Installation](#installation) | [Quick start](#quick-start) | [Python API](#python-api) | [Configuration](#configuring-the-planner) | [Dashboard](#dashboard) | [Tuning](#tuning-the-planner) | [Simulation](#simulating-with-jax) | [Citing](#citing-jaxplan)
+<img src="https://raw.githubusercontent.com/pyrddlgym-project/pyRDDLGym-jax/main/Images/examples.gif"/>
+
+</div>
 
 ## Why JaxPlan?
 
-- **Differentiable out of the box.** Every RDDL description compiles automatically into a differentiable JAX simulator: no hand-written models.
-- **Discrete and hybrid, too.** Configurable relaxations of discrete operations and distributions give useful gradients in discrete and mixed discrete-continuous problems.
-- **Plans or policies.** Optimize open-loop plans, replan at every step, or train deep reactive policy networks, with risk-sensitive objectives and structured or symbolic policies written in RDDL.
-- **Beyond gradients.** Gradient-free optimizers (PGPE, LM-MA-ES and MPPI) can run alongside gradient descent, or replace it.
-- **Self-tuning.** Bayesian hyper-parameter tuning with [Optuna](https://optuna.org/) finds good settings for you.
-- **Watch it learn.** An interactive dashboard tracks runs and visualizes the policy and the model as they train.
+- ⚡ **Differentiable out of the box.** Every RDDL description compiles automatically into a differentiable JAX simulator: no hand-written models.
+- 🎲 **Discrete and hybrid, too.** Configurable relaxations of discrete operations and distributions give useful gradients in discrete and mixed discrete-continuous problems.
+- 🧭 **Plans or policies.** Optimize open-loop plans, replan at every step, or train deep reactive policy networks, with risk-sensitive objectives and structured or symbolic policies written in RDDL.
+- 🧬 **Beyond gradients.** Gradient-free optimizers (PGPE, LM-MA-ES and MPPI) can run alongside gradient descent, or replace it.
+- 🎛️ **Self-tuning.** Bayesian hyper-parameter tuning with [Optuna](https://optuna.org/) finds good settings for you.
+- 📊 **Watch it learn.** An interactive dashboard tracks runs and visualizes the policy and the model as they train.
 
-**Available planners:** [JaxPlan](https://ojs.aaai.org/index.php/ICAPS/article/view/31480) (default) | [PGPE](https://doi.org/10.1016/j.neunet.2009.12.004) | [LM-MA-ES](https://doi.org/10.1109/TEVC.2018.2855049) | [MPPI](https://doi.org/10.1109/ICRA.2017.7989202)
+**Available planners:** [JaxPlan](https://ojs.aaai.org/index.php/ICAPS/article/view/31480) (default) &middot; [PGPE](https://doi.org/10.1016/j.neunet.2009.12.004) &middot; [LM-MA-ES](https://doi.org/10.1109/TEVC.2018.2855049) &middot; [MPPI](https://doi.org/10.1109/ICRA.2017.7989202)
 
 > [!NOTE]
 > Through relaxations JaxPlan handles many discrete problems, but on some it can make little progress (an ongoing effort is improving this).
