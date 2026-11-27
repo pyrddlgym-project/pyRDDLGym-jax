@@ -34,6 +34,7 @@ from pyRDDLGym.core.debug.exception import (
     print_stack_trace,
     RDDLInvalidNumberOfArgumentsError,
     RDDLNotImplementedError,
+    RDDLTypeError,
     RDDLUndefinedVariableError
 )
 from pyRDDLGym.core.debug.logger import Logger
@@ -520,10 +521,19 @@ class JaxRDDLCompiler:
         def _jax_wrapped_cpfs(key, errors, fls, nfls, params):
             fls = fls.copy()
             for (name, cpf) in cpfs.items():
-                fls[name], key, err, params = cpf(fls, nfls, params, key)
+                sample, key, err, params = cpf(fls, nfls, params, key)
+                JaxRDDLCompiler._check_cpf_shape(name, sample, fls)
+                fls[name] = sample
                 errors = errors | err  
             return fls, key, errors, params
         return _jax_wrapped_cpfs
+
+    @staticmethod
+    def _check_cpf_shape(name, sample, fls):
+        if name in fls and jnp.shape(sample) != jnp.shape(fls[name]):
+            raise RDDLTypeError(
+                f'CPF <{name}> evaluated to shape {jnp.shape(sample)}, '
+                f'expected {jnp.shape(fls[name])} from its parameters.')
 
     def _jax_reward(self):
         reward_fn = self.reward
@@ -562,7 +572,9 @@ class JaxRDDLCompiler:
             new_fls = fls.copy()
             result = {}
             for (name, cpf) in cpfs.items():
-                new_fls[name], key, err, params = cpf(new_fls, nfls, params, key)
+                sample, key, err, params = cpf(new_fls, nfls, params, key)
+                JaxRDDLCompiler._check_cpf_shape(name, sample, new_fls)
+                new_fls[name] = sample
                 result[name] = new_fls[name]
                 errors = errors | err  
             for (state, next_state) in next_states.items():

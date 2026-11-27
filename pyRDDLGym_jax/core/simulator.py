@@ -217,8 +217,10 @@ class JaxRDDLSimulator(RDDLSimulator):
         
         # compute CPFs in topological order
         for (cpf, expr, _) in self.cpfs:
-            fls[cpf], self.key, error, self.model_params = expr(
+            sample, self.key, error, self.model_params = expr(
                 fls, nfls, self.model_params, self.key)
+            JaxRDDLCompiler._check_cpf_shape(cpf, sample, fls)
+            fls[cpf] = sample
             subs[cpf] = fls[cpf]
             self.handle_error_code(error, f'CPF <{cpf}>')            
                 
