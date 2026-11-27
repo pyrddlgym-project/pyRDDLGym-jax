@@ -773,6 +773,8 @@ class JaxPlanner(metaclass=ABCMeta):
         self.model_param_ranges = model_param_ranges
         self.complex_preconditions = complex_preconditions
         if rollout_horizon is None and rddl is not None:
+            if rddl.horizon == sys.maxsize:
+                raise ValueError('rollout_horizon must be set when the horizon is infinite.')
             rollout_horizon = rddl.horizon
         self.horizon = rollout_horizon
         if action_bounds is None:

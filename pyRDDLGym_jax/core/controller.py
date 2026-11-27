@@ -11,6 +11,7 @@
 
 
 import pickle
+import sys
 from typing import Any, Dict, Optional, Union
 
 import jax.random as random
@@ -36,6 +37,8 @@ def _split_policy_actions(rddl, policy_fls):
 def _init_fls_hist(planner):
     fls_hist = {}
     if planner.plan.history_dependent:
+        if planner.rddl.horizon == sys.maxsize:
+            raise ValueError('History-dependent plans require a finite horizon.')
         for name in planner.test_compiled.fls_hist_keys:
             values = np.asarray(planner.test_compiled.init_values[name])
             fls_hist[name] = np.zeros(
