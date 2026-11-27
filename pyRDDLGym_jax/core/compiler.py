@@ -17,7 +17,6 @@ import dataclasses
 from functools import partial
 import numpy as np
 import termcolor
-import traceback
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import jax
@@ -32,23 +31,13 @@ from pyRDDLGym.core.compiler.model import RDDLLiftedModel
 from pyRDDLGym.core.compiler.tracer import RDDLObjectsTracer
 from pyRDDLGym.core.constraints import RDDLConstraints
 from pyRDDLGym.core.debug.exception import (
-    print_stack_trace, 
-    raise_warning,
-    RDDLInvalidNumberOfArgumentsError, 
+    print_stack_trace,
+    RDDLInvalidNumberOfArgumentsError,
     RDDLNotImplementedError,
     RDDLUndefinedVariableError
 )
 from pyRDDLGym.core.debug.logger import Logger
 from pyRDDLGym.core.simulator import RDDLSimulatorPrecompiled
-
-# more robust approach - if user does not have this or broken try to continue
-try:
-    from tensorflow_probability.substrates import jax as tfp
-except Exception:
-    raise_warning('Failed to import tensorflow-probability: '
-                  'compilation of some probability distributions will fail.', 'red')
-    traceback.print_exc()
-    tfp = None
 
 
 @jax.custom_jvp
@@ -2126,7 +2115,9 @@ class JaxRDDLCompiler:
             scale, key, err2, params = jax_scale(fls, nfls, params, key)
             key, subkey = random.split(key)
             sample = random.weibull_min(
-                key=subkey, scale=scale, concentration=shape, dtype=self.REAL)
+                key=subkey, scale=scale, concentration=shape,
+                shape=jnp.broadcast_shapes(jnp.shape(scale), jnp.shape(shape)), 
+                dtype=self.REAL)
             out_of_bounds = jnp.logical_not(jnp.all(jnp.logical_and(shape > 0, scale > 0)))
             err = err1 | err2 | (out_of_bounds * ERR)
             return sample, key, err, params        
@@ -2224,17 +2215,19 @@ class JaxRDDLCompiler:
         jax_trials = self._jax(arg_trials, aux)
         jax_prob = self._jax(arg_prob, aux)
         
-        # uses tensorflow-probability
+        # https://en.wikipedia.org/wiki/Negative_binomial_distribution#Gamma%E2%80%93Poisson_mixture
         def _jax_wrapped_distribution_negative_binomial(fls, nfls, params, key):
-            trials, key, err2, params = jax_trials(fls, nfls, params, key)       
+            trials, key, err2, params = jax_trials(fls, nfls, params, key)
             prob, key, err1, params = jax_prob(fls, nfls, params, key)
-            key, subkey = random.split(key)
+            key, subkey1, subkey2 = random.split(key, num=3)
             trials = jnp.asarray(trials, dtype=self.REAL)
             prob = jnp.asarray(prob, dtype=self.REAL)
-            dist = tfp.distributions.NegativeBinomial(total_count=trials, probs=1. - prob)
-            sample = jnp.asarray(dist.sample(seed=subkey), dtype=self.INT)
+            shape = jnp.broadcast_shapes(jnp.shape(trials), jnp.shape(prob))
+            gamma = random.gamma(key=subkey1, a=trials, shape=shape, dtype=self.REAL)
+            rate = sj.div(1. - prob, prob) * gamma
+            sample = random.poisson(key=subkey2, lam=rate, dtype=self.INT)
             out_of_bounds = jnp.logical_not(jnp.all(
-                jnp.logical_and(jnp.logical_and(prob >= 0, prob <= 1), trials > 0)))
+                jnp.logical_and(jnp.logical_and(prob > 0, prob <= 1), trials > 0)))
             err = err1 | err2 | (out_of_bounds * ERR)
             return sample, key, err, params        
         return _jax_wrapped_distribution_negative_binomial    
@@ -2634,17 +2627,18 @@ class JaxRDDLCompiler:
             trials = jnp.asarray(trials, dtype=self.REAL)
             prob = jnp.asarray(prob, dtype=self.REAL)
             key, subkey = random.split(key)
-            dist = tfp.distributions.Multinomial(total_count=trials, probs=prob)
-            sample = jnp.asarray(dist.sample(seed=subkey), dtype=self.INT)
+            batch = jnp.broadcast_shapes(jnp.shape(trials), jnp.shape(prob)[:-1])
+            sample = random.multinomial(
+                subkey, jnp.broadcast_to(trials, batch),
+                jnp.broadcast_to(prob, batch + jnp.shape(prob)[-1:]), dtype=self.REAL)
+            sample = jnp.asarray(sample, dtype=self.INT)
             sample = jnp.moveaxis(sample, source=-1, destination=index)
-            out_of_bounds = jnp.logical_not(jnp.all(
-                jnp.logical_and(
-                    jnp.logical_and(prob >= 0, jnp.allclose(jnp.sum(prob, axis=-1), 1.)),
-                    trials >= 0
-                )
-            ))
+            out_of_bounds = jnp.logical_not(
+                jnp.all(prob >= 0) & jnp.allclose(jnp.sum(prob, axis=-1), 1.) 
+                & jnp.all(trials >= 0)
+            )
             error = err1 | err2 | (out_of_bounds * ERR)
-            return sample, key, error, params                  
+            return sample, key, error, params
         return _jax_wrapped_distribution_multinomial
     
     # ===========================================================================

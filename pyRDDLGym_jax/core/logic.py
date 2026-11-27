@@ -1627,7 +1627,7 @@ class ExponentialPoisson(JaxRDDLCompilerWithGrad):
         delta_t = sj.div(exp, rate[jnp.newaxis, ...])
         times = jnp.cumsum(delta_t, axis=0)
         indicator = jax.nn.sigmoid(w * (1. - times))
-        return jnp.sum(indicator, axis=0)
+        return jnp.where(rate > 0, jnp.sum(indicator, axis=0), 0.)
 
     def branched_approx_to_poisson(self, key: random.PRNGKey, 
                                    rate: jnp.ndarray, w: float, min_cdf: float) -> jnp.ndarray:
@@ -1690,17 +1690,18 @@ class ExponentialPoisson(JaxRDDLCompilerWithGrad):
         def _jax_wrapped_distribution_negative_binomial_exponential(fls, nfls, params, key):
             trials, key, err2, params = jax_trials(fls, nfls, params, key)       
             prob, key, err1, params = jax_prob(fls, nfls, params, key)
-            key, subkey = random.split(key)
+            key, subkey1, subkey2 = random.split(key, num=3)
             trials = jnp.asarray(trials, dtype=self.REAL)
             prob = jnp.asarray(prob, dtype=self.REAL)
-            gamma = random.gamma(key=subkey, a=trials, dtype=self.REAL)
-            rate = (sj.div(1., prob) - 1.) * gamma
+            shape = jnp.broadcast_shapes(jnp.shape(trials), jnp.shape(prob))
+            gamma = random.gamma(key=subkey1, a=trials, shape=shape, dtype=self.REAL)
+            rate = sj.div(1. - prob, prob) * gamma
             w = params[id_]['poisson_comparison_weight']
             min_cdf = params[id_]['poisson_min_cdf']
-            sample = self.branched_approx_to_poisson(subkey, rate, w, min_cdf)   
+            sample = self.branched_approx_to_poisson(subkey2, rate, w, min_cdf)
             self._jax_sample_callback(id_, 'negative_binomial', sample, (trials, prob))
             out_of_bounds = jnp.logical_not(jnp.all(
-                jnp.logical_and(jnp.logical_and(prob >= 0, prob <= 1), trials > 0)))
+                jnp.logical_and(jnp.logical_and(prob > 0, prob <= 1), trials > 0)))
             err = err1 | err2 | (out_of_bounds * ERR)
             return sample, key, err, params
         return _jax_wrapped_distribution_negative_binomial_exponential 
@@ -1804,18 +1805,19 @@ class GumbelSoftmaxPoisson(JaxRDDLCompilerWithGrad):
         def _jax_wrapped_distribution_negative_binomial_gumbel_softmax(fls, nfls, params, key):
             trials, key, err2, params = jax_trials(fls, nfls, params, key)       
             prob, key, err1, params = jax_prob(fls, nfls, params, key)
-            key, subkey = random.split(key)
+            key, subkey1, subkey2 = random.split(key, num=3)
             trials = jnp.asarray(trials, dtype=self.REAL)
             prob = jnp.asarray(prob, dtype=self.REAL)
-            gamma = random.gamma(key=subkey, a=trials, dtype=self.REAL)
-            rate = (sj.div(1., prob) - 1.) * gamma
+            shape = jnp.broadcast_shapes(jnp.shape(trials), jnp.shape(prob))
+            gamma = random.gamma(key=subkey1, a=trials, shape=shape, dtype=self.REAL)
+            rate = sj.div(1. - prob, prob) * gamma
             w = params[id_]['poisson_softmax_weight']
             min_cdf = params[id_]['poisson_min_cdf']
             eps = params[id_]['poisson_eps']
-            sample = self.branched_approx_to_poisson(subkey, rate, w, min_cdf, eps)   
+            sample = self.branched_approx_to_poisson(subkey2, rate, w, min_cdf, eps)
             self._jax_sample_callback(id_, 'negative_binomial', sample, (trials, prob))
             out_of_bounds = jnp.logical_not(jnp.all(
-                jnp.logical_and(jnp.logical_and(prob >= 0, prob <= 1), trials > 0)))
+                jnp.logical_and(jnp.logical_and(prob > 0, prob <= 1), trials > 0)))
             err = err1 | err2 | (out_of_bounds * ERR)
             return sample, key, err, params
         return _jax_wrapped_distribution_negative_binomial_gumbel_softmax 
@@ -1871,10 +1873,10 @@ class DeterminizedPoisson(JaxRDDLCompilerWithGrad):
             prob, key, err1, params = jax_prob(fls, nfls, params, key)
             trials = jnp.asarray(trials, dtype=self.REAL)
             prob = jnp.asarray(prob, dtype=self.REAL)
-            sample = (sj.div(1., prob) - 1.) * trials
+            sample = sj.div(1. - prob, prob) * trials
             self._jax_sample_callback(expr.id, 'negative_binomial', sample, (trials, prob))
             out_of_bounds = jnp.logical_not(jnp.all(
-                jnp.logical_and(jnp.logical_and(prob >= 0, prob <= 1), trials > 0)))
+                jnp.logical_and(jnp.logical_and(prob > 0, prob <= 1), trials > 0)))
             err = err1 | err2 | (out_of_bounds * ERR)
             return sample, key, err, params
         return _jax_wrapped_distribution_negative_binomial_determinized    
