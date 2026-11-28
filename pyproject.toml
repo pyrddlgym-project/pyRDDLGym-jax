@@ -16,7 +16,7 @@ authors = [
     {name = "Scott Sanner", email = "ssanner@mie.utoronto.ca"},
 ]
 dependencies = [
-    "pyRDDLGym>=2.7",
+    "pyRDDLGym>=3.0",
     "rich>=14.0",
     "jax>=0.9.0",
     "softjax>=0.1.1",
@@ -35,7 +35,7 @@ classifiers = [
 ]
 
 [project.optional-dependencies]
-extra = ["optuna>=5.0", "optuna-dashboard", "rddlrepository>=2.0"]
+extra = ["optuna>=5.0", "optuna-dashboard", "rddlrepository>=3.0"]
 dashboard = ["dash>=4.0.0", "dash-bootstrap-components>=2.0.4"]
 
 [project.urls]
